@@ -331,27 +331,44 @@ enum CompressionExecutor {
         var repacked = 0
         var savedRepack = 0
         try StageTimer.run(stageTimer, .jpegRepackMs) {
-        for resource in resources where resource.terminalFilter == .dct
-                                            && resource.unknownFilters.isEmpty
-                                            && resource.filters == [.dct] {
-            if let isCancelled, isCancelled() { throw CancellationError() }
-            if plan.action(for: resource.objectID)?.transformsImage == true { continue }
-            guard let original = document.imageStreamData(objectID: resource.objectID,
-                                                          decoded: false) else { continue }
-            guard case .repacked(let data) = JPEGEncoder.repack(
-                original, progressive: repackProgressive) else { continue }
-            // Ein Verweigern der Bridge ist hier kein Planfehler, sondern
-            // Teil der Sicherheitsleiter: Dann bleiben die Originalbytes.
-            do {
-                try document.replaceImageStreamBytes(objectID: resource.objectID,
-                                                     data: data)
-                repacked += 1
-                // Gemessenes Stream-Delta – nie negativ (Never-Grow).
-                savedRepack += max(0, original.count - data.count)
-            } catch PDFCoreError.checkFailed, PDFCoreError.internalError {
-                continue
+            // Drei Schritte (2026-10-13): Bytes seriell lesen, das reine
+            // Umpacken parallel rechnen, seriell und in Dokumentreihenfolge
+            // anwenden. Vorher lief alles nacheinander – bei 180 Folienbildern
+            // rund eine Sekunde auf einem Kern. Das Ergebnis ist dasselbe:
+            // Jeder Strom wird für sich umgepackt, die Reihenfolge der
+            // Dokument-Eingriffe bleibt unverändert.
+            var pending: [(resource: PDFImageResource, original: Data)] = []
+            for resource in resources where resource.terminalFilter == .dct
+                                                && resource.unknownFilters.isEmpty
+                                                && resource.filters == [.dct] {
+                if let isCancelled, isCancelled() { throw CancellationError() }
+                if plan.action(for: resource.objectID)?.transformsImage == true { continue }
+                guard let original = document.imageStreamData(objectID: resource.objectID,
+                                                              decoded: false) else { continue }
+                pending.append((resource, original))
             }
-        }
+            let originals = pending.map(\.original)
+            let results: [Data?] = ParallelWork.map(count: originals.count) { index in
+                if let isCancelled, isCancelled() { return nil }
+                guard case .repacked(let data) = JPEGEncoder.repack(
+                    originals[index], progressive: repackProgressive) else { return nil }
+                return data
+            }
+            if let isCancelled, isCancelled() { throw CancellationError() }
+            for (entry, result) in zip(pending, results) {
+                guard let data = result else { continue }
+                // Ein Verweigern der Bridge ist hier kein Planfehler, sondern
+                // Teil der Sicherheitsleiter: Dann bleiben die Originalbytes.
+                do {
+                    try document.replaceImageStreamBytes(objectID: entry.resource.objectID,
+                                                         data: data)
+                    repacked += 1
+                    // Gemessenes Stream-Delta – nie negativ (Never-Grow).
+                    savedRepack += max(0, entry.original.count - data.count)
+                } catch PDFCoreError.checkFailed, PDFCoreError.internalError {
+                    continue
+                }
+            }
         }
 
         // Phase 3-Followup – Zopfli-Repack großer Flate-Streams, NUR im

@@ -30,6 +30,8 @@ struct PDFToolsApp: App {
     @StateObject var updateChecker = UpdateChecker()
 
     init() {
+        // Messlauf ohne Oberfläche (`--bench …`): beendet den Prozess selbst.
+        BenchmarkMode.runIfRequested()
         // Temp-Bild-PDFs früherer Sessions wegwerfen (Review P0.4);
         // Dateien der laufenden Session entstehen erst nach diesem Punkt.
         ImageImporter.cleanupStaleImports()

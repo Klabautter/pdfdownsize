@@ -441,14 +441,18 @@ enum MRCPageRewriter {
         }
         guard !resourceName.isEmpty else { return nil }
 
-        var candidates: [PreparedMRCCandidate] = []
-        for rung in rungs {
-            if let isCancelled, isCancelled() { throw CancellationError() }
+        // Die Stufen sind voneinander unabhängig (eigene Ebenen, eigenes
+        // Scratch-Dokument für die Seiten-QA) – sie laufen parallel und
+        // werden in Leiterreihenfolge eingesammelt (2026-10-13). Vorher
+        // nacheinander: Ein einseitiger Scan nutzte hier nur einen Kern.
+        let prepared: [PreparedMRCCandidate?] = ParallelWork.map(count: rungs.count) { index in
+            if let isCancelled, isCancelled() { return nil }
+            let rung = rungs[index]
             let rungStart = ContinuousClock.now
             guard let layers = MRCEncoder.encodeLayers(
                 segmentation: segmentation, mask: mask, rung: rung,
-                sourceDPI: sourceDPI) else { continue }
-            guard layers.totalBytes < originalBytes else { continue }
+                sourceDPI: sourceDPI) else { return nil }
+            guard layers.totalBytes < originalBytes else { return nil }
 
             let descriptor = buildDescriptor(
                 pageIndex: pageIndex, objectID: objectID,
@@ -465,17 +469,19 @@ enum MRCPageRewriter {
                                    resourceName: resourceName,
                                    descriptor: descriptor, bundle: bundle)
             }
-            guard let quality, quality.meetsScanLimits else { continue }
+            guard let quality, quality.meetsScanLimits else { return nil }
             let runtimeMs = stageMs(since: rungStart)
 
-            candidates.append(PreparedMRCCandidate(
+            return PreparedMRCCandidate(
                 candidate: candidate(descriptor: descriptor, rung: rung,
                                      bundleBytes: bundle.count,
                                      originalBytes: originalBytes,
                                      quality: quality, runtimeMs: runtimeMs,
                                      workingBytes: Int64(rasterSize.pixelCount) * 6),
-                bundle: bundle))
+                bundle: bundle)
         }
+        if let isCancelled, isCancelled() { throw CancellationError() }
+        let candidates = prepared.compactMap { $0 }
         return candidates.isEmpty
             ? nil : MRCProvision(resourceID: resourceID, pageIndex: pageIndex,
                                  candidates: candidates)

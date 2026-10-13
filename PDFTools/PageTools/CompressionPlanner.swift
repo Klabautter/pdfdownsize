@@ -584,6 +584,8 @@ enum CompressionPlanner {
             DispatchQueue(label: "pdftools.candidates.\(index)",
                           qos: .userInitiated).async {
                 defer { slots.signal(); group.leave(); lease.release() }
+                ParallelWork.Slots.enter()
+                defer { ParallelWork.Slots.leave() }
                 do {
                     if let isCancelled, isCancelled() { throw CancellationError() }
                     let generated: CandidateGenerator.Generated = autoreleasepool {

@@ -140,7 +140,7 @@ enum BracketedJPEGSearch {
                     anchorCheck: AnchorCheck? = nil) -> [JPEGSearchRung] {
         let evaluator = makeEvaluator(reference: reference, sourceSample: sourceSample)
         let prepared = JPEGEncoder.preparePixels(reference)
-        return run(policy: policy) { quality in
+        let evaluateOne: @Sendable (Double) -> JPEGSearchRung? = { quality in
             let start = ContinuousClock.now
             guard let (data, decoded, comparison) = encodeAndCompare(
                 reference, quality: quality, backend: backend,
@@ -177,6 +177,42 @@ enum BracketedJPEGSearch {
                                   perceptualScore: perceptual,
                                   passed: passed,
                                   runtimeMs: stageMs(since: start))
+        }
+
+        // Vorausrechnen (2026-10-13): Die Suche fragt ihre Qualitätsstufen
+        // nacheinander ab. Sind Kerne frei (`ParallelWork.Slots`), werden
+        // die Stufen, die sie als Nächstes brauchen KANN, gleichzeitig
+        // gerechnet und bereitgelegt. Welche Stufen in die Suche eingehen
+        // und in welcher Reihenfolge, entscheidet weiter allein
+        // `run(policy:evaluate:)` – das Ergebnis ist dasselbe wie ohne
+        // Vorausrechnen; nicht gebrauchte Stufen werden verworfen.
+        guard case .bracketed(let low, let high, _, _, _) = policy,
+              max(low, high) > min(low, high) else {
+            return run(policy: policy, evaluate: evaluateOne)
+        }
+        let qLow = min(low, high), qHigh = max(low, high)
+        var ready: [UInt64: JPEGSearchRung?] = [:]
+        func precompute(_ qualities: [Double]) {
+            let missing = qualities.filter { ready[$0.bitPattern] == nil }
+            guard missing.count > 1, ParallelWork.Slots.tryReserve(missing.count - 1) else { return }
+            defer { ParallelWork.Slots.release(missing.count - 1) }
+            let results = ParallelWork.map(count: missing.count, limit: missing.count) {
+                evaluateOne(missing[$0])
+            }
+            for (quality, result) in zip(missing, results) { ready[quality.bitPattern] = result }
+        }
+        let firstMid = (qLow + qHigh) / 2
+        return run(policy: policy) { quality in
+            if ready[quality.bitPattern] == nil {
+                if quality == qHigh {
+                    precompute([qHigh, qLow])
+                } else if quality == firstMid, (qHigh - qLow) > minimumInterval {
+                    // Erste Halbierung samt beider möglichen Folgestufen.
+                    precompute([firstMid, (qLow + firstMid) / 2, (firstMid + qHigh) / 2])
+                }
+            }
+            if let known = ready[quality.bitPattern] { return known }
+            return evaluateOne(quality)
         }
     }
 
