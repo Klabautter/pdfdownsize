@@ -4,6 +4,14 @@ A native macOS app that makes PDFs smaller — and handles the everyday PDF chor
 
 The interface is German when macOS is set to German and English otherwise.
 
+![Compress: a 31 MB map shrinks by 76 % – with a before/after slider](docs/compress.jpg)
+
+| Organize pages | Make scans searchable |
+|---|---|
+| ![Organize: page grid with selection bar](docs/organize.jpg) | ![OCR: recognized text next to the scanned page](docs/ocr.jpg) |
+
+<sub>Screenshots show public-domain documents (a USGS topographic map and a NASA technical report) and a generated test page.</sub>
+
 ## What it does
 
 - **Compress** – four modes: *Small* (for sending), *Smart* (recommended, hard to tell from the original on screen), *Quality* (keeps print resolution) and *Custom* (set resolution, JPEG quality and technique yourself). Shows an estimate before the run, supports a target size, a before/after comparison and batch compression of several PDFs.
