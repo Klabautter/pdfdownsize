@@ -54,6 +54,24 @@ struct EditTests {
         #expect(vm.project.documents.count == 1)
     }
 
+    // „Alle entfernen" (2026-10-13): Arbeitsbereich leer, ohne offene
+    // Änderungen, Auswahl weg – und per Widerrufen vollständig zurück.
+    @Test func removeAllEmptiesWorkspaceAndIsUndoable() async throws {
+        let (vm, undo) = try await Self.makeImportedVM(pageCountPerFile: 3)
+        vm.selectAll()
+        vm.rotateSelectedPages(by: 90)
+
+        vm.removeAllDocuments()
+        #expect(vm.project.documents.isEmpty)
+        #expect(vm.project.pages.isEmpty)
+        #expect(vm.selectedPageIDs.isEmpty)
+        #expect(!vm.hasChanges, "leerer Arbeitsbereich meldet offene Änderungen")
+
+        undo.undo()
+        #expect(vm.project.totalPages == 3)
+        #expect(vm.project.pages.allSatisfy { $0.rotation == 90 })
+    }
+
     // Reset stellt den Import-Zustand wieder her und ist selbst rückgängig machbar (§31).
     @Test func resetRestoresBaselineAndIsUndoable() async throws {
         let (vm, undo) = try await Self.makeImportedVM(pageCountPerFile: 3)

@@ -253,8 +253,14 @@ enum CompressionEstimator {
         if let isCancelled, isCancelled() { return nil }
         let original = Compressor.fileSize(of: url)
         let imageBytes = resources.reduce(Int64(0)) { $0 + Int64(max($1.encodedByteCount, 0)) }
+        // Nicht-Bild-Anteil: für textlastige, nicht zu große Dateien GEMESSEN
+        // (Probelauf des Struktur-Passes), sonst das Pauschalmodell.
+        let measuredStructure = StructureTrial.retention(
+            url: url, original: original, imageBytes: imageBytes,
+            compatibility: options.compatibilityPolicy)
+        if let isCancelled, isCancelled() { return nil }
         let structural = Double(max(original - imageBytes, 0))
-            * min(document.structureProfile.structureRetention, 1.0)
+            * (measuredStructure ?? min(document.structureProfile.structureRetention, 1.0))
 
         var imagesOut = 0.0
         var oversized = 0
@@ -310,15 +316,29 @@ enum CompressionEstimator {
 
         let point = Int64(max(structural + imagesOut, 1).rounded())
         let clampedPoint = min(point, original)
+        // Das breite Band gehört zum Bildmodell. Ein gemessener Strukturanteil
+        // bekommt sein eigenes, enges Band – sonst verspricht die Anzeige bei
+        // reinen Textdokumenten Ersparnisse, die es nicht gibt.
+        let lowBytes: Int64
+        let highBytes: Int64
+        if measuredStructure != nil {
+            lowBytes = Int64(imagesOut * QuickModel.lowerBand
+                             + structural * StructureTrial.measuredLowerBand)
+            highBytes = Int64(imagesOut * QuickModel.upperBand
+                              + structural * StructureTrial.measuredUpperBand)
+        } else {
+            lowBytes = Int64(Double(point) * QuickModel.lowerBand)
+            highBytes = Int64(Double(point) * QuickModel.upperBand)
+        }
         let savings = original > 0 ? max(0, 1 - Double(clampedPoint) / Double(original)) : 0
         return CompressionEstimate(
             pageCount: document.pageCount,
             imageCount: resources.count,
             oversizedCount: oversized,
             maxEffectiveDPI: resources.compactMap(\.effectiveDPI).max(),
-            lowBytes: min(Int64(Double(point) * QuickModel.lowerBand), original),
+            lowBytes: min(lowBytes, original),
             pointBytes: clampedPoint,
-            highBytes: min(Int64(Double(point) * QuickModel.upperBand), original),
+            highBytes: min(highBytes, original),
             originalBytes: original,
             potential: CompressionEstimate.classifyPotential(savings: savings))
     }

@@ -197,18 +197,32 @@ private struct ControlPanel: View {
                             CustomSettingsPanel(viewModel: viewModel)
                         }
                     }
-                    sizeSection
+                    // In „Eigene" steht die Schätzung im festen Fuß über dem
+                    // Knopf: Sie bleibt beim Regeln sichtbar und nichts
+                    // verschiebt sich unter dem Zeiger (2026-10-13).
+                    if !estimateInFooter {
+                        sizeSection
+                    }
                     if finished == nil {
                         optionsSection
                     }
                 }
             case .action:
-                actionBar
+                VStack(alignment: .leading, spacing: 16) {
+                    if estimateInFooter {
+                        sizeSection
+                    }
+                    actionBar
+                }
             }
         }
         // Kein Fokusring um das Glas-Pult (sah „viereckig" aus, sobald ein
         // Bedienelement den Fokus hatte).
         .focusEffectDisabled()
+    }
+
+    private var estimateInFooter: Bool {
+        viewModel.mode == .custom && finished == nil
     }
 
     private var header: some View {

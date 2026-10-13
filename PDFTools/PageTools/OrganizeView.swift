@@ -135,6 +135,12 @@ struct OrganizeView: View {
                             Label("Änderungen zurücksetzen", systemImage: "arrow.counterclockwise")
                         }
                         .disabled(!vm.hasChanges || vm.isProcessing)
+                        Button(role: .destructive) {
+                            vm.removeAllDocuments()
+                        } label: {
+                            Label("Alle entfernen", systemImage: "xmark.circle")
+                        }
+                        .disabled(vm.isProcessing)
                     } label: {
                         Label("Weitere Aktionen", systemImage: "ellipsis.circle")
                     }

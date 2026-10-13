@@ -367,6 +367,19 @@ final class MergeViewModel: ObservableObject {
         selectedPageIDs.removeAll()
     }
 
+    /// Räumt den Arbeitsbereich: alle Dokumente und Seiten weg, zurück zur
+    /// Einstiegskarte. Rückgängig machbar – ein Fehlklick kostet nichts.
+    /// Vorher gab es dafür nur „Alle auswählen" plus „Löschen".
+    func removeAllDocuments() {
+        guard !isProcessing, !project.documents.isEmpty else { return }
+        performEdit(String(localized: "Alle entfernen"), syncBaseline: true) { p in
+            p.pages.removeAll()
+            p.documents.removeAll()
+        }
+        selectedPageIDs.removeAll()
+        errorMessage = nil
+    }
+
     /// Stellt den Import-Zustand wieder her – selbst rückgängig machbar (§21–§27).
     func resetChanges() {
         guard hasChanges else { return }

@@ -17,6 +17,8 @@ struct ToolWorkspace<Canvas: View, Panel: View, Footer: View>: View {
     @ViewBuilder let footer: () -> Footer
 
     @State private var panelHeight: CGFloat = 0
+
+    @State private var moreBelow = false
     @State private var footerHeight: CGFloat = 0
 
     var body: some View {
@@ -39,6 +41,25 @@ struct ToolWorkspace<Canvas: View, Panel: View, Footer: View>: View {
                             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { panelHeight = $0 }
                     }
                     .scrollBounceBehavior(.basedOnSize)
+                    // Kein sichtbarer Rollbalken im Glas-Pult (störte in
+                    // „Eigene"; der Inhalt bleibt rollbar).
+                    .scrollIndicators(.never)
+                    // Ohne Rollbalken zeigt ein weicher Rand, dass darunter
+                    // noch Inhalt folgt; am Ende der Liste verschwindet er.
+                    .onScrollGeometryChange(for: Bool.self) { geometry in
+                        geometry.contentSize.height - geometry.contentOffset.y
+                            - geometry.containerSize.height > 4
+                    } action: { _, more in
+                        moreBelow = more
+                    }
+                    .mask {
+                        VStack(spacing: 0) {
+                            Color.black
+                            LinearGradient(colors: [.black, .clear],
+                                           startPoint: .top, endPoint: .bottom)
+                                .frame(height: moreBelow ? 32 : 0)
+                        }
+                    }
                     .frame(height: panelHeight > 0 ? min(panelHeight, max(room, 120)) : nil)
                     footer()
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { footerHeight = $0 }

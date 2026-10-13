@@ -766,9 +766,14 @@ struct Compressor {
                                      flate: FlatePolicy) -> Process {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: qpdfPath)
+        // Ein- und Ausgabedatei gehören zum Aufruf. Bis 2026-10-13 fehlten
+        // sie hier: qpdf brach mit „an input file name is required" ab, und
+        // der Zwei-Write-Pfad (Kompatibilität „Maximal", Zopfli) lieferte
+        // still die unveränderte Eingabe zurück.
         process.arguments = structurePassArguments(
             linearize: linearize,
             objectStreamsDisabled: compatibility == .maximum)
+            + [input.path, output.path]
         if let environment = structurePassEnvironment(flate: flate,
                                                       compatibility: compatibility) {
             process.environment = environment
