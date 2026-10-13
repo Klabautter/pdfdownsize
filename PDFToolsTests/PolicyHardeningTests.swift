@@ -133,7 +133,7 @@ struct PolicyHardeningTests {
             let attrs = (doc.documentAttributes ?? [:]) as? [PDFDocumentAttribute: Any]
             producers.append(attrs?[.producerAttribute] as? String)
         }
-        #expect(producers.allSatisfy { $0 == "PDFTools" })
+        #expect(producers.allSatisfy { $0 == "PDFdownsize" })
         #expect(producers[0] == producers[1])
     }
 

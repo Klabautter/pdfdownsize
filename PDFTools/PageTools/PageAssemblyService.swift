@@ -128,7 +128,7 @@ enum PageAssemblyService {
                                 plan: plan,
                                 doc: core)
             }
-            core.setProducer("PDFTools")
+            core.setProducer(Compressor.producerName)
             try core.save(to: outputURL)
         } catch {
             // Metadata/Labels sind optional – Assembly selbst bleibt gültig.
@@ -143,7 +143,7 @@ enum PageAssemblyService {
         // [AnyHashable:Any] – explizit auf den getypten Key casten.
         var attrs = (doc.documentAttributes ?? [:])
             as? [PDFDocumentAttribute: Any] ?? [:]
-        attrs[.producerAttribute] = "PDFTools"
+        attrs[.producerAttribute] = Compressor.producerName
         doc.documentAttributes = attrs
         _ = doc.write(to: url)
     }

@@ -883,6 +883,10 @@ struct Compressor {
             atPath: url.resolvingSymlinksInPath().path)[.size] as? Int64) ?? 0
     }
 
+    /// Producer-Vermerk in jeder erzeugten PDF – eine Stelle für alle
+    /// Schreibwege. Bis 1.0.2 „PDFTools" (der Arbeitsname des Projekts).
+    static let producerName = "PDFdownsize"
+
     static func suggestedOutputName(for inputURL: URL?,
                                       mode: CompressionMode = .small) -> String {
         guard let inputURL else { return "\(String(localized: "Dokument"))_\(CompressionMode.small.filenameSuffix).pdf" }

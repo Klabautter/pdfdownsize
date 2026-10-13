@@ -530,7 +530,7 @@ enum CompressionExecutor {
         }
 
         // Producer als LETZTER Schritt, damit er auch nach dem Strippen steht.
-        activeDocument.setProducer("PDFTools")
+        activeDocument.setProducer(Compressor.producerName)
 
         // Phase V2-1 §7.7 – Isolation-Stufe nach Metadaten/Producer.
         if let isolation {

@@ -16,7 +16,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 NOTES="${1:-}"
 REPO="Klabautter/pdfdownsize"
-DERIVED="${PDFDOWNSIZE_DERIVED_DATA:-$ROOT/tmp/release-build}"
+# „.noindex": Spotlight (und damit Alfred, Launchpad-Suche) übergeht den
+# Ordner – sonst taucht die gebaute App als zweite PDFdownsize-App auf.
+DERIVED="${PDFDOWNSIZE_DERIVED_DATA:-$ROOT/tmp/release-build.noindex}"
 
 echo "→ Baue Release …"
 xcodebuild build -project PDFTools.xcodeproj -scheme PDFTools \

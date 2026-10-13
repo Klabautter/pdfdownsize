@@ -57,7 +57,7 @@ struct PrototypeCompressionTests {
 
         let attrs = (PDFDocument(url: out)?.documentAttributes ?? [:])
             as? [PDFDocumentAttribute: Any]
-        #expect(attrs?[.producerAttribute] as? String == "PDFTools")
+        #expect(attrs?[.producerAttribute] as? String == "PDFdownsize")
     }
 
     @Test func smallPhotoBelowThresholdIsAlreadyOptimized() async throws {

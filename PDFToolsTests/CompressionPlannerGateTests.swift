@@ -369,7 +369,7 @@ import PDFKit
         let stripped = try #require(PDFDocument(url: stripOut))
         let attributes = (stripped.documentAttributes ?? [:]) as? [PDFDocumentAttribute: Any]
         #expect(attributes?[.titleAttribute] == nil, "Titel wurde nicht entfernt")
-        #expect(attributes?[.producerAttribute] as? String == "PDFTools",
+        #expect(attributes?[.producerAttribute] as? String == "PDFdownsize",
                 "Deterministischer Producer fehlt")
 
         // Seiten und Text bleiben in beiden Fällen erhalten.
