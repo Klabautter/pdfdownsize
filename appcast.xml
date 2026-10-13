@@ -5,13 +5,13 @@
     <link>https://github.com/Klabautter/pdfdownsize</link>
     <item>
       <title>Version 1.0.2</title>
-      <pubDate>Tue, 13 Oct 2026 20:31:47 +0000</pubDate>
+      <pubDate>Tue, 13 Oct 2026 22:24:52 +0000</pubDate>
       <sparkle:version>3</sparkle:version>
       <sparkle:shortVersionString>1.0.2</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[PDFdownsize now updates itself: new versions are downloaded, verified and installed from within the app.]]></description>
+      <description><![CDATA[PDFdownsize now updates itself. Scans compress about twice as fast, other documents a little faster. Organize got Remove All, and the estimate for text-heavy PDFs is measured instead of guessed.]]></description>
       <enclosure url="https://github.com/Klabautter/pdfdownsize/releases/download/v1.0.2/PDFdownsize-1.0.2.zip"
-                 sparkle:edSignature="0WwKGheTInoC2dI37RKmXI0KuAWQydl/uHL5wTuiin1WVHYljndp4miknDBxDlj2ydodRzBoc4tbTLLbsFV4AQ==" length="10324696" type="application/octet-stream"/>
+                 sparkle:edSignature="rFaqsa57+vISk7YJ4z70/0erO9+AFUN9BMtawUeUi2IK5WeTHdvuqawqOquE8Mu1Jqpbxj45+F9ZHGtEruKIDw==" length="10362690" type="application/octet-stream"/>
     </item>
   </channel>
 </rss>
