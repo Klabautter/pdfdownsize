@@ -1,0 +1,4 @@
+module pdfcore {
+    header "pdfcore/pdfcore.h"
+    export *
+}

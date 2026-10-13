@@ -1,0 +1,23 @@
+PDFdownsize
+Copyright 2026 Linus
+
+Lizenz: Apache License 2.0 (siehe LICENSE).
+
+Eingebettete Drittkomponenten (alle permissiv lizenziert, keine Copyleft-
+Bedingungen); die vollständigen Lizenztexte und Hinweise liegen unter
+Vendor/<komponente>/ und werden ins App-Bundle kopiert
+(Contents/Resources, geprüft von Scripts/release-check.sh):
+
+- qpdf 12.4.0 – Apache License 2.0 (Vendor/qpdf/LICENSE-qpdf.txt, NOTICE-qpdf.md)
+- zopfli – Apache License 2.0 (Vendor/qpdf/LICENSE-zopfli.txt)
+- libjpeg-turbo / mozjpeg – BSD-3-Clause, IJG, zlib (Vendor/mozjpeg/LICENSE-mozjpeg.md, Vendor/qpdf/LICENSE-libjpeg-*.md)
+- OpenJPEG – BSD-2-Clause (Vendor/openjpeg/NOTICE-openjpeg.md)
+- HarfBuzz – „Old MIT" (Vendor/harfbuzz/NOTICE-harfbuzz.md)
+- libtiff – libtiff/BSD-artig (Vendor/libtiff/NOTICE-libtiff.md)
+- jbig2enc – Apache License 2.0 (Vendor/jbig2enc/NOTICE-jbig2enc.md)
+
+Testkorpora sind NICHT Teil dieses Repositories: Die Manifeste unter
+PDF_Corpus_System (neben dem Projekt) nennen Quelle, URL, SHA-256 und Lizenz
+je Datei; wissenschaftliche Paper (arXiv, CVPR), der IPCC-Bericht und
+Buchscans unterliegen dem Urheberrecht ihrer Autoren und werden nicht
+weiterverbreitet.

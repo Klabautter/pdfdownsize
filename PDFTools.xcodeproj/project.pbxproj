@@ -1,0 +1,569 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXContainerItemProxy section */
+		1569B5293039A2D700458830 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1569B4FB3039A2D700458830 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1569B5023039A2D700458830;
+			remoteInfo = PDFTools;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		1569B5033039A2D700458830 /* PDFdownsize.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PDFdownsize.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		1569B5213039A2D700458830 /* PDFToolsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PDFToolsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		1569B5053039A2D700458830 /* PDFTools */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = PDFTools;
+			sourceTree = "<group>";
+		};
+		1569B5203039A2D700458830 /* PDFToolsTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = PDFToolsTests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		1569B5003039A2D700458830 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1569B5243039A2D700458830 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		1569B4FA3039A2D700458830 = {
+			isa = PBXGroup;
+			children = (
+				1569B5053039A2D700458830 /* PDFTools */,
+				1569B5203039A2D700458830 /* PDFToolsTests */,
+				1569B5043039A2D700458830 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		1569B5043039A2D700458830 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				1569B5033039A2D700458830 /* PDFdownsize.app */,
+				1569B5213039A2D700458830 /* PDFToolsTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1569B5023039A2D700458830 /* PDFTools */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1569B50E3039A2D700458830 /* Build configuration list for PBXNativeTarget "PDFTools" */;
+			buildPhases = (
+				1569B4FF3039A2D700458830 /* Sources */,
+				1569B5003039A2D700458830 /* Frameworks */,
+				1569B5013039A2D700458830 /* Resources */,
+				1569B52B3039A2D700458830 /* EmbedVendorQPDF */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				1569B5053039A2D700458830 /* PDFTools */,
+			);
+			name = PDFTools;
+			packageProductDependencies = (
+			);
+			productName = PDFTools;
+			productReference = 1569B5033039A2D700458830 /* PDFdownsize.app */;
+			productType = "com.apple.product-type.application";
+		};
+		1569B5223039A2D700458830 /* PDFToolsTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1569B5263039A2D700458830 /* Build configuration list for PBXNativeTarget "PDFToolsTests" */;
+			buildPhases = (
+				AA10SRCSNAP0000000000001 /* Quellabzug für Gate-Tests */,
+				1569B5233039A2D700458830 /* Sources */,
+				1569B5243039A2D700458830 /* Frameworks */,
+				1569B5253039A2D700458830 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				1569B52A3039A2D700458830 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				1569B5203039A2D700458830 /* PDFToolsTests */,
+			);
+			name = PDFToolsTests;
+			packageProductDependencies = (
+			);
+			productName = PDFToolsTests;
+			productReference = 1569B5213039A2D700458830 /* PDFToolsTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		1569B4FB3039A2D700458830 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2660;
+				LastUpgradeCheck = 2660;
+				TargetAttributes = {
+					1569B5023039A2D700458830 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					1569B5223039A2D700458830 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 1569B5023039A2D700458830;
+					};
+				};
+			};
+			buildConfigurationList = 1569B4FE3039A2D700458830 /* Build configuration list for PBXProject "PDFTools" */;
+			developmentRegion = de;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				de,
+				en,
+				Base,
+			);
+			mainGroup = 1569B4FA3039A2D700458830;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 1569B5043039A2D700458830 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				1569B5023039A2D700458830 /* PDFTools */,
+				1569B5223039A2D700458830 /* PDFToolsTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		1569B5013039A2D700458830 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1569B5253039A2D700458830 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		1569B52B3039A2D700458830 /* EmbedVendorQPDF */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Scripts/embed-release-evidence.sh",
+				"$(SRCROOT)/Scripts/release-acceptance.plist",
+				"$(SRCROOT)/Vendor/qpdf/qpdf",
+				"$(SRCROOT)/Vendor/qpdf/LICENSE-qpdf.txt",
+				"$(SRCROOT)/Vendor/qpdf/NOTICE-qpdf.md",
+				"$(SRCROOT)/Vendor/qpdf/LICENSE-libjpeg-turbo.md",
+				"$(SRCROOT)/Vendor/qpdf/LICENSE-libjpeg-mozjpeg.md",
+				"$(SRCROOT)/Vendor/qpdf/LICENSE-zopfli.txt",
+				"$(SRCROOT)/Vendor/mozjpeg/LICENSE-mozjpeg.md",
+				"$(SRCROOT)/Vendor/mozjpeg/NOTICE-mozjpeg.md",
+				"$(SRCROOT)/Vendor/jbig2enc/NOTICE-jbig2enc.md",
+				"$(SRCROOT)/Vendor/libtiff/NOTICE-libtiff.md",
+				"$(SRCROOT)/Vendor/openjpeg/NOTICE-openjpeg.md",
+				"$(SRCROOT)/Vendor/harfbuzz/NOTICE-harfbuzz.md",
+			);
+			name = EmbedVendorQPDF;
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/qpdf",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/release-acceptance.plist",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/LICENSE-qpdf.txt",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/NOTICE-qpdf.md",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/LICENSE-libjpeg-turbo.md",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/LICENSE-libjpeg-mozjpeg.md",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/LICENSE-zopfli.txt",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/LICENSE-mozjpeg.md",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/NOTICE-mozjpeg.md",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/NOTICE-jbig2enc.md",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/NOTICE-libtiff.md",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/NOTICE-openjpeg.md",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/NOTICE-harfbuzz.md",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\nSRC=\"${SRCROOT}/Vendor/qpdf/qpdf\"\nDEST=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Helpers\"\nmkdir -p \"$DEST\"\ncp -f \"$SRC\" \"$DEST/qpdf\"\nchmod u+x \"$DEST/qpdf\"\n/bin/sh \"${SRCROOT}/Scripts/embed-release-evidence.sh\"\n";
+		};
+		AA10SRCSNAP0000000000001 /* Quellabzug für Gate-Tests */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/PDFTools/CompressionEngineState.swift",
+				"$(SRCROOT)/PDFTools/Compressor.swift",
+				"$(SRCROOT)/PDFTools/CompressionEstimator.swift",
+				"$(SRCROOT)/PDFTools/PageTools/PageAssemblyService.swift",
+				"$(SRCROOT)/PDFTools/PageTools/MergeViewModel.swift",
+				"$(SRCROOT)/PDFTools/CompressionViewModel.swift",
+				"$(SRCROOT)/PDFTools/PageTools/CompressionOptions.swift",
+				"$(SRCROOT)/PDFToolsTests/CorpusRunnerCore.swift",
+				"$(SRCROOT)/Scripts/release-check.sh",
+			);
+			name = "Quellabzug für Gate-Tests";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/SourceSnapshot/PDFTools/CompressionEngineState.swift",
+				"$(BUILT_PRODUCTS_DIR)/SourceSnapshot/PDFTools/Compressor.swift",
+				"$(BUILT_PRODUCTS_DIR)/SourceSnapshot/PDFTools/CompressionEstimator.swift",
+				"$(BUILT_PRODUCTS_DIR)/SourceSnapshot/PDFTools/PageTools/PageAssemblyService.swift",
+				"$(BUILT_PRODUCTS_DIR)/SourceSnapshot/PDFTools/PageTools/MergeViewModel.swift",
+				"$(BUILT_PRODUCTS_DIR)/SourceSnapshot/PDFTools/CompressionViewModel.swift",
+				"$(BUILT_PRODUCTS_DIR)/SourceSnapshot/PDFTools/PageTools/CompressionOptions.swift",
+				"$(BUILT_PRODUCTS_DIR)/SourceSnapshot/PDFToolsTests/CorpusRunnerCore.swift",
+				"$(BUILT_PRODUCTS_DIR)/SourceSnapshot/Scripts/release-check.sh",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Kopiert die Quellen, die Gate-Tests im Klartext prüfen, in das\n# Build-Verzeichnis.\n#\n# Grund: Der Test-Host ist eine sandboxed App. Liegt das Projekt unter\n# ~/Desktop (TCC-geschützt), BLOCKIERT jeder Lesezugriff des Testprozesses\n# darauf, statt zu scheitern - gemessen: Lesen aus $TMPDIR 0.001 s, Lesen\n# derselben Datei unter ~/Desktop lief in das Zeitlimit. Ohne Zeitlimit\n# hielt das die gesamte Suite an, ohne eine einzige Meldung.\n#\n# BUILT_PRODUCTS_DIR liegt in DerivedData unter ~/Library und ist nicht\n# TCC-geschützt. Die Kopie entsteht bei jedem Bau neu und ist damit\n# immer der Stand, der auch kompiliert wurde.\nset -e\nDEST=\"$BUILT_PRODUCTS_DIR/SourceSnapshot\"\nmkdir -p \"$DEST/PDFTools/PageTools\" \"$DEST/Scripts\"\ncd \"$SRCROOT\"\nfor f in PDFTools/CompressionEngineState.swift PDFTools/Compressor.swift \\\n         PDFTools/CompressionEstimator.swift \\\n         PDFTools/PageTools/PageAssemblyService.swift \\\n         PDFTools/PageTools/MergeViewModel.swift \\\n         PDFTools/CompressionViewModel.swift \\\n         PDFTools/PageTools/CompressionOptions.swift; do\n    [ -f \"$f\" ] && cp \"$f\" \"$DEST/$f\"\ndone\ncp Scripts/release-check.sh \"$DEST/Scripts/\" 2>/dev/null || true\n# Der CorpusRunner steht im Testziel, wird aber im Klartext geprueft:\n# Er darf keine eigenen Kompressionspresets mehr bauen (Plan 2.3).\nmkdir -p \"$DEST/PDFToolsTests\"\ncp PDFToolsTests/CorpusRunnerCore.swift \"$DEST/PDFToolsTests/\" 2>/dev/null || true\nchmod +x \"$DEST/Scripts/release-check.sh\" 2>/dev/null || true\nexit 0\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		1569B4FF3039A2D700458830 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1569B5233039A2D700458830 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		1569B52A3039A2D700458830 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1569B5023039A2D700458830 /* PDFTools */;
+			targetProxy = 1569B5293039A2D700458830 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		1569B50C3039A2D700458830 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		1569B50D3039A2D700458830 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		1569B50F3039A2D700458830 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				GENERATE_INFOPLIST_FILE = YES;
+				DEVELOPMENT_LANGUAGE = en;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Vendor/pdfcore/lib";
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-lpdfcore_universal",
+					"-lc++",
+					"-lz",
+					"-ljpeg_universal",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.klabautter.pdfdownsize;
+				PRODUCT_MODULE_NAME = PDFTools;
+				PRODUCT_NAME = PDFdownsize;
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = Nonisolated;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Vendor/pdfcore/include";
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		1569B5103039A2D700458830 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				GENERATE_INFOPLIST_FILE = YES;
+				DEVELOPMENT_LANGUAGE = en;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Vendor/pdfcore/lib";
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-lpdfcore_universal",
+					"-lc++",
+					"-lz",
+					"-ljpeg_universal",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.klabautter.pdfdownsize;
+				PRODUCT_MODULE_NAME = PDFTools;
+				PRODUCT_NAME = PDFdownsize;
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = Nonisolated;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Vendor/pdfcore/include";
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		1569B5273039A2D700458830 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Vendor/pdfcore/lib";
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-lpdfcore_universal",
+					"-lc++",
+					"-lz",
+					"-ljpeg_universal",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.klabautter.pdfdownsizeTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Vendor/pdfcore/include";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PDFdownsize.app/Contents/MacOS/PDFdownsize";
+			};
+			name = Debug;
+		};
+		1569B5283039A2D700458830 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Vendor/pdfcore/lib";
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-lpdfcore_universal",
+					"-lc++",
+					"-lz",
+					"-ljpeg_universal",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.klabautter.pdfdownsizeTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Vendor/pdfcore/include";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PDFdownsize.app/Contents/MacOS/PDFdownsize";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1569B4FE3039A2D700458830 /* Build configuration list for PBXProject "PDFTools" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1569B50C3039A2D700458830 /* Debug */,
+				1569B50D3039A2D700458830 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1569B50E3039A2D700458830 /* Build configuration list for PBXNativeTarget "PDFTools" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1569B50F3039A2D700458830 /* Debug */,
+				1569B5103039A2D700458830 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1569B5263039A2D700458830 /* Build configuration list for PBXNativeTarget "PDFToolsTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1569B5273039A2D700458830 /* Debug */,
+				1569B5283039A2D700458830 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 1569B4FB3039A2D700458830 /* Project object */;
+}

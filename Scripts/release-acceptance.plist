@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>accepted</key>
+	<false/>
+	<key>blockers</key>
+	<array>
+		<string>Native Sichtabnahme in der laufenden App durch den Projektinhaber: OCR v2 (unsichtbare Textebene) und die UI-Politur vom 2026-10-09/10 (Holdout-, Core-235-Lauf und Render-QC liegen vor: benchmark/compression-smoke/*-holdout-v1, *-core235-final)</string>
+		<string>Universal-Release auf sauberer Maschine prüfen, signieren und notarisieren (keine Codesigning-Identität auf dem Entwicklungsrechner)</string>
+	</array>
+	<key>plan</key>
+	<string>FEATURE_FREEZE_PLAN_2026-09-28</string>
+</dict>
+</plist>

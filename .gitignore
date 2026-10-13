@@ -1,0 +1,40 @@
+.DS_Store
+tmp/
+bench/
+Benchmarks/adhoc/
+benchmark/compression-smoke/*/outputs/
+*.xcresult
+xcuserdata/
+benchmark/v2-certification/*/outputs/
+benchmark/mrc-certification/*/outputs/
+
+# Open-Source-Hygiene (2026-10-10): keine Test-PDFs, keine Laufausgaben, keine
+# Python-Artefakte im Repo – die Manifeste (JSON/CSV/MD) bleiben versioniert.
+benchmark/**/outputs/
+benchmark/**/*.pdf
+benchmark/**/*.pdf.*
+Scripts/__pycache__/
+__pycache__/
+*.pyc
+.venv/
+*.dmg
+*.zip
+
+# Veröffentlichung (2026-10-13): Messläufe, Bildschirmfotos und interne
+# Arbeitsdokumente bleiben lokal und gehören nicht ins öffentliche Repo.
+benchmark/
+Benchmarks/
+benchmark_results.csv
+AGENTS.md
+COMPRESSION_PARSER_MAPPING.md
+COMPRESSION_ROADMAP.md
+COMPRESSION_V2_MASTERPLAN.md
+ENGINEERING_PROGRESS.md
+FEATURE_FREEZE_PLAN_2026-09-28.md
+PDF_CORE_BASELINE.md
+PDF_CORE_COMPATIBILITY_REPORT.md
+RELEASE_READINESS.md
+REPO_ANALYSE_2026-09-05.md
+REVIEW_2026-09-26.md
+REVIEW_2026-10-09.md
+*.profraw

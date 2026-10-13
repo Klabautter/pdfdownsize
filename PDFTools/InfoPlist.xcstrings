@@ -1,0 +1,38 @@
+{
+  "sourceLanguage": "de",
+  "version": "1.0",
+  "strings": {
+    "CFBundleDisplayName": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PDFdownsize"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PDFdownsize"
+          }
+        }
+      }
+    },
+    "CFBundleName": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PDFdownsize"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PDFdownsize"
+          }
+        }
+      }
+    }
+  }
+}
