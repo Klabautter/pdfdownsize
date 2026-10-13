@@ -65,12 +65,13 @@ extension PDFToolsApp {
         // keine Hilfeseite; der Eintrag „PDFTools-Hilfe" führte ins Leere.
         CommandGroup(replacing: .help) { }
 
-        // App-Menü: Update-Hinweis (2026-10-13). Die Abfrage ist die einzige
+        // App-Menü: Updates über Sparkle. Die Abfrage ist die einzige
         // Netzverbindung der App und hier abschaltbar.
         CommandGroup(after: .appInfo) {
             Button("Nach Updates suchen …") {
-                Task { await updateChecker.checkManually() }
+                updateChecker.checkForUpdates()
             }
+            .disabled(!updateChecker.canCheck)
             Toggle("Automatisch nach Updates suchen",
                    isOn: $updateChecker.checksAutomatically)
         }

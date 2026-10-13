@@ -38,7 +38,6 @@ struct RootView: View {
     @StateObject private var conversionVM = ConversionViewModel()
     @StateObject private var ocrVM = OCRViewModel()
     @StateObject private var discardGuard = DiscardGuard()
-    @EnvironmentObject private var updateChecker: UpdateChecker
 
     /// „Öffnen mit"/Dock liefert mehrere Dateien als EINZELNE Ereignisse
     /// kurz nacheinander. Sie werden gesammelt und als ein Stapel geroutet –
@@ -62,9 +61,6 @@ struct RootView: View {
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 200, max: 260)
             .listStyle(.sidebar)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                UpdateNotice(checker: updateChecker)
-            }
         } detail: {
             switch selectedTool {
             case .compress:
@@ -105,42 +101,6 @@ struct RootView: View {
         .focusedSceneObject(discardGuard)
         .environmentObject(discardGuard)
         .discardConfirmation(discardGuard)
-        .task {
-            // Nicht im Testlauf: Tests sollen nie ins Netz greifen.
-            guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
-            await updateChecker.checkOnLaunch()
-        }
-        .alert(updateAlertTitle, isPresented: updateAlertShown) {
-            if case .available(let release) = updateChecker.manualResult {
-                Button("Zur Download-Seite") { NSWorkspace.shared.open(release.page) }
-                Button("Abbrechen", role: .cancel) { }
-            } else {
-                Button("OK", role: .cancel) { }
-            }
-        } message: {
-            Text(updateAlertMessage)
-        }
-    }
-
-    private var updateAlertShown: Binding<Bool> {
-        Binding(get: { updateChecker.manualResult != nil },
-                set: { if !$0 { updateChecker.manualResult = nil } })
-    }
-
-    private var updateAlertTitle: String {
-        switch updateChecker.manualResult {
-        case .available(let release): String(localized: "Version \(release.version) verfügbar")
-        case .failed: String(localized: "Die Suche nach Updates ist fehlgeschlagen.")
-        case .upToDate, nil: String(localized: "PDFdownsize ist aktuell.")
-        }
-    }
-
-    private var updateAlertMessage: String {
-        let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-        switch updateChecker.manualResult {
-        case .failed: return String(localized: "Bitte prüfe die Internetverbindung und versuche es später erneut.")
-        default: return String(localized: "Du verwendest Version \(current).")
-        }
     }
 
     /// Sammelt eingehende Dateien kurz und routet sie als einen Stapel.

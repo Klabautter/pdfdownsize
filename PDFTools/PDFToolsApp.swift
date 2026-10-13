@@ -26,7 +26,7 @@ struct PDFToolsApp: App {
     @FocusedObject var conversionVM: ConversionViewModel?
     @FocusedObject var ocrVM: OCRViewModel?
     @FocusedObject var discardGuard: DiscardGuard?
-    // intern: Commands.swift (App-Menü) und RootView (Hinweis) teilen ihn.
+    // intern: Commands.swift (App-Menü) greift darauf zu.
     @StateObject var updateChecker = UpdateChecker()
 
     init() {
@@ -48,7 +48,6 @@ struct PDFToolsApp: App {
         // bestehende Fenster, statt ein zweites zu öffnen (WindowGroup würde duplizieren).
         Window("PDFdownsize", id: "main") {
             RootView()
-                .environmentObject(updateChecker)
         }
         .defaultSize(width: 1100, height: 720)
         .commands {

@@ -23,5 +23,13 @@
 	</array>
 	<key>CFBundleName</key>
 	<string>PDFdownsize</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/Klabautter/pdfdownsize/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>O1KCwyjikSiGIx6j7pqMYeND4kc3oQ/yk3q++KqZoUo=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>

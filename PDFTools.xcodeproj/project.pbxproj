@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		15AA00013100000000000001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 15AA00023100000000000002 /* Sparkle */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		1569B5293039A2D700458830 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -39,6 +43,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				15AA00013100000000000001 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -91,6 +96,7 @@
 			);
 			name = PDFTools;
 			packageProductDependencies = (
+				15AA00023100000000000002 /* Sparkle */,
 			);
 			productName = PDFTools;
 			productReference = 1569B5033039A2D700458830 /* PDFdownsize.app */;
@@ -148,6 +154,9 @@
 				Base,
 			);
 			mainGroup = 1569B4FA3039A2D700458830;
+			packageReferences = (
+				15AA00033100000000000003 /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1569B5043039A2D700458830 /* Products */;
@@ -564,6 +573,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		15AA00033100000000000003 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.9.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		15AA00023100000000000002 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 15AA00033100000000000003 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 1569B4FB3039A2D700458830 /* Project object */;
 }

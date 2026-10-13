@@ -40,11 +40,13 @@ If you prefer not to do that, build the app yourself (see below).
 
 ## Updates
 
-The app shows a notice in the sidebar when a newer release exists (checked once a day; switch it off under *PDFdownsize → Check for Updates Automatically*). To update, download the new zip and drag `PDFdownsize.app` into *Applications*, replacing the old one. Your settings are kept.
+From version 1.0.2 on the app updates itself: when a newer release exists it offers to download and install it and then restarts – nothing to unzip or drag around. It checks once a day; you can check by hand or switch this off in the app menu (*PDFdownsize → Check for Updates Automatically*). Updates are handled by [Sparkle](https://sparkle-project.org) and are only installed if they carry the maintainer's signature.
+
+Versions 1.0 and 1.0.1 have no updater: download the current release once and replace the app in *Applications*.
 
 ## Privacy
 
-Your documents never leave your Mac. The only network request the app makes is the update check described above: a plain request to `api.github.com` without cookies, identifiers or any data about you or your files. Turn it off in the app menu and the app makes no network connection at all.
+Your documents never leave your Mac. The only network traffic is the update check: the app fetches a small file with the latest version number from this repository on GitHub and, if you agree to an update, downloads it from the release page. No cookies, no identifiers, no data about you or your files. Switch the check off in the app menu and the app makes no network connection at all.
 
 ## Build from source
 
@@ -58,7 +60,7 @@ xcodebuild build -project PDFTools.xcodeproj -scheme PDFTools -configuration Rel
 
 Or open `PDFTools.xcodeproj` in Xcode and run the `PDFTools` scheme. The Xcode project and scheme keep the working name `PDFTools`; the built product is `PDFdownsize.app`.
 
-The third-party libraries are vendored under `Vendor/` as prebuilt static libraries, so no package manager is needed.
+The PDF and image libraries are vendored under `Vendor/` as prebuilt static libraries. The only package dependency is Sparkle (the updater), which Xcode fetches automatically on the first build.
 
 ### Tests
 

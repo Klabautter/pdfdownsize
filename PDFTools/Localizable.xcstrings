@@ -1513,22 +1513,6 @@
         }
       }
     },
-    "Bitte prüfe die Internetverbindung und versuche es später erneut.": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bitte prüfe die Internetverbindung und versuche es später erneut."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Please check your internet connection and try again later."
-          }
-        }
-      }
-    },
     "Das Ergebnis konnte nicht validiert werden. Original wurde nicht verändert.": {
       "localizations": {
         "de": {
@@ -1786,22 +1770,6 @@
         }
       }
     },
-    "Die Suche nach Updates ist fehlgeschlagen.": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Die Suche nach Updates ist fehlgeschlagen."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Checking for updates failed."
-          }
-        }
-      }
-    },
     "Die komprimierte Datei konnte nicht geschrieben werden.": {
       "localizations": {
         "de": {
@@ -2022,22 +1990,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Print"
-          }
-        }
-      }
-    },
-    "Du verwendest Version %@.": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Du verwendest Version %@."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "You are using version %@."
           }
         }
       }
@@ -3810,22 +3762,6 @@
         }
       }
     },
-    "PDFdownsize ist aktuell.": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "PDFdownsize ist aktuell."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "PDFdownsize is up to date."
-          }
-        }
-      }
-    },
     "PDFs auch hierher ziehen": {
       "localizations": {
         "de": {
@@ -4979,22 +4915,6 @@
         }
       }
     },
-    "Version %@ verfügbar": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Version %@ verfügbar"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Version %@ available"
-          }
-        }
-      }
-    },
     "Verwerfen": {
       "localizations": {
         "de": {
@@ -5391,22 +5311,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "For sending: as small as possible, easy to read on screen."
-          }
-        }
-      }
-    },
-    "Zur Download-Seite": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Zur Download-Seite"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Go to Download Page"
           }
         }
       }

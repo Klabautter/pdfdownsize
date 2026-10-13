@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>PDFdownsize</title>
+    <link>https://github.com/Klabautter/pdfdownsize</link>
+    <item>
+      <title>Version 1.0.2</title>
+      <pubDate>Tue, 13 Oct 2026 20:31:47 +0000</pubDate>
+      <sparkle:version>3</sparkle:version>
+      <sparkle:shortVersionString>1.0.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[PDFdownsize now updates itself: new versions are downloaded, verified and installed from within the app.]]></description>
+      <enclosure url="https://github.com/Klabautter/pdfdownsize/releases/download/v1.0.2/PDFdownsize-1.0.2.zip"
+                 sparkle:edSignature="0WwKGheTInoC2dI37RKmXI0KuAWQydl/uHL5wTuiin1WVHYljndp4miknDBxDlj2ydodRzBoc4tbTLLbsFV4AQ==" length="10324696" type="application/octet-stream"/>
+    </item>
+  </channel>
+</rss>
