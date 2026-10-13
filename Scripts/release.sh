@@ -16,9 +16,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 NOTES="${1:-}"
 REPO="Klabautter/pdfdownsize"
-# „.noindex": Spotlight (und damit Alfred, Launchpad-Suche) übergeht den
-# Ordner – sonst taucht die gebaute App als zweite PDFdownsize-App auf.
-DERIVED="${PDFDOWNSIZE_DERIVED_DATA:-$ROOT/tmp/release-build.noindex}"
+DERIVED="${PDFDOWNSIZE_DERIVED_DATA:-$ROOT/tmp/release-build}"
 
 echo "→ Baue Release …"
 xcodebuild build -project PDFTools.xcodeproj -scheme PDFTools \
@@ -61,6 +59,12 @@ cat > "$ROOT/appcast.xml" <<XML
   </channel>
 </rss>
 XML
+
+# Die gebaute App wird nach dem Packen entfernt: Sie steckt in der ZIP, und
+# eine zweite PDFdownsize.app im Projektordner taucht sonst in Spotlight und
+# Alfred neben der installierten auf. Der Rest des Build-Ordners bleibt als
+# Zwischenspeicher für den nächsten Lauf.
+rm -rf "$APP"
 
 echo
 echo "Version $VERSION (Build $BUILD)"
