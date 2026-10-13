@@ -1,6 +1,6 @@
 # PDFdownsize
 
-A native macOS app that makes PDFs smaller — and handles the everyday PDF chores around it. Everything runs locally on your Mac; no file ever leaves the machine.
+A native macOS app that makes PDFs smaller — and handles the everyday PDF chores around it. Everything runs locally on your Mac; no file ever leaves the machine (see [Privacy](#privacy)).
 
 The interface is German when macOS is set to German and English otherwise.
 
@@ -40,7 +40,11 @@ If you prefer not to do that, build the app yourself (see below).
 
 ## Updates
 
-There is no automatic update yet. To update, download the newer release and replace the app in *Applications*. Your settings are kept.
+The app shows a notice in the sidebar when a newer release exists (checked once a day; switch it off under *PDFdownsize → Check for Updates Automatically*). To update, download the new zip and drag `PDFdownsize.app` into *Applications*, replacing the old one. Your settings are kept.
+
+## Privacy
+
+Your documents never leave your Mac. The only network request the app makes is the update check described above: a plain request to `api.github.com` without cookies, identifiers or any data about you or your files. Turn it off in the app menu and the app makes no network connection at all.
 
 ## Build from source
 

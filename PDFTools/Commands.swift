@@ -65,6 +65,16 @@ extension PDFToolsApp {
         // keine Hilfeseite; der Eintrag „PDFTools-Hilfe" führte ins Leere.
         CommandGroup(replacing: .help) { }
 
+        // App-Menü: Update-Hinweis (2026-10-13). Die Abfrage ist die einzige
+        // Netzverbindung der App und hier abschaltbar.
+        CommandGroup(after: .appInfo) {
+            Button("Nach Updates suchen …") {
+                Task { await updateChecker.checkManually() }
+            }
+            Toggle("Automatisch nach Updates suchen",
+                   isOn: $updateChecker.checksAutomatically)
+        }
+
         // Ablage: Öffnen und Sichern – mehr nicht (Befund S15). Die
         // Organisieren-Befehle bündelt das Menü „Seite".
         CommandGroup(after: .newItem) {
