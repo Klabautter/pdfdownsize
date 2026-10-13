@@ -295,8 +295,57 @@ enum BilevelRenderGate {
     }
 
     /// Raster → Bilevel-Puffer: Luminanz < 0,5 zählt als Tinte.
-    private static func inkBuffer(from rep: NSBitmapImageRep,
-                                  width: Int, height: Int) -> BilevelBuffer? {
+    /// Schwellwert je Pixel: Tinte, wenn die Luminanz unter 0,5 liegt.
+    ///
+    /// Liest die Bytes des Rasters direkt (2026-10-13). Vorher fragte die
+    /// Schleife jedes Pixel über `colorAt(x:y:)` ab – das legt je Pixel ein
+    /// Farbobjekt an und kostete bei einer Scan-Seite (1900×2700) rund
+    /// 1,8 s, etwa 40 % der gesamten Laufzeit. Die Rechnung ist dieselbe:
+    /// Komponenten als Byte/255, gleiche Gewichte, gleiche Schwelle. Für
+    /// alles, was nicht das erwartete 8-Bit-RGBA-Raster mit voller Deckung
+    /// ist, bleibt der alte Weg über `colorAt` stehen.
+    static func inkBuffer(from rep: NSBitmapImageRep,
+                          width: Int, height: Int) -> BilevelBuffer? {
+        let rowBytes = BilevelBuffer.rowBytes(width: width)
+        var data = Data(count: rowBytes * height)
+        let direct = rep.bitsPerSample == 8 && rep.samplesPerPixel == 4
+            && rep.bitsPerPixel == 32 && !rep.isPlanar
+            && rep.bitmapFormat.isDisjoint(with: [.alphaFirst, .floatingPointSamples,
+                                                  .sixteenBitLittleEndian, .thirtyTwoBitLittleEndian,
+                                                  .sixteenBitBigEndian, .thirtyTwoBitBigEndian])
+            && rep.pixelsWide >= width && rep.pixelsHigh >= height
+        let source = direct ? rep.bitmapData : nil
+        let sourceRowBytes = rep.bytesPerRow
+        data.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+            for y in 0..<height {
+                let row = base + y * rowBytes
+                let sourceRow = source.map { $0 + y * sourceRowBytes }
+                for x in 0..<width {
+                    let luminance: Double
+                    if let pixel = sourceRow.map({ $0 + x * 4 }), pixel[3] == 255 {
+                        luminance = 0.299 * (Double(pixel[0]) / 255)
+                            + 0.587 * (Double(pixel[1]) / 255)
+                            + 0.114 * (Double(pixel[2]) / 255)
+                    } else {
+                        guard let color = rep.colorAt(x: x, y: y) else { continue }
+                        luminance = 0.299 * color.redComponent
+                            + 0.587 * color.greenComponent
+                            + 0.114 * color.blueComponent
+                    }
+                    if luminance < 0.5 {
+                        row[x >> 3] |= UInt8(0x80 >> (x & 7))
+                    }
+                }
+            }
+        }
+        return BilevelBuffer(width: width, height: height, data: data)
+    }
+
+    /// Der frühere Weg über `colorAt` – nur noch als Vergleichsmaßstab für
+    /// den Test, der die Gleichheit beider Wege festhält.
+    static func inkBufferViaColorObjects(from rep: NSBitmapImageRep,
+                                         width: Int, height: Int) -> BilevelBuffer? {
         let rowBytes = BilevelBuffer.rowBytes(width: width)
         var data = Data(count: rowBytes * height)
         data.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
