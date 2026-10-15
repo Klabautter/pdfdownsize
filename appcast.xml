@@ -4,14 +4,14 @@
     <title>PDFdownsize</title>
     <link>https://github.com/Klabautter/pdfdownsize</link>
     <item>
-      <title>Version 1.0.2</title>
-      <pubDate>Tue, 13 Oct 2026 22:24:52 +0000</pubDate>
-      <sparkle:version>3</sparkle:version>
-      <sparkle:shortVersionString>1.0.2</sparkle:shortVersionString>
+      <title>Version 1.0.3</title>
+      <pubDate>Thu, 15 Oct 2026 15:45:15 +0000</pubDate>
+      <sparkle:version>4</sparkle:version>
+      <sparkle:shortVersionString>1.0.3</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[PDFdownsize now updates itself. Scans compress about twice as fast, other documents a little faster. Organize got Remove All, and the estimate for text-heavy PDFs is measured instead of guessed.]]></description>
-      <enclosure url="https://github.com/Klabautter/pdfdownsize/releases/download/v1.0.2/PDFdownsize-1.0.2.zip"
-                 sparkle:edSignature="rFaqsa57+vISk7YJ4z70/0erO9+AFUN9BMtawUeUi2IK5WeTHdvuqawqOquE8Mu1Jqpbxj45+F9ZHGtEruKIDw==" length="10362690" type="application/octet-stream"/>
+      <description><![CDATA[Schneller komprimieren (Scans und Font-lastige Dokumente bis Faktor 7), Dokument folgt dem Werkzeugwechsel, Bilder landen automatisch in Konvertieren, OCR zeigt auch vorhandenen Text, Schätzung als ein Wert, Dateiname im Fenstertitel.]]></description>
+      <enclosure url="https://github.com/Klabautter/pdfdownsize/releases/download/v1.0.3/PDFdownsize-1.0.3.zip"
+                 sparkle:edSignature="8UxxMHeL0SFCQXxf1jmKz0lA6UcSQjyDT2s/uffqVtmZF2sr5vNUCmXq1g7Mk64dHwHIsWyVK4BYFFTIiiOgAg==" length="10387503" type="application/octet-stream"/>
     </item>
   </channel>
 </rss>
