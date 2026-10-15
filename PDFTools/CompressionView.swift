@@ -10,6 +10,9 @@ import PDFKit
 /// Dokument komprimiert wird, auch wenn groß nur eine Seite zu sehen ist.
 struct CompressionView: View {
     @ObservedObject var viewModel: CompressionViewModel
+    /// Abgelegte Bilder gehören zu Konvertieren – RootView wechselt dorthin,
+    /// statt dass die Fläche „nur PDF" meldet.
+    var onForeignFiles: (([URL]) -> Void)? = nil
     @EnvironmentObject private var discardGuard: DiscardGuard
 
     @State private var isTargeted = false
@@ -54,7 +57,7 @@ struct CompressionView: View {
             WorkspaceWelcome(icon: "doc.zipper",
                              title: String(localized: "PDFs komprimieren"),
                              subtitle: String(localized: "Eine PDF oder gleich mehrere – alles bleibt auf dem Mac."),
-                             dropHint: String(localized: "PDFs auch hierher ziehen"),
+                             dropHint: String(localized: "Dateien auch hierher ziehen"),
                              isTargeted: isTargeted) {
                 // ⌘O liegt im Ablage-Menü (Commands.swift) – nicht doppelt
                 // vergeben (Befund B13).
@@ -73,7 +76,12 @@ struct CompressionView: View {
     private func handleDrop(_ urls: [URL]) -> Bool {
         let pdfs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
         guard !pdfs.isEmpty else {
-            viewModel.errorMessage = String(localized: "Bitte nur PDF-Dateien ablegen.")
+            let images = urls.filter { ImageImporter.isSupported($0) }
+            if !images.isEmpty, let onForeignFiles {
+                onForeignFiles(images)
+            } else {
+                viewModel.errorMessage = String(localized: "Bitte nur PDF-Dateien ablegen.")
+            }
             return true
         }
         // Auf eine geöffnete Datei oder Liste abgelegt: hinzufügen statt ersetzen.
@@ -338,7 +346,7 @@ private struct ControlPanel: View {
                 // optimal" sagt erst ein echter Lauf (Formulare gewinnen oft
                 // über Schriften/Struktur, die das Inventar-Modell nicht sieht).
                 SizeReadout(original: original,
-                            content: .estimate(low: e.lowBytes, high: e.highBytes),
+                            content: .estimate(point: e.pointBytes),
                             refreshing: viewModel.estimateRefreshing)
                 if let assessment = viewModel.targetAssessment {
                     Label(CompressionViewModel.targetEstimateText(assessment), systemImage: "target")
@@ -455,12 +463,14 @@ private struct ControlPanel: View {
 
 // MARK: - Größenanzeige
 
-/// Größe als Zahl plus Leiste: volle Breite = Original. Vor dem Lauf die
-/// geschätzte Spanne, danach das Ergebnis – auf demselben Maßstab.
+/// Größe als Zahl plus Leiste: volle Breite = Original. Vor dem Lauf EIN
+/// geschätzter Wert (der Punktwert des Schätzers, keine Spanne – eine
+/// Spanne liest sich wie Unsicherheit, 15.10.2026), danach das Ergebnis
+/// auf demselben Maßstab.
 struct SizeReadout: View {
     enum Content: Equatable {
         case estimating
-        case estimate(low: Int64, high: Int64)
+        case estimate(point: Int64)
         case result(Int64)
         case alreadyOptimal
     }
@@ -489,21 +499,11 @@ struct SizeReadout: View {
         return max(0, Int(((1 - Double(bytes) / Double(original)) * 100).rounded()))
     }
 
-    private func estimateFigure(low: Int64, high: Int64) -> String {
-        Self.estimateFigure(low: low, high: high, original: original)
-    }
-
-    /// „30–48 %"; reicht das Band bis zum Original, „bis zu 48 %" statt
-    /// eines irritierenden „0–48 %".
-    static func estimateFigure(low: Int64, high: Int64, original: Int64) -> String {
-        func pct(_ b: Int64) -> Int {
-            guard original > 0 else { return 0 }
-            return max(0, Int(((1 - Double(b) / Double(original)) * 100).rounded()))
-        }
-        let best = pct(low), worst = pct(high)
-        if best == worst { return "\(best) %" }
-        if worst == 0 { return String(localized: "bis zu \(best) %") }
-        return "\(worst)–\(best) %"
+    /// „≈ 75 %" – der Punktwert, mit Tilde als Schätzung gekennzeichnet.
+    static func estimateFigure(point: Int64, original: Int64) -> String {
+        guard original > 0 else { return "—" }
+        let pct = max(0, Int(((1 - Double(point) / Double(original)) * 100).rounded()))
+        return "≈ \(pct) %"
     }
 
     @ViewBuilder
@@ -514,13 +514,14 @@ struct SizeReadout: View {
                 Text("—").font(Theme.figure).foregroundStyle(.tertiary)
                 Text("Wird geschätzt …").font(.callout).foregroundStyle(.secondary)
             }
-        case .estimate(let low, let high):
+        case .estimate(let point):
             VStack(alignment: .leading, spacing: 2) {
-                Text(estimateFigure(low: low, high: high))
+                Text("\(Self.estimateFigure(point: point, original: original)) kleiner")
                     .font(Theme.figure)
-                Text("Voraussichtlich \(CompressionViewModel.estimateRangeFigure(low: low, high: high))")
+                Text("Voraussichtlich \(CompressionResult.format(point))")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                    .monospacedDigit()
             }
         case .result(let output):
             VStack(alignment: .leading, spacing: 2) {
@@ -553,11 +554,9 @@ struct SizeReadout: View {
                 switch content {
                 case .estimating:
                     EmptyView()
-                case .estimate(let low, let high):
-                    Capsule().fill(Color.accentColor.opacity(0.3))
-                        .frame(width: max(w * ratio(high), 6))
+                case .estimate(let point):
                     Capsule().fill(Color.accentColor)
-                        .frame(width: max(w * ratio(low), 6))
+                        .frame(width: max(w * ratio(point), 6))
                 case .result(let output):
                     Capsule().fill(Theme.savings)
                         .frame(width: max(w * ratio(output), 6))
@@ -958,7 +957,7 @@ private struct BulkStage: View {
             ProgressView(value: viewModel.bulkFractions[row.index] ?? 0)
                 .progressViewStyle(.linear)
         } else if let e = viewModel.bulkEstimates[url] {
-            Text("Voraussichtlich \(SizeReadout.estimateFigure(low: e.lowBytes, high: e.highBytes, original: e.originalBytes)) kleiner")
+            Text("Voraussichtlich \(SizeReadout.estimateFigure(point: e.pointBytes, original: e.originalBytes)) kleiner")
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
         } else {

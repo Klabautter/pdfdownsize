@@ -352,6 +352,61 @@ enum CandidateGenerator {
         return session.finalize()
     }
 
+    /// MRC nur bei Bedarf (2026-10-15): Die Provision laeuft erst NACH der
+    /// Kandidatensuche, wenn der beste Kandidat noch zu gross ist. Ihre
+    /// QA-geprueften Buendel kommen hier in das fertige Set – mit denselben
+    /// Regeln wie `Session.applyMRC` (Never-Grow, Suchbudget mit Verdraengung
+    /// des groessten verlustbehafteten Nicht-MRC-Kandidaten), ohne die
+    /// JPEG-Suche zu wiederholen.
+    static func merging(mrc prepared: [PreparedMRCCandidate],
+                        into generated: Generated,
+                        store: CandidateStore) -> Generated {
+        guard !prepared.isEmpty,
+              let keep = generated.set.keepCandidate,
+              case .keep(let objectID, _, let originalBytes)? =
+                generated.actionsByCandidate[keep.id] else { return generated }
+        var candidates = generated.set.candidates
+        var actions = generated.actionsByCandidate
+        var payloads = generated.payloadByCandidate
+        for entry in prepared {
+            guard case .mrc(let descriptor) = entry.candidate.kind else { continue }
+            guard originalBytes < 0
+                    || entry.candidate.metrics.encodedBytes < originalBytes
+            else { continue }
+            // Suchbudget wie in der Session: KEEP zaehlt nicht mit.
+            if candidates.count >= maximumCandidatesPerImage {
+                let evictable = candidates.indices.filter { index in
+                    let candidate = candidates[index]
+                    if candidate.kind.isKeep { return false }
+                    if case .mrc = candidate.kind { return false }
+                    return !candidate.isLossless
+                }
+                guard let largest = evictable.max(by: {
+                    candidates[$0].metrics.encodedBytes
+                        < candidates[$1].metrics.encodedBytes
+                }), candidates[largest].metrics.encodedBytes
+                        > entry.candidate.metrics.encodedBytes else { continue }
+                let evicted = candidates.remove(at: largest)
+                actions[evicted.id] = nil
+                payloads[evicted.id] = nil
+            }
+            candidates.append(entry.candidate)
+            actions[entry.candidate.id] = .mrc(
+                objectID: objectID, descriptor: descriptor,
+                originalEncodedBytes: originalBytes,
+                expectedEncodedBytes: entry.candidate.metrics.encodedBytes)
+            payloads[entry.candidate.id] = store.store(
+                entry.bundle, resource: objectID, candidate: entry.candidate.id,
+                kind: entry.candidate.kind)
+        }
+        return Generated(set: CandidateSet(resourceID: generated.set.resourceID,
+                                           candidates: candidates),
+                         actionsByCandidate: actions,
+                         payloadByCandidate: payloads,
+                         globalsByCandidate: generated.globalsByCandidate,
+                         classification: generated.classification)
+    }
+
     /// Sammelt die Kandidaten EINER Ressource. Bewusst eigener Typ: Das
     /// große Entscheidungsfluss-Diagramm wird so in kleine Methoden
     /// zerlegt (Typchecker-freundlich).
@@ -796,27 +851,66 @@ enum CandidateGenerator {
                 // Grafiken/Screenshots: verlustfrei (§9.5) – JPEG würde
                 // Kanten zerstören.
                 let losslessBefore = transforms.count
-                let outcome = CompressionPlanner.planLosslessResize(
-                    resource: resource, image: targetImage, target: target,
-                    grayscale: grayscale)
-                record(action: outcome.0, payload: outcome.1,
-                       kind: .flate(target: target, grayscale: grayscale,
-                                    predictor: true),
-                       workingBytes: CandidateGenerator.workingBytes(
-                           for: target, components: grayscale ? 1 : 3))
-                // V2-3b (§9.6) – Exact Palette als zusätzlicher Kandidat;
-                // der Race entscheidet, ob er gegen KEEP/Flate gewinnt.
-                addIndexedCandidate(target: target, targetImage: targetImage,
-                                    grayscale: grayscale)
-                // §9.5 – Gated JPEG-Fallback: greift NUR, wenn kein
-                // verlustfreier Kandidat (Flate/Palette) das Never-Grow
-                // geschafft hat. Bei echter Vektorgrafik kommt er nicht
-                // zustande – gescanntes Kartenmaterial (verlustbehaftete
-                // Quelle, Rauschen) blieb sonst als KEEP in voller Größe
-                // liegen (gemessener Maps-Rückgang der V2-11-Zertifizierung).
-                addGatedJPEGFallback(target: target, targetImage: targetImage,
-                                     grayscale: grayscale,
-                                     losslessAdded: transforms.count > losslessBefore)
+                // Früher Ausstieg (2026-10-15): Auf einer SCAN-Seite mit
+                // JPEG-Quelle und mehr als 256 Farben (Codec-Rauschen) läuft
+                // der gated JPEG-Fallback ZUERST; das verlustfreie Flate-Race
+                // (rund zwei Sekunden je 11-MP-Zielraster) folgt nur, wenn
+                // kein JPEG-Kandidat die Gates hält. Nur in Smart/Qualität:
+                // Dort lief der Fallback bisher gar nicht, sobald Flate das
+                // Never-Grow schaffte. In Klein/Zielgröße treten beide ohnehin
+                // nebeneinander an – die Reihenfolge bleibt dort die alte,
+                // weil „JPEG zuerst“ die Wahl messbar verschob (Smoke-30:
+                // zwei Papers und eine USGS-Karte je bis zu 3 % weniger).
+                // Abbildungen gesetzter Seiten laufen überall unverändert.
+                let onScanPage: Bool = {
+                    guard let page = resource.placements.first
+                            .flatMap({ pageContext[$0.pageIndex] }) else { return false }
+                    return page.classification == .rasterScan
+                        || page.classification == .rasterScanWithOCR
+                }()
+                let noisyScanJPEG = onScanPage
+                    && !allowsQuantizedPalette
+                    && resource.terminalFilter == .dct
+                    && PaletteOptimizer.sampleExceedsPalette(
+                        targetImage, components: grayscale ? 1 : 3)
+                if noisyScanJPEG {
+                    addGatedJPEGFallback(target: target, targetImage: targetImage,
+                                         grayscale: grayscale, losslessAdded: false)
+                    if transforms.count == losslessBefore {
+                        let outcome = CompressionPlanner.planLosslessResize(
+                            resource: resource, image: targetImage, target: target,
+                            grayscale: grayscale)
+                        record(action: outcome.0, payload: outcome.1,
+                               kind: .flate(target: target, grayscale: grayscale,
+                                            predictor: true),
+                               workingBytes: CandidateGenerator.workingBytes(
+                                   for: target, components: grayscale ? 1 : 3))
+                    }
+                    addIndexedCandidate(target: target, targetImage: targetImage,
+                                        grayscale: grayscale)
+                } else {
+                    let outcome = CompressionPlanner.planLosslessResize(
+                        resource: resource, image: targetImage, target: target,
+                        grayscale: grayscale)
+                    record(action: outcome.0, payload: outcome.1,
+                           kind: .flate(target: target, grayscale: grayscale,
+                                        predictor: true),
+                           workingBytes: CandidateGenerator.workingBytes(
+                               for: target, components: grayscale ? 1 : 3))
+                    // V2-3b (§9.6) – Exact Palette als zusätzlicher Kandidat;
+                    // der Race entscheidet, ob er gegen KEEP/Flate gewinnt.
+                    addIndexedCandidate(target: target, targetImage: targetImage,
+                                        grayscale: grayscale)
+                    // §9.5 – Gated JPEG-Fallback: greift NUR, wenn kein
+                    // verlustfreier Kandidat (Flate/Palette) das Never-Grow
+                    // geschafft hat. Bei echter Vektorgrafik kommt er nicht
+                    // zustande – gescanntes Kartenmaterial (verlustbehaftete
+                    // Quelle, Rauschen) blieb sonst als KEEP in voller Größe
+                    // liegen (gemessener Maps-Rückgang der V2-11-Zertifizierung).
+                    addGatedJPEGFallback(target: target, targetImage: targetImage,
+                                         grayscale: grayscale,
+                                         losslessAdded: transforms.count > losslessBefore)
+                }
 
             case .graphics:
                 // Aggressive-Graphics-Politik bei echtem Größenüberhang:

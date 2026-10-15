@@ -216,12 +216,47 @@ enum MRCPageRewriter {
     /// tragen, damit der dominante Draw allein über MRC entschieden wird.
     static let maximumSecondaryCoverage = 0.05
 
+    /// Eine MRC-faehige Seite: Scan-Klassifikation, dominantes Raster,
+    /// messbare Platzierung. Dieselbe Eignung nutzt der Planner fuer die
+    /// Bedarfsentscheidung (2026-10-15), bevor er die teure Provision anstoesst.
+    struct EligiblePage {
+        let pageIndex: Int
+        let resource: PDFImageResource
+        let sourceDPI: Double
+    }
+
+    /// Phase 1 der Provision ohne Budget: Welche Seiten kaemen fuer MRC
+    /// infrage? Deterministisch in Analyse-Reihenfolge.
+    static func eligiblePages(resources: [PDFImageResource],
+                              pageAnalyses: [PageAnalysis]) -> [EligiblePage] {
+        var pages: [EligiblePage] = []
+        for analysis in pageAnalyses {
+            guard analysis.classification == .rasterScan
+                    || analysis.classification == .rasterScanWithOCR,
+                  analysis.confidence >= minimumScanConfidence,
+                  analysis.largestImageCoverageRatio >= 0.90,
+                  // DPI-Ableitung braucht eine messbare Platzierung.
+                  let sourceDPI = analysis.scanDPI, sourceDPI >= 100
+            else { continue }
+            let pageIndex = analysis.pageIndex
+            guard let dominant = dominantResource(
+                on: pageIndex, resources: resources,
+                pageArea: analysis.pageArea),
+                  pageEligible(resource: dominant.resource) else { continue }
+            pages.append(EligiblePage(pageIndex: pageIndex,
+                                      resource: dominant.resource,
+                                      sourceDPI: sourceDPI))
+        }
+        return pages
+    }
+
     static func provision(document: PDFCoreDocument,
                           inputURL: URL,
                           resources: [PDFImageResource],
                           pixels: ImagePixelSource,
                           options: CompressionOptions,
                           pageAnalyses: [PageAnalysis],
+                          onlyPages: Set<Int>? = nil,
                           isCancelled: (() -> Bool)? = nil,
                           workProgress: WorkProgressLedger? = nil) throws -> [MRCProvision] {
         guard options.featureFlags.mrc, options.featureFlags.candidateEngine else {
@@ -239,29 +274,21 @@ enum MRCPageRewriter {
         var attemptedPixels: Int64 = 0
 
         // Phase 1 (seriell, billig): Eignung + Budget – deterministisch.
+        // `onlyPages` (MRC nur bei Bedarf): Der Planner nennt die Seiten,
+        // deren bester Kandidat noch zu gross ist; alle anderen bleiben aus.
         struct Job {
             let pageIndex: Int
             let resource: PDFImageResource
             let sourceDPI: Double
         }
         var jobs: [Job] = []
-        for analysis in analyses {
+        for page in eligiblePages(resources: resources, pageAnalyses: analyses) {
             if let isCancelled, isCancelled() { throw CancellationError() }
-            guard analysis.classification == .rasterScan
-                    || analysis.classification == .rasterScanWithOCR,
-                  analysis.confidence >= minimumScanConfidence,
-                  analysis.largestImageCoverageRatio >= 0.90,
-                  // DPI-Ableitung braucht eine messbare Platzierung.
-                  let sourceDPI = analysis.scanDPI, sourceDPI >= 100
-            else { continue }
+            if let onlyPages, !onlyPages.contains(page.pageIndex) { continue }
+            let pageIndex = page.pageIndex
+            let sourceDPI = page.sourceDPI
 
-            let pageIndex = analysis.pageIndex
-            guard let dominant = dominantResource(
-                on: pageIndex, resources: resources,
-                pageArea: analysis.pageArea),
-                  pageEligible(resource: dominant.resource) else { continue }
-
-            let nextPixels = Int64(dominant.resource.pixelCount)
+            let nextPixels = Int64(page.resource.pixelCount)
             let elapsed = Date().timeIntervalSince(provisionStarted)
             guard budget.permitsNextPage(
                 attemptedPages: attemptedPages,
@@ -280,7 +307,7 @@ enum MRCPageRewriter {
             attemptedPages += 1
             attemptedPixels += nextPixels
             jobs.append(Job(pageIndex: pageIndex,
-                            resource: dominant.resource,
+                            resource: page.resource,
                             sourceDPI: sourceDPI))
         }
 

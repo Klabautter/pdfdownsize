@@ -241,8 +241,62 @@ enum FontOptimizer {
 
         var active = document
         try active.save(to: checkpointURL)
+        // Entscheidungen zeigen auf Objektnummern des LIVE-Handles. Jeder
+        // Rückweg lädt den Checkpoint neu, und libqpdf nummeriert beim
+        // Schreiben um – danach müssen die Entscheidungen neu abgebildet
+        // werden (`remap`), sonst findet der Kern die Fonts nicht und
+        // behält sie stillschweigend (Befund 2026-10-15: vorher traf das
+        // jeden Font NACH einem zurückgerollten).
+        var pending = decisions
 
-        for decision in decisions {
+        // Schnellweg (2026-10-15): ALLE Fonts auf einmal subsetten und EINE
+        // QA fahren – Text-Fingerprints dokumentweit, Never-Grow und die
+        // Render-Stichprobe über die Vereinigung aller je-Font-Stichproben.
+        // Besteht sie, ist jeder Font geprüft wie im Einzelweg (dieselben
+        // Prüfungen auf demselben Endstand). Scheitert sie oder verweigert
+        // der Kern strukturell, läuft der Einzelweg unten vom Checkpoint aus
+        // und findet den schuldigen Font wie bisher. Vorher kostete jeder
+        // Font zwei volle Dokument-Schreibvorgänge, zwei Textschnappschüsse
+        // und drei Seitenrender (55-Seiten-Formular: 37 s für die Fonts).
+        // Der Kern baut je Aufruf sein Font-Inventar neu (alle Content-
+        // Streams) und prüft danach die ganze Struktur – deshalb EIN Aufruf
+        // mit allen Fonts. Behält er einen davon konservativ, bleibt unklar
+        // welchen: dann läuft der Einzelweg vom Checkpoint aus.
+        if decisions.count > 1 {
+            var batch: PDFCoreFontSubsetStats?
+            do {
+                batch = try active.subsetSelectedFonts(decisions.map(\.objectID))
+            } catch {
+                batch = nil
+            }
+            if let batch, batch.keptFonts == 0, batch.subsettedFonts == decisions.count {
+                try active.save(to: candidateURL)
+                let samplePages = Array(Set(decisions.flatMap {
+                    renderSamplePages($0.pages)
+                })).sorted()
+                if verify(checkpointURL, candidateURL, samplePages) {
+                    for decision in decisions {
+                        // Trockenplanung = Ausführung (derselbe Kernpfad plant
+                        // und fährt): die Schätzung je Font ist die der Planung.
+                        outcome.subsetted += 1
+                        outcome.estimatedBytesSaved += decision.estimatedSaving
+                        outcome.perFont.append(FontOutcome(
+                            objectID: decision.objectID, pages: decision.pages,
+                            result: .subsetted,
+                            estimatedSavedBytes: decision.estimatedSaving))
+                    }
+                    outcome.document = active
+                    return outcome
+                }
+            }
+            // Rückweg: Checkpoint laden, Einzelweg wie bisher.
+            active = try PDFCoreDocument(path: checkpointURL.path)
+            outcome = Outcome(document: active)
+            pending = remap(pending, on: active)
+        }
+
+        while !pending.isEmpty {
+            let decision = pending.removeFirst()
             // 1. EIN Font über die Bridge. Refusal (konservativ behalten)
             //    ist kein Fehler – es gab keine Mutation, nichts zu testen.
             var subsetStats = PDFCoreFontSubsetStats(
@@ -260,6 +314,7 @@ enum FontOptimizer {
                 // Strukturprüfung im Kern gescheitert (nach Mutation) –
                 // Handle verwerfen, zum Checkpoint zurück.
                 active = try PDFCoreDocument(path: checkpointURL.path)
+                pending = remap(pending, on: active)
                 outcome.document = active
                 outcome.rolledBack += 1
                 outcome.perFont.append(FontOutcome(
@@ -284,6 +339,7 @@ enum FontOptimizer {
             } else {
                 // NUR dieser Font rollt zurück – die vorherigen bleiben.
                 active = try PDFCoreDocument(path: checkpointURL.path)
+                pending = remap(pending, on: active)
                 outcome.document = active
                 outcome.rolledBack += 1
                 outcome.perFont.append(FontOutcome(
@@ -293,6 +349,27 @@ enum FontOptimizer {
         }
         outcome.document = active
         return outcome
+    }
+
+    /// Bildet Entscheidungen auf die Objektnummern eines NEU GELADENEN
+    /// Dokuments ab. Schlüssel ist, was ein Font-Objekt über das Umnummerieren
+    /// hinweg behält: seine Seiten und die Ersparnis der Trockenplanung
+    /// (derselbe Kernpfad plant deterministisch). Ohne Treffer bleibt die
+    /// Entscheidung stehen – der Kern behält den Font dann konservativ.
+    static func remap(_ decisions: [Decision],
+                      on document: PDFCoreDocument) -> [Decision] {
+        guard !decisions.isEmpty,
+              let candidates = try? document.fontSubsetCandidates() else { return decisions }
+        var pool = candidates.filter(\.subsettable)
+        return decisions.map { decision in
+            guard let index = pool.firstIndex(where: {
+                $0.pages == decision.pages
+                    && $0.estimatedBytesSaved == decision.estimatedSaving
+            }) else { return decision }
+            let match = pool.remove(at: index)
+            return Decision(objectID: match.objectID, pages: decision.pages,
+                            estimatedSaving: decision.estimatedSaving)
+        }
     }
 
     /// §14.4 – Die je-Font-QA: Text-Fingerprints dokumentweit seitenweise,
@@ -317,16 +394,12 @@ enum FontOptimizer {
             return false
         }
         guard !samplePages.isEmpty else { return true }
-        let mapping = Dictionary(uniqueKeysWithValues:
-            samplePages.map { ($0, $0) })
-        guard let comparisons = try? RenderDifferential.compare(
+        // Pixelgleichheit genügt – die vollen Seitenmetriken (SSIM, Tinte)
+        // kosteten je Seite rund drei Sekunden, von denen die Entscheidung
+        // nichts nutzte (2026-10-15: 55-Seiten-Formular, 10 Seiten, 32 s).
+        return (try? RenderDifferential.pagesIdentical(
             sourceURL: preURL, outputURL: candidateURL,
-            pageMapping: mapping),
-              comparisons.count == samplePages.count,
-              comparisons.allSatisfy({ $0.changedAreaRatio == 0 }) else {
-            return false
-        }
-        return true
+            pages: samplePages)) ?? false
     }
 
     /// Deterministische Stichprobe: erste, mittlere, letzte betroffene

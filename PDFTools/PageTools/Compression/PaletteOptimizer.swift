@@ -502,6 +502,20 @@ enum PaletteOptimizer {
 
     /// Deterministische Stichprobe: gleichmäßig über das Raster gestreift,
     /// höchstens `samplePixelLimit` Pixel.
+    /// Billige Vorprüfung (Stichprobe wie in `encodeExact`): Hat das Bild
+    /// offensichtlich mehr als `maximumPaletteEntries` Farben? Dient dem
+    /// frühen Ausstieg aus dem verlustfreien Flate-Race bei JPEG-Quellen
+    /// (2026-10-15): Dekodierte JPEG-Pixel mit Codec-Rauschen packt Flate
+    /// nie unter die Größe des JPEG-Originals.
+    static func sampleExceedsPalette(_ image: CGImage, components: Int) -> Bool {
+        guard components == 1 || components == 3,
+              image.width > 0, image.height > 0,
+              let raw = ImageResampler.rawBitmap(image, components: components)
+        else { return false }
+        return sampleColorCount(raw: raw, pixelCount: image.width * image.height,
+                                components: components) > maximumPaletteEntries
+    }
+
     private static func sampleColorCount(raw: Data, pixelCount: Int,
                                          components: Int) -> Int {
         guard pixelCount > 0 else { return 0 }

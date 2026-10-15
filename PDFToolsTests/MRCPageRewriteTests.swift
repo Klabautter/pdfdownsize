@@ -12,8 +12,13 @@ import PDFKit
 @Suite(.timeLimit(.minutes(10))) struct MRCPageRewriteTests {
 
     static func mrcOptions() -> CompressionOptions {
-        CompressionOptions.make(mode: .smart, customConfig: nil,
-                                stripMetadata: false, linearize: false)
+        var options = CompressionOptions.make(mode: .smart, customConfig: nil,
+                                              stripMetadata: false, linearize: false)
+        // Diese Tests pruefen die MRC-Mechanik (Rekonstruktion, Seiten-QA),
+        // nicht die Bedarfsregel: Die synthetische Scan-Seite ist nach der
+        // JPEG-Leiter klein, MRC muss hier trotzdem laufen.
+        options.mrcProvisionBudget.provisionIfCandidateExceedsBytes = 0
+        return options
     }
 
     static func tempURL(_ label: String) -> URL {

@@ -114,24 +114,28 @@ enum CompressionPipeline {
                 $0 + WorkProgressLedger.weight(pixels: $1.pixelCount)
             })
 
-            // Phase V2-7 (§13) – MRC-Kandidaten für Scan-Seiten. Nur bei
-            // Flag `mrc` (§25 – V2-Advanced, Default AUS); die Provision ist
-            // reine Planung (Scratch-Rekonstruktionen).
-            let mrc = try StageTimer.run(stageTimer, .candidateGenerationMs) {
-                try MRCPageRewriter.provision(document: document,
-                                              inputURL: inputURL,
-                                              resources: resources,
-                                              pixels: pixels,
-                                              options: options,
-                                              pageAnalyses: analyses,
-                                              isCancelled: isCancelled,
-                                              workProgress: ledger)
+            // Phase V2-7 (§13) – MRC-Kandidaten für Scan-Seiten, seit
+            // 2026-10-15 nur bei Bedarf: Der Planner ruft die Provision nach
+            // der Kandidatensuche fuer die Seiten, deren bester Kandidat noch
+            // zu gross ist (Schwelle im MRCProvisionBudget).
+            let mrcOnDemand: (Set<Int>) throws -> [MRCProvision] = { pages in
+                try StageTimer.run(stageTimer, .mrcProvisionMs) {
+                    try MRCPageRewriter.provision(document: document,
+                                                  inputURL: inputURL,
+                                                  resources: resources,
+                                                  pixels: pixels,
+                                                  options: options,
+                                                  pageAnalyses: analyses,
+                                                  onlyPages: pages,
+                                                  isCancelled: isCancelled,
+                                                  workProgress: ledger)
+                }
             }
 
             // Phase V2-8 (§14.1) – Font-Kandidaten über die Trockenplanung
             // der Bridge. Die Aktivierung steckt in FontOptimizer.provision
             // (Flags + Font-Politik, §25); ohne sie bleibt die Liste leer.
-            let fonts = try StageTimer.run(stageTimer, .candidateGenerationMs) {
+            let fonts = try StageTimer.run(stageTimer, .fontProvisionMs) {
                 try FontOptimizer.provision(document: document,
                                             options: options,
                                             isCancelled: isCancelled)
@@ -147,7 +151,7 @@ enum CompressionPipeline {
                 stageTimer: stageTimer,
                 overrides: overrides,
                 store: store,
-                mrc: mrc,
+                mrcOnDemand: mrcOnDemand,
                 fonts: fonts,
                 pageAnalyses: analyses,
                 workProgress: ledger)
@@ -206,13 +210,16 @@ enum CompressionPipeline {
             // gleiche Aufrufe, gleiche Fehlerbehandlung (früher schluckte
             // `try?` hier Fehler, die `run` weiterwirft – zwei Pfade mit
             // unterschiedlichem Ausgang für dieselbe Eingabe).
-            let mrc = try MRCPageRewriter.provision(document: document,
-                                                    inputURL: inputURL,
-                                                    resources: resources,
-                                                    pixels: pixels,
-                                                    options: options,
-                                                    pageAnalyses: analyses,
-                                                    isCancelled: isCancelled)
+            let mrcOnDemand: (Set<Int>) throws -> [MRCProvision] = { pages in
+                try MRCPageRewriter.provision(document: document,
+                                              inputURL: inputURL,
+                                              resources: resources,
+                                              pixels: pixels,
+                                              options: options,
+                                              pageAnalyses: analyses,
+                                              onlyPages: pages,
+                                              isCancelled: isCancelled)
+            }
             let fonts = try FontOptimizer.provision(document: document,
                                                     options: options,
                                                     isCancelled: isCancelled)
@@ -225,7 +232,7 @@ enum CompressionPipeline {
                 isCancelled: isCancelled,
                 overrides: overrides,
                 store: store,
-                mrc: mrc,
+                mrcOnDemand: mrcOnDemand,
                 fonts: fonts,
                 pageAnalyses: analyses)
         }

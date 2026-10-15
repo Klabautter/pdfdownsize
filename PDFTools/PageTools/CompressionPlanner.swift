@@ -124,6 +124,7 @@ enum CompressionPlanner {
                      overrides: DecisionOverrides = DecisionOverrides(),
                      store: CandidateStore? = nil,
                      mrc: [MRCProvision] = [],
+                     mrcOnDemand: ((Set<Int>) throws -> [MRCProvision])? = nil,
                      fonts: [FontOptimizer.Provision] = [],
                      pageAnalyses: [PageAnalysis] = [],
                      workProgress: WorkProgressLedger? = nil) throws -> Result {
@@ -139,6 +140,7 @@ enum CompressionPlanner {
                                      overrides: overrides,
                                      store: store,
                                      mrc: mrc,
+                                     mrcOnDemand: mrcOnDemand,
                                      fonts: fonts,
                                      pageAnalyses: pageAnalyses,
                                      workProgress: workProgress)
@@ -165,6 +167,7 @@ enum CompressionPlanner {
                                           overrides: DecisionOverrides,
                                           store externalStore: CandidateStore? = nil,
                                           mrc: [MRCProvision] = [],
+                                          mrcOnDemand: ((Set<Int>) throws -> [MRCProvision])? = nil,
                                           fonts: [FontOptimizer.Provision] = [],
                                           pageAnalyses: [PageAnalysis] = [],
                                           workProgress: WorkProgressLedger? = nil) throws -> Result {
@@ -224,7 +227,7 @@ enum CompressionPlanner {
             if case .targetBytes = effectiveOptions.goal { return true }
             return preset == .small
         }()
-        let entries = try StageTimer.run(stageTimer, .candidateGenerationMs) {
+        var entries = try StageTimer.run(stageTimer, .candidateGenerationMs) {
             try Self.generateCandidateEntries(
                 resources: resources,
                 options: effectiveOptions,
@@ -237,6 +240,47 @@ enum CompressionPlanner {
                 stageTimer: stageTimer,
                 allowsQuantizedPalette: allowsQuantizedPalette,
                 workProgress: workProgress)
+        }
+
+        // Phase 1b (2026-10-15) – MRC nur bei Bedarf: Erst wenn der beste
+        // bereits gefundene Kandidat des dominanten Rasters einer Scan-Seite
+        // noch ueber der Budget-Schwelle liegt, laeuft die teure Provision –
+        // und nur fuer diese Seiten. Ihre Buendel kommen in das fertige Set,
+        // die JPEG-Suche wird nicht wiederholt. Vorher lief die Provision
+        // fuer jede Scan-Seite vor der Planung (10 s je einseitigem Scan,
+        // fast immer vergebens).
+        if let mrcOnDemand, effectiveOptions.featureFlags.mrc {
+            let threshold = effectiveOptions.mrcProvisionBudget.provisionIfCandidateExceedsBytes
+            var indexByResource: [String: Int] = [:]
+            for (index, entry) in entries.enumerated() {
+                indexByResource[entry.generated.set.resourceID] = index
+            }
+            var needed = Set<Int>()
+            for page in MRCPageRewriter.eligiblePages(resources: resources,
+                                                      pageAnalyses: pageAnalyses) {
+                let resourceID = CandidateSet.resourceID(for: page.resource.objectID)
+                guard let index = indexByResource[resourceID] else { continue }
+                var best = entries[index].generated.set.candidates
+                    .map(\.metrics.encodedBytes).min() ?? Int.max
+                // Ein Scan im DPI-Budget hat nur KEEP – dessen Bytes sind
+                // hier das Original, im Dokument aber der verlustfreie
+                // JPEG-Repack (`finalize` rechnet ihn nur bei Konkurrenz).
+                // Der Vergleich gilt dem, was wirklich herauskäme.
+                if entries[index].generated.set.candidates.count == 1,
+                   page.resource.terminalFilter == .dct {
+                    best = min(best, Self.repackBarrier(resource: page.resource,
+                                                        pixels: pixels))
+                }
+                if best > threshold { needed.insert(page.pageIndex) }
+            }
+            if !needed.isEmpty {
+                for provision in try mrcOnDemand(needed) {
+                    guard let index = indexByResource[provision.resourceID] else { continue }
+                    entries[index].generated = CandidateGenerator.merging(
+                        mrc: provision.candidates,
+                        into: entries[index].generated, store: store)
+                }
+            }
         }
         for entry in entries {
             candidateSets.append(entry.generated.set)

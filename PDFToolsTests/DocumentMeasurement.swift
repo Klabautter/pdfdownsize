@@ -119,14 +119,20 @@ import Foundation
 
         // Dann wirklich ausführen – der Plan ist eine Erwartung, kein Ergebnis.
         let runStarted = Date()
+        // Stufenzeiten und Re-Plan-Zähler (2026-10-15): ohne sie war nicht
+        // zu sehen, ob ein Lauf in der Provision, der Leiter oder in einem
+        // QA-Re-Plan hängt.
+        let timer = StageTimer()
         do {
             let result: CompressionResult
             if isVariant {
                 var variant = CompressionOptions(image: options)
                 variant.featureFlags.mrc = (mode != .custom)
-                result = try Compressor().compress(inputURL: url, options: variant)
+                result = try Compressor().compress(inputURL: url, options: variant,
+                                                   stageTimer: timer)
             } else {
-                result = try Compressor().compress(inputURL: url, mode: mode)
+                result = try Compressor().compress(inputURL: url, mode: mode,
+                                                   stageTimer: timer)
             }
             // Auf Wunsch das Ergebnis behalten – ohne das lässt sich nicht
             // nachsehen, WORIN es sich von einem Vergleichswerkzeug
@@ -142,6 +148,15 @@ import Foundation
                                 Double(result.outputBytes) / 1_048_576,
                                 result.savedPercent,
                                 Date().timeIntervalSince(runStarted)))
+            lines.append("  QA-Re-Plans: \(result.qaReplanCount), Fallback: \(result.qaFallbackCount)")
+            let timings = timer.timings
+            let stages = StageTimings.Field.allCases
+                .map { ($0, timings.value($0)) }
+                .filter { $0.1 >= 50 }
+                .sorted { $0.1 > $1.1 }
+            lines.append("  Stufen (s): " + stages.map {
+                String(format: "%@ %.1f", StageTimings.jsonKey($0.0) as NSString, $0.1 / 1000)
+            }.joined(separator: " · "))
         } catch {
             lines.append("Ergebnis:  FEHLER – \(error)")
         }

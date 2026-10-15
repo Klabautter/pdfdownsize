@@ -102,12 +102,15 @@ import PDFKit
             },
             verify: { _, _, _ in
                 calls += 1
-                return calls == 1   // Font 1 besteht, Font 2 scheitert
+                // Aufruf 1 ist der Schnellweg (beide Fonts auf einmal) und
+                // scheitert; danach der Einzelweg: Font 1 besteht, Font 2
+                // scheitert (2026-10-15).
+                return calls == 2
             })
 
         #expect(outcome.subsetted == 1)
         #expect(outcome.rolledBack == 1)
-        #expect(calls == 2)
+        #expect(calls == 3)
 
         let rolledOut = Self.tempURL("rolled")
         defer { try? FileManager.default.removeItem(at: rolledOut) }

@@ -13,7 +13,14 @@ import UniformTypeIdentifiers
 /// dieselbe Seite.
 struct OCRView: View {
     @ObservedObject var vm: OCRViewModel
+    /// Abgelegte Bilder gehören zu Konvertieren – RootView wechselt dorthin.
+    var onForeignFiles: (([URL]) -> Void)? = nil
     @EnvironmentObject private var discardGuard: DiscardGuard
+
+    /// Dieselbe Karte wie das Pult in Komprimieren und Konvertieren
+    /// (ToolWorkspace): gleiche Breite, gleicher Abstand, gleiches Glas.
+    private static let columnWidth: CGFloat = 330
+    private static let columnInset: CGFloat = 16
     @State private var showImporter = false
     @State private var isTargeted = false
 
@@ -29,6 +36,12 @@ struct OCRView: View {
         .frame(minWidth: 700, minHeight: 520)
         .focusedSceneObject(vm)
         .dropDestination(for: URL.self) { urls, _ in
+            let pdfs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
+            let images = urls.filter { ImageImporter.isSupported($0) }
+            if pdfs.isEmpty, !images.isEmpty, let onForeignFiles {
+                onForeignFiles(images)
+                return true
+            }
             discardGuard.run(ifUnsaved: vm.hasUnsavedResult) { vm.accept(urls) }
             return true
         } isTargeted: { targeted in
@@ -76,7 +89,7 @@ struct OCRView: View {
         WorkspaceWelcome(icon: "text.viewfinder",
                          title: String(localized: "PDF durchsuchbar machen"),
                          subtitle: String(localized: "Text in gescannten Seiten erkennen – lokal auf dem Mac."),
-                         dropHint: String(localized: "PDF auch hierher ziehen"),
+                         dropHint: String(localized: "Dateien auch hierher ziehen"),
                          isTargeted: isTargeted) {
             Button("PDF auswählen …") { showImporter = true }
                 .buttonStyle(.borderedProminent)
@@ -101,16 +114,15 @@ struct OCRView: View {
         }
     }
 
-    /// Dokument links, Textspalte rechts – keine schwebende Karte, sondern
-    /// eine feste Spalte wie die Seitenleiste in Vorschau.
+    /// Dokument links, Textspalte rechts als schwebende Glaskarte – dasselbe
+    /// Bild wie das Pult in Komprimieren und Konvertieren (eine Pult-Sprache,
+    /// 15.10.2026). Die Karte ist fensterhoch, weil der erkannte Text scrollt.
     private var workspace: some View {
         GeometryReader { geo in
-            // Untergrenze 300 statt 360: Im schmalen Fenster blieb dem
-            // Dokument sonst nur ein Streifen (Sichtabnahme 2026-10-12, L12).
-            let columnWidth = min(max(geo.size.width * 0.38, 300), 440)
-            HStack(spacing: 0) {
-                ZStack {
-                    Theme.canvas
+            let canvasWidth = max(geo.size.width - Self.columnWidth - Self.columnInset, 200)
+            ZStack(alignment: .topLeading) {
+                Theme.canvas
+                Group {
                     if let url = vm.outputURL ?? vm.savedURL ?? vm.pdfURL {
                         DocumentPreview(url: url, scanning: vm.isWorking,
                                         page: $vm.currentPage,
@@ -121,10 +133,16 @@ struct OCRView: View {
                         }
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                Divider()
+                .frame(width: canvasWidth, height: geo.size.height)
+                // Vor dem Lauf so hoch wie ihr Inhalt (wie die anderen
+                // Pulte); mit erkanntem Text fensterhoch, weil der scrollt.
                 textColumn
-                    .frame(width: columnWidth)
+                    .frame(width: Self.columnWidth,
+                           height: vm.stage == .done ? geo.size.height - 2 * Self.columnInset : nil)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.panelRadius, style: .continuous))
+                    .glassEffect(.regular, in: .rect(cornerRadius: Theme.panelRadius))
+                    .padding(Self.columnInset)
+                    .frame(width: geo.size.width, height: geo.size.height, alignment: .topTrailing)
             }
         }
         .dropTargetOverlay(isTargeted)
@@ -135,17 +153,17 @@ struct OCRView: View {
     private var textColumn: some View {
         VStack(spacing: 0) {
             header
-                .padding(.horizontal, 20)
-                .padding(.top, 16)
+                .padding(.horizontal, Theme.panelPadding)
+                .padding(.top, Theme.panelPadding)
                 .padding(.bottom, 14)
             Divider()
             columnContent
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity)
             Divider()
             footer
-                .padding(20)
+                .padding(Theme.panelPadding)
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .focusEffectDisabled()
     }
 
     private var header: some View {
@@ -216,6 +234,7 @@ struct OCRView: View {
                           page: $vm.currentPage,
                           hits: vm.searchHits,
                           selectedHit: vm.selectedHit)
+                .frame(maxHeight: .infinity)
         case .working:
             ContentUnavailableView {
                 Label("Text wird erkannt", systemImage: "text.viewfinder")
@@ -223,12 +242,12 @@ struct OCRView: View {
             } description: {
                 Text("Der erkannte Text erscheint hier, sobald alle Seiten bearbeitet sind.")
             }
+            .frame(height: 220)
         default:
-            ScrollView {
-                setupView
-                    .padding(20)
-            }
-            .scrollBounceBehavior(.basedOnSize)
+            // Kein ScrollView: Die Karte ist so hoch wie ihr Inhalt, wie
+            // das Pult in Komprimieren und Konvertieren.
+            setupView
+                .padding(Theme.panelPadding)
         }
     }
 
@@ -247,10 +266,12 @@ struct OCRView: View {
             }
             .disabled(vm.stage != .ready)
 
-            Text("Legt eine unsichtbare Textebene über gescannte Seiten – danach lässt sich der Text suchen, markieren und kopieren. Aussehen, Links, Formulare und Lesezeichen bleiben erhalten; Seiten mit vorhandenem Text werden übersprungen.")
+            // Ein Satz im Pult, der Rest als Tooltip (Sichtabnahme 2026-10-15).
+            Text("Macht gescannte Seiten durchsuchbar – das Aussehen bleibt unverändert.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+                .help("Legt eine unsichtbare Textebene über gescannte Seiten. Links, Formulare und Lesezeichen bleiben erhalten; Seiten mit vorhandenem Text werden übersprungen.")
 
             if vm.hasSignature {
                 Label("Digital signiert – die Textebene macht die Signatur ungültig. Das Original bleibt unverändert.",
@@ -302,7 +323,7 @@ struct OCRView: View {
             } else {
                 // Nichts erkannt: kein Sichern-Knopf, der nur das Original
                 // kopieren würde (Sichtabnahme 2026-10-12, L7).
-                Text("Keine Seite wurde neu erkannt – die PDF ist bereits durchsuchbar, es gibt nichts zu sichern.")
+                Text("Keine Seite musste erkannt werden – die PDF ist schon durchsuchbar. Der vorhandene Text steht oben und lässt sich kopieren oder als Text sichern.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -505,13 +526,16 @@ struct OCRTextColumn: NSViewRepresentable {
                     .paragraphStyle: headingStyle,
                     .link: "page:\(section.pageIndex)",
                 ]))
+                // Hinweis UND Text: Eine übersprungene Seite trägt den Hinweis
+                // „nicht neu erkannt" über ihrem vorhandenen Text (15.10.2026).
                 if let note = section.note {
                     text.append(NSAttributedString(string: note + "\n", attributes: [
                         .font: noteFont,
                         .foregroundColor: NSColor.tertiaryLabelColor,
                         .paragraphStyle: noteStyle,
                     ]))
-                } else {
+                }
+                if !section.body.isEmpty {
                     bodyStarts[section.pageIndex] = text.length
                     let (display, breaks) = Self.displayBody(section.body)
                     bodyBreaks[section.pageIndex] = breaks

@@ -469,7 +469,7 @@ enum CompressionExecutor {
         var activeDocument = document
         var selective = FontOptimizer.Outcome(document: document)
         if !plan.fontSubsets.isEmpty {
-            selective = try StageTimer.run(stageTimer, .fontMs) {
+            selective = try StageTimer.run(stageTimer, .fontSubsetMs) {
                 try FontOptimizer.applySelectiveSubsetting(
                     document: activeDocument, decisions: plan.fontSubsets)
             }

@@ -195,6 +195,53 @@ struct RenderDifferential {
         }
     }
 
+    /// Sind die genannten Seiten beider Dokumente PIXELGLEICH (gleiche
+    /// Anzeigemaße, identische Luminanz bei `dpi`)? Dieselbe Rasterung wie
+    /// `compare`, aber ohne SSIM-, Tinte- und Differenzmetriken – für
+    /// Prüfungen, die nur Gleichheit brauchen (je-Font-QA §14.4). Eine
+    /// fehlende Seite oder abweichende Geometrie zählt als ungleich.
+    static func pagesIdentical(sourceURL: URL, outputURL: URL,
+                               pages: [Int],
+                               dpi: Int = RenderDifferential.standardDPI) throws -> Bool {
+        try autoreleasepool {
+        guard let srcDoc = PDFDocument(url: sourceURL),
+              let outDoc = PDFDocument(url: outputURL) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        for index in pages.sorted() {
+            let identical: Bool = autoreleasepool {
+                guard index >= 0, index < srcDoc.pageCount, index < outDoc.pageCount,
+                      let srcPage = srcDoc.page(at: index),
+                      let outPage = outDoc.page(at: index) else { return false }
+                let srcRaw = srcPage.bounds(for: .mediaBox).size
+                let outRaw = outPage.bounds(for: .mediaBox).size
+                let srcDisplay = RotationNormalizer.rotatedSize(
+                    width: srcRaw.width, height: srcRaw.height, rotation: srcPage.rotation)
+                let outDisplay = RotationNormalizer.rotatedSize(
+                    width: outRaw.width, height: outRaw.height, rotation: outPage.rotation)
+                guard abs(srcDisplay.width - outDisplay.width) < 0.01,
+                      abs(srcDisplay.height - outDisplay.height) < 0.01 else { return false }
+                let scale = Double(dpi) / 72.0
+                var w = Int((outDisplay.width * scale).rounded())
+                var h = Int((outDisplay.height * scale).rounded())
+                let capFactor = min(1.0,
+                    Double(maxMetricEdge) / Double(max(w, h, 1)),
+                    Double(maxRenderEdge) / Double(max(w, h, 1)))
+                w = max(1, Int((Double(w) * capFactor).rounded()))
+                h = max(1, Int((Double(h) * capFactor).rounded()))
+                let size = CGSize(width: w, height: h)
+                guard let a = renderPage(srcPage, size: size),
+                      let b = renderPage(outPage, size: size),
+                      let lumaA = grayscaleBuffer(a, w: w, h: h),
+                      let lumaB = grayscaleBuffer(b, w: w, h: h) else { return false }
+                return lumaA == lumaB
+            }
+            if !identical { return false }
+        }
+        return true
+        }
+    }
+
     // MARK: - Rendering
 
     private static func renderPage(_ page: PDFPage, size: CGSize) -> CGImage? {

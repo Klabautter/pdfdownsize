@@ -19,6 +19,12 @@ struct StageTimings: Equatable, Sendable, Codable {
     var featureAnalysisMs: Double = 0
     /// Planung: Kandidaten kodieren, Leiter-/Race-Entscheidungen.
     var candidateGenerationMs: Double = 0
+    /// MRC-Provision der Scan-Seiten (Segmentierung, Stufen, Scratch-QA) –
+    /// seit 2026-10-15 getrennt von der Kandidatenerzeugung, damit die
+    /// Laufzeit der Provision für sich sichtbar ist.
+    var mrcProvisionMs: Double = 0
+    /// Font-Trockenplanung (hb-subset) vor der Planung.
+    var fontProvisionMs: Double = 0
     /// Bildtransformationen (Ersetzungen über die Bridge).
     var executionMs: Double = 0
     /// Verlustfreier JPEG-Repack behaltener DCT-Streams (1b/6b).
@@ -27,8 +33,10 @@ struct StageTimings: Equatable, Sendable, Codable {
     var zopfliRepackMs: Double = 0
     /// Bild-Dedup + Content-Hash-Dedup (3b).
     var dedupMs: Double = 0
-    /// Font-Dedup/GC (5a) + Font-Subsetting (5b, auch selektiv §14.4).
+    /// Font-Dedup/GC (5a).
     var fontMs: Double = 0
+    /// Font-Subsetting (5b, selektiv §14.4) – seit 2026-10-15 getrennt.
+    var fontSubsetMs: Double = 0
     /// V2-8 (§14.6) – Resource GC der Resource-Maps.
     var resourceGCMs: Double = 0
     /// Finaler Schreibvorgang des Dokuments.
@@ -40,8 +48,9 @@ struct StageTimings: Equatable, Sendable, Codable {
 
     enum Field: String, CaseIterable, Sendable {
         case openDocumentMs, inventoryMs, featureAnalysisMs
-        case candidateGenerationMs, executionMs, jpegRepackMs
-        case zopfliRepackMs, dedupMs, fontMs, resourceGCMs, writeMs
+        case candidateGenerationMs, mrcProvisionMs, fontProvisionMs
+        case executionMs, jpegRepackMs
+        case zopfliRepackMs, dedupMs, fontMs, fontSubsetMs, resourceGCMs, writeMs
         case structureMs, semanticValidationMs
     }
 
@@ -51,11 +60,14 @@ struct StageTimings: Equatable, Sendable, Codable {
         case .inventoryMs: return inventoryMs
         case .featureAnalysisMs: return featureAnalysisMs
         case .candidateGenerationMs: return candidateGenerationMs
+        case .mrcProvisionMs: return mrcProvisionMs
+        case .fontProvisionMs: return fontProvisionMs
         case .executionMs: return executionMs
         case .jpegRepackMs: return jpegRepackMs
         case .zopfliRepackMs: return zopfliRepackMs
         case .dedupMs: return dedupMs
         case .fontMs: return fontMs
+        case .fontSubsetMs: return fontSubsetMs
         case .resourceGCMs: return resourceGCMs
         case .writeMs: return writeMs
         case .structureMs: return structureMs
@@ -70,11 +82,14 @@ struct StageTimings: Equatable, Sendable, Codable {
         case .inventoryMs: return "inventory_ms"
         case .featureAnalysisMs: return "feature_analysis_ms"
         case .candidateGenerationMs: return "candidate_generation_ms"
+        case .mrcProvisionMs: return "mrc_provision_ms"
+        case .fontProvisionMs: return "font_provision_ms"
         case .executionMs: return "execution_ms"
         case .jpegRepackMs: return "jpeg_repack_ms"
         case .zopfliRepackMs: return "zopfli_ms"
         case .dedupMs: return "dedup_ms"
         case .fontMs: return "font_ms"
+        case .fontSubsetMs: return "font_subset_ms"
         case .resourceGCMs: return "resource_gc_ms"
         case .writeMs: return "write_ms"
         case .structureMs: return "structure_ms"
@@ -114,11 +129,14 @@ final class StageTimer: @unchecked Sendable {
         case .inventoryMs: values.inventoryMs += milliseconds
         case .featureAnalysisMs: values.featureAnalysisMs += milliseconds
         case .candidateGenerationMs: values.candidateGenerationMs += milliseconds
+        case .mrcProvisionMs: values.mrcProvisionMs += milliseconds
+        case .fontProvisionMs: values.fontProvisionMs += milliseconds
         case .executionMs: values.executionMs += milliseconds
         case .jpegRepackMs: values.jpegRepackMs += milliseconds
         case .zopfliRepackMs: values.zopfliRepackMs += milliseconds
         case .dedupMs: values.dedupMs += milliseconds
         case .fontMs: values.fontMs += milliseconds
+        case .fontSubsetMs: values.fontSubsetMs += milliseconds
         case .resourceGCMs: values.resourceGCMs += milliseconds
         case .writeMs: values.writeMs += milliseconds
         case .structureMs: values.structureMs += milliseconds

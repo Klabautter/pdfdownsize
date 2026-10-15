@@ -66,6 +66,10 @@ enum OCREngine {
         let lines: [Line]
         /// Seite hatte schon Text und wurde nicht erkannt.
         var skippedExistingText = false
+        /// Der vorhandene Text einer übersprungenen Seite (PDFKit) – damit
+        /// „Text kopieren“ und „Als Text sichern“ auch bei bereits
+        /// durchsuchbaren PDFs etwas liefern (Linus, 15.10.2026).
+        var existingText: String? = nil
 
         var text: String { lines.map(\.text).joined(separator: "\n") }
         var wordCount: Int {
@@ -131,7 +135,8 @@ enum OCREngine {
             progress(Double(i) / Double(total) * 0.95)
 
             if hasExistingText(page, rasterCoverage: coverage[i] ?? 0) {
-                results.append(PageResult(pageIndex: i, lines: [], skippedExistingText: true))
+                results.append(PageResult(pageIndex: i, lines: [], skippedExistingText: true,
+                                          existingText: page.string))
                 continue
             }
             let render = try renderCGImage(of: page)

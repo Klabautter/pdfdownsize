@@ -81,8 +81,16 @@ final class OCRViewModel: ObservableObject {
     private static func sections(from results: [OCREngine.PageResult]) -> [TextSection] {
         results.sorted { $0.pageIndex < $1.pageIndex }.map { page in
             if page.skippedExistingText {
-                return TextSection(pageIndex: page.pageIndex, body: "",
-                                   note: String(localized: "Hatte bereits Text und wurde nicht erneut erkannt."))
+                // Vorhandener Text steht in der Spalte und zählt für Kopieren
+                // und „Als Text sichern“ – nur die Markierung im Dokument
+                // bleibt den neu erkannten Seiten vorbehalten.
+                let existing = Self.paragraphs(fromExistingText: page.existingText ?? "")
+                if existing.isEmpty {
+                    return TextSection(pageIndex: page.pageIndex, body: "",
+                                       note: String(localized: "Hatte bereits Text und wurde nicht erneut erkannt."))
+                }
+                return TextSection(pageIndex: page.pageIndex, body: existing,
+                                   note: String(localized: "Vorhandener Text der Seite – nicht neu erkannt."))
             }
             let paragraphs = OCRTextLayout.paragraphs(from: page.lines)
             if paragraphs.isEmpty {
@@ -91,6 +99,21 @@ final class OCRViewModel: ObservableObject {
             return TextSection(pageIndex: page.pageIndex,
                                body: paragraphs.joined(separator: "\n\n"), note: nil)
         }
+    }
+
+    /// Vorhandenen Seitentext in Absätze bringen: Leerzeilen trennen,
+    /// Zeilenumbrüche innerhalb eines Absatzes zu Leerzeichen.
+    private static func paragraphs(fromExistingText text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        return trimmed
+            .components(separatedBy: "\n\n")
+            .map { $0.split(whereSeparator: \.isNewline)
+                     .map { $0.trimmingCharacters(in: .whitespaces) }
+                     .filter { !$0.isEmpty }
+                     .joined(separator: " ") }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
     }
 
     struct SearchHit: Identifiable, Hashable {
@@ -165,7 +188,11 @@ final class OCRViewModel: ObservableObject {
         textSections.map(\.body).filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
     var hasText: Bool { textSections.contains { !$0.body.isEmpty } }
-    var totalWords: Int { pageResults.map(\.wordCount).reduce(0, +) }
+    /// Wörter des sichtbaren Textes – erkannter wie vorhandener (die Spalte
+    /// und „Als Text sichern" liefern beides).
+    var totalWords: Int {
+        textSections.reduce(0) { $0 + $1.body.split { $0.isWhitespace || $0.isNewline }.count }
+    }
     var meanConfidence: Float? {
         let all = pageResults.flatMap(\.lines)
         guard !all.isEmpty else { return nil }

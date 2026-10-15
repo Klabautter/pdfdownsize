@@ -25,11 +25,20 @@ struct MRCProvisionBudget: Equatable, Codable, Sendable {
     /// Weiches Dokumentbudget. Eine bereits laufende Seite wird sauber zu
     /// Ende geprueft; danach startet keine weitere Provision.
     var maximumElapsedSeconds: Double
+    /// MRC nur bei Bedarf (2026-10-15): Die Provision einer Scan-Seite
+    /// (Segmentierung, zwei Stufen, Scratch-Rekonstruktion, zwei Seiten-
+    /// render) kostet 3 bis 10 s und verlor auf dem Smoke-Korpus fast
+    /// immer gegen den JPEG-Kandidaten der Smart-Leiter. Sie laeuft darum
+    /// erst, wenn der beste bereits gefundene Kandidat des dominanten
+    /// Rasters noch ueber dieser Groesse liegt – dort kann MRC spuerbar
+    /// gewinnen (Buchscans, Farbscans in hoher Aufloesung). 0 = immer.
+    var provisionIfCandidateExceedsBytes: Int = 0
 
     static let oneClick = MRCProvisionBudget(
         maximumPages: 8,
         maximumPixels: 200_000_000,
-        maximumElapsedSeconds: 60)
+        maximumElapsedSeconds: 60,
+        provisionIfCandidateExceedsBytes: 128 * 1024)
 
     func permitsNextPage(attemptedPages: Int,
                          attemptedPixels: Int64,
