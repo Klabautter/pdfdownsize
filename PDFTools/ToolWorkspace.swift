@@ -2,14 +2,31 @@ import SwiftUI
 import PDFKit
 import UniformTypeIdentifiers
 
+/// Rollt den Pultinhalt zu einem `.id(...)`-Ziel – für Teile, die
+/// aufklappen, während das Pult schon scrollt („Eigene" + Optionen).
+private struct PanelScrollProxyKey: EnvironmentKey {
+    static let defaultValue: ScrollViewProxy? = nil
+}
+
+extension EnvironmentValues {
+    var panelScrollProxy: ScrollViewProxy? {
+        get { self[PanelScrollProxyKey.self] }
+        set { self[PanelScrollProxyKey.self] = newValue }
+    }
+}
+
 /// Gemeinsames Arbeitslayout aller Werkzeuge: links die Fläche mit dem
 /// Dokument, rechts das schwebende Glas-Pult. Komprimieren hat es zuerst
 /// bekommen; Konvertieren, OCR und das Ergebnis in Organisieren nutzen
 /// dasselbe Muster, damit die App aus einem Guss ist.
-struct ToolWorkspace<Canvas: View, Panel: View, Footer: View>: View {
+struct ToolWorkspace<Header: View, Canvas: View, Panel: View, Footer: View>: View {
     var panelWidth: CGFloat = 330
     private static var panelInset: CGFloat { 16 }
     @ViewBuilder let canvas: () -> Canvas
+    /// Bleibt ÜBER dem scrollenden Teil stehen (Dateiname, Schließen):
+    /// In „Eigene" scrollte der Kopf sonst weg, und das Pult verlor seine
+    /// Identität (Rundgang 2026-10-15).
+    @ViewBuilder let header: () -> Header
     @ViewBuilder let panel: () -> Panel
     /// Bleibt unter dem Pultinhalt stehen, auch wenn der scrollt – die
     /// Hauptaktion darf nie unter den Fensterrand rutschen
@@ -19,6 +36,7 @@ struct ToolWorkspace<Canvas: View, Panel: View, Footer: View>: View {
     @State private var panelHeight: CGFloat = 0
 
     @State private var moreBelow = false
+    @State private var headerHeight: CGFloat = 0
     @State private var footerHeight: CGFloat = 0
 
     var body: some View {
@@ -26,7 +44,8 @@ struct ToolWorkspace<Canvas: View, Panel: View, Footer: View>: View {
             let canvasWidth = max(geo.size.width - panelWidth - Self.panelInset, 200)
             // Höhe, die dem scrollenden Teil bleibt: Fläche minus Außenabstand,
             // Glas-Innenabstand und Fuß.
-            let room = geo.size.height - 2 * Self.panelInset - 2 * Theme.panelPadding - footerHeight
+            let room = geo.size.height - 2 * Self.panelInset - 2 * Theme.panelPadding
+                - headerHeight - footerHeight
             ZStack(alignment: .topLeading) {
                 Theme.canvas
                 canvas()
@@ -36,8 +55,12 @@ struct ToolWorkspace<Canvas: View, Panel: View, Footer: View>: View {
                 // Scroll-View um das Glas: Ihr Rand schnitt den Glasschatten
                 // zu einem Rechteck ab (heller Modus, Sichtabnahme 2026-10-12).
                 VStack(alignment: .leading, spacing: 0) {
+                    header()
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { headerHeight = $0 }
+                    ScrollViewReader { proxy in
                     ScrollView {
                         panel()
+                            .environment(\.panelScrollProxy, proxy)
                             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { panelHeight = $0 }
                     }
                     .scrollBounceBehavior(.basedOnSize)
@@ -61,6 +84,7 @@ struct ToolWorkspace<Canvas: View, Panel: View, Footer: View>: View {
                         }
                     }
                     .frame(height: panelHeight > 0 ? min(panelHeight, max(room, 120)) : nil)
+                    }
                     footer()
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { footerHeight = $0 }
                 }
@@ -73,11 +97,22 @@ struct ToolWorkspace<Canvas: View, Panel: View, Footer: View>: View {
     }
 }
 
-extension ToolWorkspace where Footer == EmptyView {
+extension ToolWorkspace where Header == EmptyView, Footer == EmptyView {
     init(panelWidth: CGFloat = 330,
          @ViewBuilder canvas: @escaping () -> Canvas,
          @ViewBuilder panel: @escaping () -> Panel) {
-        self.init(panelWidth: panelWidth, canvas: canvas, panel: panel, footer: { EmptyView() })
+        self.init(panelWidth: panelWidth, canvas: canvas, header: { EmptyView() },
+                  panel: panel, footer: { EmptyView() })
+    }
+}
+
+extension ToolWorkspace where Header == EmptyView {
+    init(panelWidth: CGFloat = 330,
+         @ViewBuilder canvas: @escaping () -> Canvas,
+         @ViewBuilder panel: @escaping () -> Panel,
+         @ViewBuilder footer: @escaping () -> Footer) {
+        self.init(panelWidth: panelWidth, canvas: canvas, header: { EmptyView() },
+                  panel: panel, footer: footer)
     }
 }
 

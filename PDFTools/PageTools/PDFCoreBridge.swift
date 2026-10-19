@@ -1857,8 +1857,14 @@ struct CMDoScanner {
             let ch = bytes[i]
 
             if inInlineImage {
-                if matchKeyword("EI") { inInlineImage = false }
-                else { i += 1 }
+                // `EI` nur mit Whitespace davor, Trenner dahinter und
+                // druckbarem Nachlauf – Binärdaten tragen zufällig „ EI "
+                // (2026-10-15, siehe pdfcore_skip_inline_image).
+                if i > 0, isWhitespace(bytes[i-1]), matchInlineImageEnd() {
+                    inInlineImage = false
+                } else {
+                    i += 1
+                }
                 continue
             }
 
@@ -1946,6 +1952,26 @@ struct CMDoScanner {
         let str = String(bytes: bytes[i..<j], encoding: .utf8)!
         i = j
         return Double(str)
+    }
+
+    /// `EI` am Ende eines Inline-Bilds: dahinter Trenner oder Ende und in
+    /// den nächsten 24 Bytes nur druckbares ASCII oder Whitespace.
+    private mutating func matchInlineImageEnd() -> Bool {
+        guard i + 2 <= bytes.count,
+              bytes[i] == UInt8(ascii: "E"), bytes[i+1] == UInt8(ascii: "I") else { return false }
+        let after = i + 2
+        if after < bytes.count {
+            let c = bytes[after]
+            let delimiter = isWhitespace(c)
+                || "/[]<>(){}%".utf8.contains(c)
+            guard delimiter else { return false }
+            for q in after..<min(bytes.count, after + 24) {
+                let b = bytes[q]
+                if !(isWhitespace(b) || (b >= 0x20 && b <= 0x7e)) { return false }
+            }
+        }
+        i = after
+        return true
     }
 
     private mutating func matchKeyword(_ kw: String) -> Bool {

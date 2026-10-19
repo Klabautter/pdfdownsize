@@ -105,6 +105,9 @@ private struct SingleStage: View {
     let isTargeted: Bool
 
     @State private var compareFraction: Double = 0.5
+    /// Solange das Zielgrößen-Feld den Fokus hat, ist Return KEIN
+    /// „Komprimieren" (Rundgang 2026-10-15: Bestätigen startete den Lauf).
+    @FocusState private var targetFieldFocused: Bool
 
     private var pending: CompressionResult? { viewModel.pendingResult }
     private var showsCompare: Bool {
@@ -133,10 +136,16 @@ private struct SingleStage: View {
                         .padding(.bottom, 16)
                 }
             }
+        } header: {
+            ControlPanel(viewModel: viewModel, part: .header,
+                         targetFieldFocused: $targetFieldFocused)
+                .padding(.bottom, 20)
         } panel: {
-            ControlPanel(viewModel: viewModel, part: .settings)
+            ControlPanel(viewModel: viewModel, part: .settings,
+                         targetFieldFocused: $targetFieldFocused)
         } footer: {
-            ControlPanel(viewModel: viewModel, part: .action)
+            ControlPanel(viewModel: viewModel, part: .action,
+                         targetFieldFocused: $targetFieldFocused)
                 .padding(.top, 20)
         }
         .dropTargetOverlay(isTargeted)
@@ -189,16 +198,21 @@ private struct ControlPanel: View {
     /// Aktion, die darunter stehen bleibt (`ToolWorkspace.footer`): In
     /// „Eigene" rutschte „Komprimieren" sonst unter den Fensterrand
     /// (Sichtabnahme 2026-10-12, M7).
-    enum Part { case settings, action }
+    enum Part { case header, settings, action }
     var part: Part = .settings
+    @FocusState.Binding var targetFieldFocused: Bool
+    @Environment(\.panelScrollProxy) private var scrollProxy
 
     var body: some View {
         Group {
             switch part {
-            case .settings:
+            case .header:
                 VStack(alignment: .leading, spacing: 20) {
                     header
                     Divider()
+                }
+            case .settings:
+                VStack(alignment: .leading, spacing: 20) {
                     if finished == nil {
                         modeSection
                         if viewModel.mode == .custom {
@@ -325,12 +339,13 @@ private struct ControlPanel: View {
                 SizeReadout(original: original,
                             content: r.alreadyOptimized ? .alreadyOptimal : .result(r.outputBytes))
                 if let target = r.targetRequestedBytes {
+                    // Nicht erreicht ist eine Auskunft, kein Warnzeichen.
                     Label(CompressionViewModel.targetResultText(requested: target,
                                                                achieved: r.outputBytes,
                                                                met: r.targetMet ?? false),
-                          systemImage: r.targetMet == true ? "checkmark.circle" : "exclamationmark.triangle")
+                          systemImage: r.targetMet == true ? "checkmark.circle" : "target")
                         .font(.callout)
-                        .foregroundStyle(r.targetMet == true ? Theme.savings : .orange)
+                        .foregroundStyle(r.targetMet == true ? AnyShapeStyle(Theme.savings) : AnyShapeStyle(.secondary))
                 }
                 if let hint = CompressionViewModel.qualityHintText(qaReplanCount: r.qaReplanCount,
                                                                    fallbackCount: r.qaFallbackCount) {
@@ -351,8 +366,7 @@ private struct ControlPanel: View {
                 if let assessment = viewModel.targetAssessment {
                     Label(CompressionViewModel.targetEstimateText(assessment), systemImage: "target")
                         .font(.callout)
-                        .foregroundStyle(assessment.reachability == .notSafelyReachable
-                                         ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                        .foregroundStyle(.secondary)
                 }
             } else {
                 SizeReadout(original: original, content: .estimating)
@@ -371,6 +385,9 @@ private struct ControlPanel: View {
                             .textFieldStyle(.roundedBorder)
                             .multilineTextAlignment(.trailing)
                             .frame(width: 70)
+                            .focused($targetFieldFocused)
+                            // Return bestätigt nur das Feld.
+                            .onSubmit { targetFieldFocused = false }
                         Text("MB").foregroundStyle(.secondary)
                     }
                 }
@@ -393,7 +410,18 @@ private struct ControlPanel: View {
             }
         }
         .font(.callout)
+        .id(Self.optionsAnchor)
+        // Aufgeklappt ins Bild rollen – in „Eigene" lagen die Optionen
+        // sonst unsichtbar unter dem Pultrand (Rundgang 2026-10-15).
+        .onChange(of: showOptions) { _, expanded in
+            guard expanded, let scrollProxy else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                withAnimation { scrollProxy.scrollTo(Self.optionsAnchor, anchor: .bottom) }
+            }
+        }
     }
+
+    private static let optionsAnchor = "optionen"
 
     private var optionsSummary: String? {
         var parts: [String] = []
@@ -448,7 +476,7 @@ private struct ControlPanel: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.extraLarge)
-                .keyboardShortcut(.defaultAction)
+                .keyboardShortcut(targetFieldFocused ? nil : .defaultAction)
                 .disabled(!viewModel.canCompress)
                 if viewModel.largeFileNotice != nil {
                     Text("Große Datei – das kann einige Minuten dauern.")

@@ -137,11 +137,11 @@ final class CompressionViewModel: ObservableObject {
     /// Text wird zu `CompressionGoal.targetBytes` geparst und landet über
     /// `currentOptions.goal` im EINEN Optionsobjekt; es gibt keinen zweiten
     /// Weg zur Engine.
+    /// Gilt je Dokument (Rundgang 2026-10-15): Ein einmal eingetragenes
+    /// Ziel klebte sonst an jeder weiteren Datei und meldete dort
+    /// „verfehlt". Beim Wechsel des Dokuments wird das Feld geleert.
     @Published var targetSizeText: String {
-        didSet {
-            defaults.set(targetSizeText, forKey: "compressTargetSize")
-            scheduleEstimateRefresh()
-        }
+        didSet { scheduleEstimateRefresh() }
     }
     /// S/W-Richtlinie: verlustfreier Race (G4/JBIG2) oder unangetastet.
     @Published var customBilevelPolicy: BilevelPolicy {
@@ -180,7 +180,7 @@ final class CompressionViewModel: ObservableObject {
         customForceGray = d.bool(forKey: "customForceGray")
         customStripMetadata = d.bool(forKey: "customStripMetadata")
         linearizeForWeb = d.bool(forKey: "compressLinearize")
-        targetSizeText = d.string(forKey: "compressTargetSize") ?? ""
+        targetSizeText = ""
         customBilevelPolicy = d.string(forKey: "customBilevelPolicy")
             .flatMap(BilevelPolicy.init(rawValue:)) ?? .auto
         customCompatibility = d.string(forKey: "customCompatibility")
@@ -341,6 +341,7 @@ final class CompressionViewModel: ObservableObject {
         hasSignature = false
         estimate = nil
         targetAssessment = nil
+        targetSizeText = ""
         originalDocument = PDFDocument(url: url)
 
         let currentURL = url
@@ -564,7 +565,7 @@ final class CompressionViewModel: ObservableObject {
             } catch {
                 await MainActor.run {
                     guard self.cancelFlag === flag else { return }
-                    self.errorMessage = error.localizedDescription
+                    self.errorMessage = Self.userFacingMessage(for: error)
                     self.isWorking = false
                     self.workStartedAt = nil
                     self.isCancelling = false
@@ -702,7 +703,7 @@ final class CompressionViewModel: ObservableObject {
                         // Einzeln abgebrochen – steht bereits in der Menge,
                         // kein Fehlertext nötig.
                     } else {
-                        errors[url] = error.localizedDescription
+                        errors[url] = Self.userFacingMessage(for: error)
                     }
                 }
                 bulkFractions[index] = 1
@@ -831,6 +832,7 @@ final class CompressionViewModel: ObservableObject {
             errorMessage = nil
             inputURL = nil
             originalDocument = nil
+            targetSizeText = ""
             thumbnailTask?.cancel()
             pageThumbnails = [:]
             estimate = nil
@@ -1074,8 +1076,44 @@ final class CompressionViewModel: ObservableObject {
         case .uncertain:
             return String(localized: "Ziel \(target) – unsicher, der Lauf entscheidet")
         case .notSafelyReachable:
-            return String(localized: "Ziel \(target) – sicher erreichbar ca. \(CompressionResult.format(assessment.safelyReachableBytes))")
+            // Keine zweite Zahl neben der Schätzung (Rundgang 2026-10-15:
+            // „sicher erreichbar 867 KB" stand neben „voraussichtlich 694 KB").
+            return String(localized: "Ziel \(target) – wird vermutlich nicht ganz erreicht")
         }
+    }
+
+    /// Engine-Fehler in Nutzersprache. Die Validierung meldet ihre Befunde
+    /// als Testvertrag mit Fingerprints („Seite 7 Textinhalt: adfb… → dd7b…");
+    /// dem Nutzer gehört stattdessen, WAS passiert wäre und dass seine Datei
+    /// unverändert bleibt (Rundgang 2026-10-15).
+    nonisolated static func userFacingMessage(for error: Error) -> String {
+        guard case PDFValidator.ValidationError.invalid(let failures) = error else {
+            return error.localizedDescription
+        }
+        var pages: [Int] = []
+        for failure in failures {
+            var rest = Substring(failure)
+            while let range = rest.range(of: "Seite ") {
+                rest = rest[range.upperBound...]
+                let digits = rest.prefix(while: \.isNumber)
+                if let n = Int(digits), !pages.contains(n) { pages.append(n) }
+            }
+        }
+        pages.sort()
+        let textual = failures.contains { $0.contains("Text") }
+        let location: String
+        switch pages.count {
+        case 0: location = ""
+        case 1: location = String(localized: " auf Seite \(pages[0])")
+        default:
+            let list = pages.prefix(4).map(String.init).joined(separator: ", ")
+            location = pages.count > 4
+                ? String(localized: " auf den Seiten \(list) …")
+                : String(localized: " auf den Seiten \(list)")
+        }
+        return textual
+            ? String(localized: "Nicht komprimiert: Das Ergebnis hätte\(location) Text verloren. Die Datei bleibt unverändert.")
+            : String(localized: "Nicht komprimiert: Das Ergebnis wich\(location) vom Original ab. Die Datei bleibt unverändert.")
     }
 
     /// Ergebnis-Anzeige nach dem Lauf (§17): erreichte Größe gegen das
@@ -1086,9 +1124,11 @@ final class CompressionViewModel: ObservableObject {
                                              met: Bool) -> String {
         let target = CompressionResult.format(requested)
         let out = CompressionResult.format(achieved)
+        // Nicht erreicht ist kein Scheitern (Rundgang 2026-10-15): Der
+        // Modus hat geholt, was seine Qualitätsgrenzen erlauben.
         return met
             ? String(localized: "Ziel \(target) erreicht: \(out)")
-            : String(localized: "Ziel \(target) verfehlt: \(out)")
+            : String(localized: "Kleinstmöglich in diesem Modus: \(out) – Ziel war \(target)")
     }
 
     /// Dezenter Hinweis auf QA-Nachläufe (V2-5-Felder) – nil, wenn es keine

@@ -5178,6 +5178,65 @@ void font5_register_map(QPDFObjectHandle const& fontMap, font5_walk& w)
     }
 }
 
+/// Inline-Bild überspringen (2026-10-15, NASA-Bericht Seite 7): Nach `BI`
+/// folgt ein Dict, dann `ID`, EIN Whitespace und Binärdaten bis `EI`. Die
+/// Binärdaten enthalten alles – „(", „%", „<<" –, und die Token-Scanner
+/// lasen sie als Literal-String oder Kommentar und verloren jede Referenz
+/// dahinter (8 519 CCITT-Stencils, Schriften und ein XObject beräumt, die
+/// Seite verlor Text). `i` steht hinter `BI`; bei Erfolg hinter `EI`.
+///
+/// `EI` gilt nur, wenn davor Whitespace steht, dahinter Whitespace/EOF und
+/// die nächsten Bytes wie Operatoren aussehen (druckbares ASCII): Ein
+/// zufälliges „ EI " in Binärdaten geht sonst als Ende durch. Ohne gültiges
+/// `EI` bleibt `i` auf dem Ende – konservativer als Binärdaten zu deuten.
+static bool pdfcore_skip_inline_image(std::string const& bytes, size_t& i)
+{
+    size_t const n = bytes.size();
+    auto isWS = [](unsigned char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
+            || c == 0;
+    };
+    auto isDelim = [&](unsigned char c) {
+        return isWS(c) || c == '/' || c == '[' || c == ']' || c == '<'
+            || c == '>' || c == '(' || c == ')' || c == '{' || c == '}'
+            || c == '%';
+    };
+    // Bis zum Operator `ID` (eigenes Token).
+    size_t p = i;
+    bool found = false;
+    while (p + 1 < n) {
+        if (bytes[p] == 'I' && bytes[p + 1] == 'D'
+            && (p == 0 || isDelim(static_cast<unsigned char>(bytes[p - 1])))
+            && (p + 2 >= n || isWS(static_cast<unsigned char>(bytes[p + 2])))) {
+            found = true;
+            break;
+        }
+        ++p;
+    }
+    if (!found) { i = n; return false; }
+    p += 2;
+    if (p < n) { ++p; }   // genau ein Whitespace vor den Daten
+    while (p + 1 < n) {
+        if (bytes[p] == 'E' && bytes[p + 1] == 'I'
+            && isWS(static_cast<unsigned char>(bytes[p - 1]))
+            && (p + 2 >= n || isDelim(static_cast<unsigned char>(bytes[p + 2])))) {
+            bool plausible = true;
+            size_t const probeEnd = std::min(n, p + 2 + 24);
+            for (size_t q = p + 2; q < probeEnd; ++q) {
+                unsigned char c = static_cast<unsigned char>(bytes[q]);
+                if (!(isWS(c) || (c >= 0x20 && c <= 0x7e))) {
+                    plausible = false;
+                    break;
+                }
+            }
+            if (plausible) { i = p + 2; return true; }
+        }
+        ++p;
+    }
+    i = n;
+    return false;
+}
+
 // Vorwärtsdeklaration – Form-XObjects rekursieren.
 bool font5_walk_consumer(std::vector<QPDFObjectHandle> const& contents,
                          QPDFObjectHandle const& resources,
@@ -5287,6 +5346,11 @@ void font5_scan_tokens(std::string const& bytes,
                 ++i;
             }
             std::string op = bytes.substr(start, i - start);
+            if (op == "BI") {
+                pdfcore_skip_inline_image(bytes, i);
+                lastName.clear();
+                continue;
+            }
             if (op == "Tf" && !lastName.empty()) {
                 // Ein Name vor Tf belegt die Font-Ressource – konservativ
                 // genügt jede Begegnung, Scoping-Fehler gehen Richtung
@@ -7471,6 +7535,11 @@ void rgc_scan_tokens(std::string const& bytes,
                 ++i;
             }
             std::string op = bytes.substr(start, i - start);
+            if (op == "BI") {
+                pdfcore_skip_inline_image(bytes, i);
+                lastNameIsName = false;
+                continue;
+            }
             if (op == "Do") { markName(rgc_xobject); }
             else if (op == "gs") { markName(rgc_extgstate); }
             else if (op == "sh") { markName(rgc_shading); }

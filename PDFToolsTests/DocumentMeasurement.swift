@@ -125,9 +125,16 @@ import Foundation
         let timer = StageTimer()
         do {
             let result: CompressionResult
-            if isVariant {
-                var variant = CompressionOptions(image: options)
-                variant.featureFlags.mrc = (mode != .custom)
+            // PDFTOOLS_MEASURE_FONTS=off: Font-Pass abschalten, um einen
+            // Validierungsfehler dem Font- oder dem Bildpfad zuzuordnen.
+            let fontsOff = env["PDFTOOLS_MEASURE_FONTS"] == "off"
+            if isVariant || fontsOff {
+                var variant = isVariant
+                    ? CompressionOptions(image: options)
+                    : CompressionOptions.make(mode: mode, customConfig: nil,
+                                              stripMetadata: false, linearize: false)
+                if isVariant { variant.featureFlags.mrc = (mode != .custom) }
+                if fontsOff { variant.fontSubsettingPolicy = .off }
                 result = try Compressor().compress(inputURL: url, options: variant,
                                                    stageTimer: timer)
             } else {

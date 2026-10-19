@@ -1033,6 +1033,42 @@ enum PDFFixtures {
     /// Map ist geschützt (Whitelist-Muster der Font-GC).
     /// `acroFormDR`: /AcroForm/DR trägt ein XObject, das kein Seitencontent
     /// je zeichnet – die Default-Ressourcen bleiben grundsätzlich stehen.
+    /// Inline-Bild VOR den Referenzen (2026-10-15, NASA-Bericht Seite 7):
+    /// Die Binärdaten tragen „(", „%", „<<" und ein falsches „ EI " mit
+    /// Binär-Nachlauf. Ein Scanner, der Inline-Bilder nicht überspringt,
+    /// liest sie als Literal-String/Kommentar und sieht weder `/Im0 Do`
+    /// noch `/F1 Tf` dahinter – die GC beräumt dann benutzte Einträge.
+    static func inlineImageBeforeResourcesPDF(name: String = "inline-image-refs")
+        throws -> URL {
+        let image = try tinyFlateImage(seed: 44)
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let im0 = b.addStream(dictionary: image.dict, data: image.data)
+        let font = b.addObject("<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>")
+
+        // 5×4 Graustufen, 8 Bit = 20 Bytes Rohdaten.
+        let binary: [UInt8] = [
+            0x28, 0x25, 0x3C, 0x3C, 0x0A,       // ( % << \n
+            0x45, 0x49, 0x20, 0xFF, 0xFE,       // „EI " mit Binär-Nachlauf
+            0x28, 0x5C, 0x29, 0x25, 0x01,
+            0x02, 0x03, 0x0A, 0x45, 0x49,       // „\nEI" direkt vor dem Ende
+        ]
+        var content = Data("q 50 0 0 40 72 600 cm BI /W 5 /H 4 /CS /G /BPC 8 ID ".utf8)
+        content.append(contentsOf: binary)
+        content.append(Data(" EI Q q 150 0 0 150 72 100 cm /Im0 Do Q BT /F1 12 Tf 72 700 Td (A) Tj ET".utf8))
+        let contentStream = b.addStream(dictionary: "", data: content)
+
+        let page = b.addObject(
+            "<</Type/Page/Parent \(pages) 0 R/MediaBox[0 0 612 792]"
+            + "/Resources<</XObject<</Im0 \(im0) 0 R>>/Font<</F1 \(font) 0 R>>>>"
+            + "/Contents \(contentStream) 0 R>>")
+        b.fill(pages, "<</Type/Pages/Kids[\(page) 0 R]/Count 1>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R>>")
+        let url = fixtureURL(prefix: name)
+        try b.build(rootObject: root).write(to: url)
+        return url
+    }
+
     static func unusedResourcesPDF(structTree: Bool = false,
                                    brokenContent: Bool = false,
                                    acroFormDR: Bool = false,

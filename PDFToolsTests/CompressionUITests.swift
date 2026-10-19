@@ -146,8 +146,11 @@ import Foundation
         let verfehlt = CompressionViewModel.targetResultText(
             requested: 10_000_000, achieved: 12_400_000, met: false)
         #expect(!verfehlt.contains("✓") && !verfehlt.contains("✗"))
-        #expect(verfehlt.contains("verfehlt"))
+        // Nicht erreicht ist eine Auskunft, kein Scheitern (Rundgang 2026-10-15).
+        #expect(!verfehlt.contains("verfehlt"))
+        #expect(verfehlt.contains("Kleinstmöglich"))
         #expect(verfehlt.contains(CompressionResult.format(12_400_000)))
+        #expect(verfehlt.contains(CompressionResult.format(10_000_000)))
     }
 
     /// Der Hinweis auf QA-Nachläufe ist EIN Satz in Nutzersprache
@@ -177,8 +180,9 @@ import Foundation
         let unerreichbar = CompressionViewModel.targetEstimateText(
             .init(reachability: .notSafelyReachable, targetBytes: target,
                   safelyReachableBytes: safe, typicalBytes: typical))
-        #expect(unerreichbar.contains("sicher erreichbar ca. "
-                + CompressionResult.format(safe)))
+        // Keine zweite Zahl neben der Schätzung (Rundgang 2026-10-15).
+        #expect(!unerreichbar.contains(CompressionResult.format(safe)))
+        #expect(unerreichbar.contains("nicht ganz erreicht"))
         #expect(unerreichbar.contains(CompressionResult.format(target)))
 
         let unsicher = CompressionViewModel.targetEstimateText(

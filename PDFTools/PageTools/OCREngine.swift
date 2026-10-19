@@ -68,7 +68,7 @@ enum OCREngine {
         var skippedExistingText = false
         /// Der vorhandene Text einer übersprungenen Seite (PDFKit) – damit
         /// „Text kopieren“ und „Als Text sichern“ auch bei bereits
-        /// durchsuchbaren PDFs etwas liefern (Linus, 15.10.2026).
+        /// durchsuchbaren PDFs etwas liefern (Projektinhaber, 15.10.2026).
         var existingText: String? = nil
 
         var text: String { lines.map(\.text).joined(separator: "\n") }

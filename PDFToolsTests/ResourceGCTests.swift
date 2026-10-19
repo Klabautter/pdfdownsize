@@ -33,6 +33,29 @@ import PDFKit
 
     // MARK: 1 – Kernverhalten
 
+    /// 2026-10-15 (NASA-Bericht Seite 7): Referenzen HINTER einem Inline-
+    /// Bild zählen. Die Binärdaten tragen „(", „%" und ein falsches „ EI ".
+    @Test(.hangGuard) func inlineBildVerdecktKeineReferenzen() throws {
+        let url = try PDFFixtures.inlineImageBeforeResourcesPDF()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let before = try PDFSemanticSnapshot.capture(url)
+
+        let doc = try PDFCoreDocument(path: url.path)
+        let stats = try doc.removeUnusedResources()
+        #expect(stats.xobjectsRemoved == 0,
+                Comment(rawValue: "/Im0 wird nach dem Inline-Bild per Do benutzt: \(stats)"))
+        let fonts = try doc.auditFonts()
+        #expect(fonts.unusedFontsRemoved == 0,
+                Comment(rawValue: "/F1 wird nach dem Inline-Bild per Tf benutzt: \(fonts)"))
+
+        let out = Self.tempURL("inline")
+        defer { try? FileManager.default.removeItem(at: out) }
+        try doc.save(to: out)
+        let after = try PDFSemanticSnapshot.capture(out)
+        #expect(after.pages.map(\.textFingerprint) == before.pages.map(\.textFingerprint),
+                "Text-Extraction hat sich verändert – die Schrift fehlt")
+    }
+
     @Test(.hangGuard) func entferntNurUnbenutzteEintraege() throws {
         let url = try PDFFixtures.unusedResourcesPDF()
         defer { try? FileManager.default.removeItem(at: url) }
