@@ -225,8 +225,13 @@ import CoreGraphics
 
     /// JPX-Eingang: cp_reduce dekoliert je Reduktionsstufe direkt auf 1/2^N.
     /// Die Leiter [native, 1.25×, Ziel, 0.85×] bildet die Ebenen
-    /// [0, 1, 2, 2] – dekoliert wird je EBENE einmal (3× statt 4×), gleiche
-    /// Ebenen teilen sich dasselbe Raster (byteidentisch, siehe Test 3).
+    /// [0, 1, 2, 2] – dekoliert wird je EBENE einmal, gleiche Ebenen teilen
+    /// sich dasselbe Raster (byteidentisch, siehe Test 3). Seit der Sonde
+    /// (2026-10-19) kommt VOR der Leiter die nächstkleinere Ebene 3 dazu
+    /// (200×150, ein Vierundsechzigstel der Pixel): Die Sonde kodiert sie
+    /// einmal, um die Leiter bei schon kompakten Quellen zu sparen; hier
+    /// ist die Sonde kleiner als das Original, und die Leiter läuft wie
+    /// zuvor – 4 Dekodierungen, jede Ebene genau einmal.
     @Test(.hangGuard) func jpxLeiterDekodiertJeReduktionsstufeEinmal() throws {
         let image = try #require(Self.photoImage(width: 1600, height: 1200))
         // 1600 px auf 400 pt → 288 DPI; Ziel-DPI 72 → Faktor 0.25 → 400×300.
@@ -237,12 +242,13 @@ import CoreGraphics
             resources: [res], options: Self.ladderOptions(),
             documentID: "maps-decode-jpx", documentBytes: 2_000_000,
             pixels: source)
-        #expect(source.decodeCalls == 3,
-                "JPX-Leiter soll je Ebene einmal dekodieren (3 Ebenen), tat es \(source.decodeCalls)×")
-        // Reihenfolge: Einstieg = Zielraster (Ebene 2), dann native (0),
-        // 1.25× (1); Zielrung übernimmt das Einstiegsraster, 0.85× (2) trifft
-        // den Cache der Ebene 2.
-        #expect(source.decodedLevels == [2, 0, 1],
+        #expect(source.decodeCalls == 4,
+                "JPX-Leiter soll je Ebene einmal dekodieren (Sonde + 3 Ebenen), tat es \(source.decodeCalls)×")
+        // Reihenfolge: Einstieg = Zielraster (Ebene 2), Sonde auf der
+        // nächstkleineren Ebene (3), dann native (0), 1.25× (1); Zielrung
+        // übernimmt das Einstiegsraster, 0.85× (2) trifft den Cache der
+        // Ebene 2.
+        #expect(source.decodedLevels == [2, 3, 0, 1],
                 "Ebenenfolge unerwartet: \(source.decodedLevels)")
         #expect(planned.plan.traceVersion == 2)
     }
