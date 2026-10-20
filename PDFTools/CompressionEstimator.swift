@@ -77,6 +77,24 @@ enum CompressionEstimator {
     static let lowerBandFactor = 0.55
     static let upperBandFactor = 1.25
 
+    /// Bytes außerhalb des platzierten Bildinventars, die der Struktur-Pass
+    /// nicht verdichtet: JBIG2- und CCITT-Streams (Soft-Masken, unplatzierte
+    /// Bilder). Sie sind bereits bitsparsam kodiert, `--recompress-flate`
+    /// lässt sie unangetastet, und der Lauf dekodiert JBIG2 nicht. Der
+    /// Euklid-Scan (2026-10-19) trägt 2,9 MB JBIG2-Masken; als „Struktur“
+    /// mit 62 % Rest gerechnet versprachen sie 10 % Ersparnis, die der Lauf
+    /// nie liefert (1,2 %).
+    static func fixedNonImageBytes(document: PDFCoreDocument,
+                                   resources: [PDFImageResource],
+                                   documentBytes: Int64) -> Int64 {
+        guard let inventory = try? document.spaceInventory(documentBytes: documentBytes)
+        else { return 0 }
+        let placed = resources
+            .filter { $0.terminalFilter == .jbig2 || $0.terminalFilter == .ccitt }
+            .reduce(Int64(0)) { $0 + Int64(max($1.encodedByteCount, 0)) }
+        return max(inventory.jbig2Bytes + inventory.ccittBytes - placed, 0)
+    }
+
     // MARK: Phase V2-10 (§16.2) – Accurate-Band
     //
     // Nach dem Sample-Encode der größten behaltenen Streams sind deren Bytes
@@ -120,7 +138,8 @@ enum CompressionEstimator {
                              = TargetSizeOptimizer.structureFactor,
                          recompressibleKeptBytes: Int = 0,
                          repackableDCTBytes: Int = 0,
-                         dedupEstimatedBytes: Int = 0) -> CompressionEstimate {
+                         dedupEstimatedBytes: Int = 0,
+                         fixedStructureBytes: Int64 = 0) -> CompressionEstimate {
         let original = Int64(plan.originalDocumentBytes)
         let originalImageBytes = Int64(plan.originalImageBytes)
 
@@ -139,15 +158,19 @@ enum CompressionEstimator {
         // Alles, was kein Bildstream ist: Seitenbäume, Content-Streams,
         // Schriften, Navigation. Wie stark der Struktur-Pass das verdichtet,
         // hängt davon ab, was schon komprimiert ist (siehe StructureProfile).
-        let structural = max(original - originalImageBytes, 0)
+        // JBIG2-/CCITT-Streams außerhalb des Inventars (Masken) bleiben
+        // unverändert – sie gehören weder ins Modell noch ins Band.
+        let fixed = min(max(fixedStructureBytes, 0), max(original - originalImageBytes, 0))
+        let structural = max(original - originalImageBytes - fixed, 0)
         // Die Dedup-Vorschau liefert gemessene Duplikatbytes (Schätzung des
         // C-Kerns). Sie betreffen Bild-, Content- und sonstige Streams
         // gleichermaßen und werden daher vom Gesamtpunkt abgezogen – nie
         // unter null.
-        let point = max(plannedImageBytes
-                            + Int64(Double(structural) * structureRetention)
-                            - Int64(dedupEstimatedBytes),
-                        0)
+        let modeled = max(plannedImageBytes
+                              + Int64(Double(structural) * structureRetention)
+                              - Int64(dedupEstimatedBytes),
+                          0)
+        let point = modeled + fixed
 
         let savings = original > 0 ? max(0, 1 - Double(point) / Double(original)) : 0
 
@@ -156,9 +179,9 @@ enum CompressionEstimator {
             imageCount: plan.actions.count,
             oversizedCount: plan.transformedActions.count,
             maxEffectiveDPI: maxEffectiveDPI,
-            lowBytes: Int64(Double(point) * lowerBandFactor),
+            lowBytes: Int64(Double(modeled) * lowerBandFactor) + fixed,
             pointBytes: point,
-            highBytes: Int64(Double(point) * upperBandFactor),
+            highBytes: Int64(Double(modeled) * upperBandFactor) + fixed,
             originalBytes: original,
             potential: CompressionEstimate.classifyPotential(savings: savings))
     }
@@ -226,6 +249,13 @@ enum CompressionEstimator {
         /// Verlustfrei kodierte Grafik ohne Verkleinerung: Neupacken.
         static let graphicsKeptRetention = 0.7
         static let otherRetention = 0.9
+        /// JPEG 2000, das schon so kompakt ist, dass keine JPEG-Stufe der
+        /// Presets es unterbietet: höchstens so viele Bytes je ZIELpixel.
+        /// Gemessen (Euklid-Scan, 2026-10-19): Der JPX-Hintergrund liegt
+        /// bei 0,006, das Vorschaubild bei 0,05 Byte je Pixel; JPEG q0,6
+        /// braucht auf dem Vorschaubild 0,10. Solche Bilder behält der Lauf
+        /// (Sonde im CandidateGenerator) – vorher 9 % geschätzt, 1 % geliefert.
+        static let compactJPXBytesPerTargetPixel = 0.08
         /// Scan-Seiten: ein 8-Bit-Raster füllt die Seite (≥ 100 DPI) UND die
         /// Seite zeichnet keinen eigenen sichtbaren Text (höchstens OCR mit
         /// Render-Modus 3). Die Kompression zerlegt sie per MRC; ohne Regel
@@ -253,13 +283,18 @@ enum CompressionEstimator {
         if let isCancelled, isCancelled() { return nil }
         let original = Compressor.fileSize(of: url)
         let imageBytes = resources.reduce(Int64(0)) { $0 + Int64(max($1.encodedByteCount, 0)) }
+        // JBIG2-/CCITT-Streams außerhalb des Inventars (Masken) bleiben, wie
+        // sie sind – weder Modell noch Band.
+        let fixed = min(fixedNonImageBytes(document: document, resources: resources,
+                                           documentBytes: original),
+                        max(original - imageBytes, 0))
         // Nicht-Bild-Anteil: für textlastige, nicht zu große Dateien GEMESSEN
         // (Probelauf des Struktur-Passes), sonst das Pauschalmodell.
         let measuredStructure = StructureTrial.retention(
-            url: url, original: original, imageBytes: imageBytes,
+            url: url, original: original, imageBytes: imageBytes + fixed,
             compatibility: options.compatibilityPolicy)
         if let isCancelled, isCancelled() { return nil }
-        let structural = Double(max(original - imageBytes, 0))
+        let structural = Double(max(original - imageBytes - fixed, 0))
             * (measuredStructure ?? min(document.structureProfile.structureRetention, 1.0))
 
         var imagesOut = 0.0
@@ -315,7 +350,8 @@ enum CompressionEstimator {
                                   fixedQuality: isFixedQualityPolicy))
         }
 
-        let point = Int64(max(structural + imagesOut, 1).rounded())
+        let modeled = Int64(max(structural + imagesOut, 1).rounded())
+        let point = modeled + fixed
         let clampedPoint = min(point, original)
         // Das breite Band gehört zum Bildmodell. Ein gemessener Strukturanteil
         // bekommt sein eigenes, enges Band – sonst verspricht die Anzeige bei
@@ -324,12 +360,12 @@ enum CompressionEstimator {
         let highBytes: Int64
         if measuredStructure != nil {
             lowBytes = Int64(imagesOut * QuickModel.lowerBand
-                             + structural * StructureTrial.measuredLowerBand)
+                             + structural * StructureTrial.measuredLowerBand) + fixed
             highBytes = Int64(imagesOut * QuickModel.upperBand
-                              + structural * StructureTrial.measuredUpperBand)
+                              + structural * StructureTrial.measuredUpperBand) + fixed
         } else {
-            lowBytes = Int64(Double(point) * QuickModel.lowerBand)
-            highBytes = Int64(Double(point) * QuickModel.upperBand)
+            lowBytes = Int64(Double(modeled) * QuickModel.lowerBand) + fixed
+            highBytes = Int64(Double(modeled) * QuickModel.upperBand) + fixed
         }
         let savings = original > 0 ? max(0, 1 - Double(clampedPoint) / Double(original)) : 0
         return CompressionEstimate(
@@ -419,6 +455,13 @@ enum CompressionEstimator {
             }
             return resized ? min(1, pow(ratio, QuickModel.graphicsExponent))
                            : min(1, QuickModel.graphicsKeptRetention * level)
+        case .jpx:
+            // Schon kompakt (2026-10-19): bleibt im Lauf unverändert, die
+            // Sonde des Generators beendet die Suche nach einer Kodierung.
+            let targetPixels = max(Double(max(resource.pixelCount, 1)) * ratio, 1)
+            let bytesPerTargetPixel = Double(max(resource.encodedByteCount, 0)) / targetPixels
+            return bytesPerTargetPixel <= QuickModel.compactJPXBytesPerTargetPixel
+                ? 1 : QuickModel.otherRetention
         default:
             return QuickModel.otherRetention
         }
@@ -504,7 +547,10 @@ enum CompressionEstimator {
                         structureRetention: document.structureProfile.structureRetention,
                         recompressibleKeptBytes: recompressible,
                         repackableDCTBytes: repackable,
-                        dedupEstimatedBytes: dedupBytes)
+                        dedupEstimatedBytes: dedupBytes,
+                        fixedStructureBytes: fixedNonImageBytes(
+                            document: document, resources: resources,
+                            documentBytes: Int64(planned.plan.originalDocumentBytes)))
 
         guard mode == .accurate else { return estimate }
 

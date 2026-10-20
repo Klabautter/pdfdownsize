@@ -330,6 +330,23 @@ enum CandidateGenerator {
     /// Doppelte der größten gemessenen Gewinnerkante).
     static let maximumQuantizedPalettePixels = 128 * 128
 
+    // MARK: Sonde (2026-10-19) – „schon kompakt“ vor der Leiter
+
+    /// Die Sonde gilt für verlustbehaftet kodierte Quellen (DCT, JPX): Nur
+    /// dort ist ein Original wahrscheinlich, das jede JPEG-Stufe der
+    /// Presets unterbietet – Archive.org-Scans etwa tragen je Seite einen
+    /// JPX-Hintergrund mit JBIG2-Maske, also schon MRC. Verlustfreie
+    /// Quellen gewinnen die Leiter fast immer; dort wäre die Sonde nur
+    /// Mehrarbeit.
+    static func probeApplies(to resource: PDFImageResource) -> Bool {
+        resource.terminalFilter == .dct || resource.terminalFilter == .jpx
+    }
+
+    /// Toleranz der Sonde gegen die seltene Nicht-Monotonie des Encoders
+    /// (eine höhere Qualität wird um Promille kleiner): Erst 2 % ÜBER der
+    /// Schranke gilt die Suche als chancenlos.
+    static let probeMargin = 1.02
+
     static func generate(resource: PDFImageResource,
                          options: ImageCompressionOptions,
                          classifierPolicy: ClassifierPolicy,
@@ -1184,6 +1201,43 @@ enum CandidateGenerator {
             var bestFailedSSIM: Double?
             var measuredAnything = false
 
+            // Sonde zuerst (2026-10-19), VOR Originalstichprobe und Smart-
+            // Anker (die kosten eine Kodierung samt Messung): Die KLEINSTE
+            // Stufe wird einmal mit der NIEDRIGSTEN Qualität kodiert – ohne
+            // Dekodieren des Ergebnisses, ohne Gate. Jede andere Stufe hat
+            // mehr Pixel oder mehr Qualität und wird damit größer; die Sonde
+            // ist die Untergrenze dessen, was die Suche liefern kann. Ist
+            // schon sie nicht kleiner als das Original, entfällt die Suche
+            // und KEEP bleibt. Ist sie kleiner, läuft die Leiter unverändert
+            // – die Sonde entscheidet nie gegen einen Kandidaten, nur gegen
+            // vergebliche Versuche. Euklid-Scan (306 Seiten JPX + JBIG2,
+            // Smart): zehn Kodierungen je Bild, die kleinste doppelt so groß
+            // wie das Original, 106 s für 1 %.
+            let smallestRung = ladder.min { $0.width * $0.height < $1.width * $1.height }
+            if let smallestRung {
+                var verdict: String?
+                for probeRung in probeRungs(smallest: smallestRung) {
+                    guard let probe = probe(rung: probeRung, target: target,
+                                            targetImage: targetImage, grayscale: grayscale,
+                                            jpegOptions: jpegOptions) else { break }
+                    if Self.probeExceeds(probe, bound: originalBytes) {
+                        traceJPEG(target: probeRung, result: probe,
+                                  disposition: "probe-no-size-benefit")
+                        verdict = "skip"
+                        break
+                    }
+                    traceJPEG(target: probeRung, result: probe, disposition: "probe-continue")
+                }
+                if verdict == "skip" {
+                    for skipped in ladder {
+                        traceJPEG(target: skipped, result: nil, disposition: "probe-skipped")
+                    }
+                    store.pixelCache.releaseLevels(of: objectID, keeping: [])
+                    keepReason = .noSizeBenefit
+                    return
+                }
+            }
+
             let native = PixelSize(width: resource.width, height: resource.height)
             let source = decodedRaster(for: native).flatMap { decoded in
                 options.forceGrayscale
@@ -1320,6 +1374,74 @@ enum CandidateGenerator {
             } else if measuredAnything {
                 keepReason = .decodeFailed
             }
+        }
+
+        /// Sonde (2026-10-19): EINE Kodierung von `rung` mit der niedrigsten
+        /// Qualität der Politik – ohne Dekodieren des Ergebnisses, ohne Gate.
+        /// `nil`: Die Sonde gilt nicht (verlustfreie Quelle, feste Qualität
+        /// – dort ist die Suche selbst nur eine Kodierung –, unbekannte
+        /// Originalgröße) oder war nicht kodierbar; dann läuft die Leiter
+        /// wie bisher. Das dekodierte Raster der Stufe bleibt im Cache und
+        /// dient der Leiter, falls sie folgt.
+        private func probe(rung: PixelSize, target: PixelSize, targetImage: CGImage,
+                           grayscale: Bool, jpegOptions: ImageCompressionOptions)
+            -> JPEGSearchRung? {
+            guard originalBytes > 0, CandidateGenerator.probeApplies(to: resource),
+                  case .adaptive(let ladderQ, _) = jpegOptions.qualityPolicy,
+                  let quality = ladderQ.min() else { return nil }
+            let start = ContinuousClock.now
+            let decoded = rung == target ? targetImage : decodedRaster(for: rung)
+            guard let decoded else { return nil }
+            // Trifft das Dekodierraster die Stufe schon (JPX-Reduktions-
+            // stufe), wird es direkt kodiert – die Verkleinerung über
+            // CoreGraphics kostete mehr als die Dekodierung selbst.
+            let reference: CGImage?
+            if !grayscale, decoded.width == rung.width, decoded.height == rung.height {
+                reference = decoded
+            } else {
+                reference = ImageResampler.resize(decoded, to: rung, grayscale: grayscale)
+            }
+            guard let reference,
+                  let data = ImageResampler.encodeJPEG(reference, quality: quality,
+                                                       backend: jpegOptions.jpegBackend)
+            else { return nil }
+            return JPEGSearchRung(quality: quality, data: data, measurement: nil,
+                                  passed: false, runtimeMs: stageMs(since: start))
+        }
+
+        /// Sondenstufen, billig zuerst: Für JPX die nächstkleinere
+        /// Dekodierstufe (cp_reduce, kommt ohne Verkleinerung direkt vom
+        /// Decoder), sofern sie mindestens ein Viertel der Pixel der
+        /// kleinsten Leiterstufe hat; danach die Stufe selbst. Weniger Pixel
+        /// bedeuten weniger Bytes, die reduzierte Sonde ist also ein
+        /// SCHWÄCHERER Test: Sagt sie „kleiner“, entscheidet die Stufe selbst.
+        private func probeRungs(smallest: PixelSize) -> [PixelSize] {
+            var rungs: [PixelSize] = []
+            if resource.terminalFilter == .jpx {
+                var reduce = 1
+                while reduce <= 5 {
+                    let size = PixelSize(
+                        width: (resource.width + (1 << reduce) - 1) >> reduce,
+                        height: (resource.height + (1 << reduce) - 1) >> reduce)
+                    if size.width * size.height < smallest.width * smallest.height {
+                        if Double(size.width * size.height)
+                            >= 0.25 * Double(smallest.width * smallest.height) {
+                            rungs.append(size)
+                        }
+                        break
+                    }
+                    reduce += 1
+                }
+            }
+            rungs.append(smallest)
+            return rungs
+        }
+
+        /// `bound` ist die kleinste Bytezahl, die KEIN Kandidat mehr sein
+        /// könnte (Original bzw. Original × Größenhebel). Erreicht die Sonde
+        /// sie samt Toleranz, kann keine Stufe der Suche darunter liegen.
+        private static func probeExceeds(_ probe: JPEGSearchRung, bound: Int) -> Bool {
+            Double(probe.data.count) >= Double(bound) * CandidateGenerator.probeMargin
         }
 
         /// Opt-in JSONL diagnostics, including rejected and unvisited search levels.
@@ -1481,15 +1603,36 @@ enum CandidateGenerator {
             else { return }
             guard let raster = intermediate != nil ? decodedRaster(for: target) : targetImage,
                   let reference = ImageResampler.resize(raster, to: target,
-                                                        grayscale: grayscale),
-                  let original = decodedRaster(for: PixelSize(width: resource.width,
+                                                        grayscale: grayscale)
+            else { return }
+            let qLow = ladderQ.min() ?? options.jpegQuality
+            // Sonde zuerst (2026-10-19): Der Fallback nimmt nur Stufen mit
+            // klarem Größenhebel (≤ Original × `sizeLeverageThreshold`). Liegt
+            // schon die niedrigste Qualität darüber, wird keine Stufe
+            // zulässig – Suche, Originaldekodierung und Stichprobe entfallen.
+            // Dieselbe Regel wie im Foto-Pfad, nur mit der strengeren
+            // Schranke dieses Pfads (JPX-Vorschaubild des Euklid-Scans: fünf
+            // Kodierungen je Seite, die kleinste doppelt so groß).
+            if originalBytes > 0, CandidateGenerator.probeApplies(to: resource),
+               let probeData = ImageResampler.encodeJPEG(reference, quality: qLow,
+                                                         backend: options.jpegBackend) {
+                let probe = JPEGSearchRung(quality: qLow, data: probeData,
+                                           measurement: nil, passed: false, runtimeMs: 0)
+                let bound = Int(Double(originalBytes) * Self.sizeLeverageThreshold) + 1
+                if Self.probeExceeds(probe, bound: bound) {
+                    traceJPEG(target: target, result: probe,
+                              disposition: "graphics-probe-no-leverage")
+                    return
+                }
+            }
+            guard let original = decodedRaster(for: PixelSize(width: resource.width,
                                                                height: resource.height)),
                   let sourceSample = CandidateGenerator.referenceSample(original: original,
                                                                         target: policyTarget)
             else { return }
 
             let policy = BracketedJPEGSearch.Policy.bracketed(
-                qLow: ladderQ.min() ?? options.jpegQuality,
+                qLow: qLow,
                 qHigh: ladderQ.max() ?? options.jpegQuality,
                 gate: QualityGatePolicy.policy(matching: minimumSSIM,
                                                imageClass: .graphics),
