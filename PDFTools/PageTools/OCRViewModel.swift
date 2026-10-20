@@ -83,14 +83,15 @@ final class OCRViewModel: ObservableObject {
             if page.skippedExistingText {
                 // Vorhandener Text steht in der Spalte und zählt für Kopieren
                 // und „Als Text sichern“ – nur die Markierung im Dokument
-                // bleibt den neu erkannten Seiten vorbehalten.
+                // bleibt den neu erkannten Seiten vorbehalten. Dass er nicht
+                // neu erkannt wurde, sagt der Kopf EINMAL (`resultLine`),
+                // nicht jede Seite (Rundgang 2026-10-19).
                 let existing = Self.paragraphs(fromExistingText: page.existingText ?? "")
                 if existing.isEmpty {
                     return TextSection(pageIndex: page.pageIndex, body: "",
                                        note: String(localized: "Hatte bereits Text und wurde nicht erneut erkannt."))
                 }
-                return TextSection(pageIndex: page.pageIndex, body: existing,
-                                   note: String(localized: "Vorhandener Text der Seite – nicht neu erkannt."))
+                return TextSection(pageIndex: page.pageIndex, body: existing, note: nil)
             }
             let paragraphs = OCRTextLayout.paragraphs(from: page.lines)
             if paragraphs.isEmpty {
@@ -204,6 +205,54 @@ final class OCRViewModel: ObservableObject {
     /// Seitenzahl der geladenen PDF – für die Kopfzeile vor dem Lauf (L8).
     @Published private(set) var pageCount = 0
 
+    /// Vorprüfung (19.10.2026): Welche Seiten haben schon Text? Läuft beim
+    /// Laden im Hintergrund. Haben alle Seiten Text, gibt es keinen Lauf –
+    /// die Spalte zeigt den vorhandenen Text sofort, Kopieren und „Als
+    /// Text sichern" stehen bereit. Vorher lief die Erkennung durch alle
+    /// Seiten und meldete erst danach „Keine Seite musste erkannt werden".
+    @Published private(set) var survey: OCREngine.TextSurvey?
+    private var surveyTask: Task<Void, Never>?
+
+    /// Alle Seiten haben schon Text – nichts zu erkennen.
+    var needsNoRecognition: Bool { stage == .ready && survey?.allHaveText == true }
+    /// Die Textspalte zeigt Text: nach dem Lauf oder weil alles schon da ist.
+    var showsText: Bool { stage == .done || needsNoRecognition }
+
+    /// Die eine Zeile im Kopf, die sagt, was mit den Seiten geschieht oder
+    /// geschah: vor dem Lauf aus der Vorprüfung, danach aus dem Ergebnis.
+    var resultLine: String? {
+        switch stage {
+        case .done:
+            let recognized = recognizedPageCount, skipped = skippedPageCount
+            let total = recognized + skipped
+            if recognized == 0 {
+                return String(localized: "Alle \(total) Seiten hatten schon Text – nichts musste erkannt werden.")
+            }
+            if skipped == 0 {
+                return String(localized: "Alle \(total) Seiten erkannt.")
+            }
+            let recognizedPart = recognized == 1
+                ? String(localized: "1 Seite erkannt")
+                : String(localized: "\(recognized) Seiten erkannt")
+            let skippedPart = skipped == 1
+                ? String(localized: "1 hatte schon Text")
+                : String(localized: "\(skipped) hatten schon Text")
+            return recognizedPart + ", " + skippedPart + "."
+        case .ready, .working:
+            guard let survey, survey.pageCount > 0 else { return nil }
+            if survey.allHaveText {
+                return String(localized: "Alle \(survey.pageCount) Seiten haben schon Text.")
+            }
+            if survey.pagesWithText.isEmpty { return nil }
+            let toRecognize = survey.pagesToRecognize
+            return toRecognize == 1
+                ? String(localized: "1 von \(survey.pageCount) Seiten wird erkannt, die übrigen haben schon Text.")
+                : String(localized: "\(toRecognize) von \(survey.pageCount) Seiten werden erkannt, die übrigen haben schon Text.")
+        case .choose:
+            return nil
+        }
+    }
+
     /// Durchsuchbare PDF erzeugt, aber noch nicht gesichert (und es wurde
     /// überhaupt etwas erkannt – sonst gibt es nichts zu verlieren).
     var hasUnsavedResult: Bool { outputURL != nil && recognizedPageCount > 0 }
@@ -233,6 +282,15 @@ final class OCRViewModel: ObservableObject {
                     self.hasSignature = signed
                 }
             }
+            surveyTask = Task { @MainActor in
+                guard let result = try? await OCREngine.surveyExistingText(sourceURL: first),
+                      !Task.isCancelled, pdfURL == first, stage == .ready else { return }
+                survey = result
+                if result.allHaveText {
+                    // Der vorhandene Text steht sofort in der Spalte.
+                    pageResults = result.pagesWithText
+                }
+            }
         } else if !images.isEmpty {
             errorMessage = String(localized: "Bilder bitte zuerst unter „Konvertieren“ als PDF sichern.")
         } else if !urls.isEmpty {
@@ -244,6 +302,9 @@ final class OCRViewModel: ObservableObject {
         guard !isWorking else { return }
         workTask?.cancel()
         workTask = nil
+        surveyTask?.cancel()
+        surveyTask = nil
+        survey = nil
         discardUnsavedOutput()
         stage = .choose
         pdfURL = nil
@@ -272,7 +333,7 @@ final class OCRViewModel: ObservableObject {
     // MARK: Lauf
 
     func runOCR() {
-        guard stage == .ready, let url = pdfURL, !isWorking else { return }
+        guard stage == .ready, let url = pdfURL, !isWorking, !needsNoRecognition else { return }
         discardUnsavedOutput()
         let runID = UUID()
         operationID = runID
@@ -411,6 +472,9 @@ final class OCRViewModel: ObservableObject {
     }
 
     private func resetRunState() {
+        surveyTask?.cancel()
+        surveyTask = nil
+        survey = nil
         discardUnsavedOutput()
         currentPage = 0
         searchQuery = ""

@@ -96,27 +96,51 @@ enum OCREngine {
         }
     }
 
-    /// Ein Durchgang: Scan-Seiten erkennen → Textebene ins Original.
-    @concurrent nonisolated static func run(sourceURL: URL,
-                                languages: [String],
-                                progress: @escaping (Double) -> Void) async throws -> RunOutput {
+    /// Vorprüfung ohne Erkennung (19.10.2026): Welche Seiten haben schon
+    /// Text? Dieselbe Regel, nach der `run` Seiten überspringt – die
+    /// Oberfläche kann so VOR dem Lauf sagen, ob überhaupt etwas zu
+    /// erkennen ist, statt erst danach „Keine Seite musste erkannt werden".
+    struct TextSurvey: Sendable {
+        let pageCount: Int
+        /// Seiten mit vorhandenem Text, als übersprungene Ergebnisse – so
+        /// kann die Textspalte sie direkt zeigen.
+        let pagesWithText: [PageResult]
+
+        var allHaveText: Bool { pageCount > 0 && pagesWithText.count == pageCount }
+        var pagesToRecognize: Int { pageCount - pagesWithText.count }
+    }
+
+    @concurrent nonisolated static func surveyExistingText(sourceURL: URL) async throws -> TextSurvey {
+        let (doc, core) = try open(sourceURL)
+        let coverage = rasterCoverage(doc: doc, resources: (try? core.imageResources()) ?? [])
+        var pages: [PageResult] = []
+        for i in 0..<doc.pageCount {
+            try Task.checkCancellation()
+            guard let page = doc.page(at: i), hasExistingText(page, rasterCoverage: coverage[i] ?? 0) else { continue }
+            pages.append(PageResult(pageIndex: i, lines: [], skippedExistingText: true,
+                                    existingText: page.string))
+        }
+        return TextSurvey(pageCount: doc.pageCount, pagesWithText: pages)
+    }
+
+    private nonisolated static func open(_ sourceURL: URL) throws -> (PDFDocument, PDFCoreDocument) {
         guard let doc = PDFDocument(url: sourceURL) else {
             throw OCRError.unreadable(sourceURL.lastPathComponent)
         }
         if doc.isLocked { throw OCRError.locked(sourceURL.lastPathComponent) }
         guard doc.pageCount > 0 else { throw OCRError.noPages }
-        let core: PDFCoreDocument
         do {
-            core = try PDFCoreDocument(path: sourceURL.path)
+            return (doc, try PDFCoreDocument(path: sourceURL.path))
         } catch {
             throw OCRError.unreadable(sourceURL.lastPathComponent)
         }
+    }
 
-        // Größtes Rasterbild je Seite (Anteil der Seitenfläche) – Signal für
-        // „Scan mit etwas digitalem Text“.
+    /// Größtes Rasterbild je Seite (Anteil der Seitenfläche) – Signal für
+    /// „Scan mit etwas digitalem Text“.
+    private nonisolated static func rasterCoverage(doc: PDFDocument,
+                                                   resources: [PDFImageResource]) -> [Int: Double] {
         var coverage: [Int: Double] = [:]
-        let resources = (try? core.imageResources()) ?? []
-        let pixels = LibQPDFPixelSource(document: core)
         for resource in resources {
             for placement in resource.placements {
                 guard let page = doc.page(at: placement.pageIndex) else { continue }
@@ -126,6 +150,17 @@ enum OCREngine {
                 coverage[placement.pageIndex] = max(coverage[placement.pageIndex] ?? 0, share)
             }
         }
+        return coverage
+    }
+
+    /// Ein Durchgang: Scan-Seiten erkennen → Textebene ins Original.
+    @concurrent nonisolated static func run(sourceURL: URL,
+                                languages: [String],
+                                progress: @escaping (Double) -> Void) async throws -> RunOutput {
+        let (doc, core) = try open(sourceURL)
+        let resources = (try? core.imageResources()) ?? []
+        let pixels = LibQPDFPixelSource(document: core)
+        let coverage = rasterCoverage(doc: doc, resources: resources)
 
         var results: [PageResult] = []
         let total = doc.pageCount

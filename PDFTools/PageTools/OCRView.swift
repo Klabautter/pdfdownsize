@@ -104,8 +104,8 @@ struct OCRView: View {
 
     @ViewBuilder
     private var workingState: some View {
-        // Die Suche gehört in die Toolbar (Befund S13) – nur mit Ergebnis.
-        if vm.stage == .done {
+        // Die Suche gehört in die Toolbar (Befund S13) – nur mit Text.
+        if vm.showsText {
             workspace
                 .searchable(text: $vm.searchQuery, placement: .toolbar,
                             prompt: "Im erkannten Text suchen")
@@ -135,10 +135,10 @@ struct OCRView: View {
                 }
                 .frame(width: canvasWidth, height: geo.size.height)
                 // Vor dem Lauf so hoch wie ihr Inhalt (wie die anderen
-                // Pulte); mit erkanntem Text fensterhoch, weil der scrollt.
+                // Pulte); mit Text fensterhoch, weil der scrollt.
                 textColumn
                     .frame(width: Self.columnWidth,
-                           height: vm.stage == .done ? geo.size.height - 2 * Self.columnInset : nil)
+                           height: vm.showsText ? geo.size.height - 2 * Self.columnInset : nil)
                     .clipShape(RoundedRectangle(cornerRadius: Theme.panelRadius, style: .continuous))
                     .glassEffect(.regular, in: .rect(cornerRadius: Theme.panelRadius))
                     .padding(Self.columnInset)
@@ -174,22 +174,32 @@ struct OCRView: View {
                         onClose: {
                             discardGuard.run(ifUnsaved: vm.hasUnsavedResult) { vm.reset() }
                         })
+            // Was mit den Seiten geschieht, steht EINMAL hier – vor dem Lauf
+            // aus der Vorprüfung, danach als Ergebnis (Rundgang 2026-10-19).
+            if let line = vm.resultLine {
+                Text(line)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if vm.isWorking {
                 WorkProgressBar(progress: vm.progress,
                                 label: vm.statusLabel,
                                 isCancelling: vm.isCancelling,
                                 onCancel: { vm.cancelWork() })
             }
-            if vm.stage == .done, !vm.searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
+            if vm.showsText, !vm.searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
                 hitBar
             }
         }
     }
 
+    /// Vor dem Lauf Größe und Seiten, danach die Wörter – die Seiten stehen
+    /// in `resultLine`, nicht mehr zu dritt in einer Zeile.
     private var headerSubtitle: String {
         switch vm.stage {
         case .done:
-            return statsLine
+            return String(localized: "\(vm.totalWords.formatted()) Wörter")
         default:
             guard let url = vm.pdfURL else { return "" }
             let size = CompressionResult.format(Compressor.fileSize(of: url))
@@ -228,13 +238,20 @@ struct OCRView: View {
 
     @ViewBuilder
     private var columnContent: some View {
-        switch vm.stage {
-        case .done:
+        if vm.showsText {
             OCRTextColumn(sections: vm.textSections,
                           page: $vm.currentPage,
                           hits: vm.searchHits,
                           selectedHit: vm.selectedHit)
                 .frame(maxHeight: .infinity)
+        } else {
+            columnSetup
+        }
+    }
+
+    @ViewBuilder
+    private var columnSetup: some View {
+        switch vm.stage {
         case .working:
             ContentUnavailableView {
                 Label("Text wird erkannt", systemImage: "text.viewfinder")
@@ -294,12 +311,17 @@ struct OCRView: View {
             switch vm.stage {
             case .done:
                 doneActions
+            case .ready where vm.needsNoRecognition:
+                // Alles schon da: kein Lauf, nur der Text (Rundgang 2026-10-19).
+                textActions
             case .ready:
+                // Dieselbe Größe wie „Komprimieren" und „Exportieren …" –
+                // der Hauptknopf jedes Pults (Rundgang 2026-10-19).
                 Button { vm.runOCR() } label: {
                     Text("Text erkennen").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+                .controlSize(.extraLarge)
                 .keyboardShortcut(.defaultAction)
                 .disabled(!vm.hasSource)
             default:
@@ -319,27 +341,28 @@ struct OCRView: View {
                     Text("Durchsuchbare PDF sichern …").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-            } else {
-                // Nichts erkannt: kein Sichern-Knopf, der nur das Original
-                // kopieren würde (Sichtabnahme 2026-10-12, L7).
-                Text("Keine Seite musste erkannt werden – die PDF ist schon durchsuchbar. Der vorhandene Text steht oben und lässt sich kopieren oder als Text sichern.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
+                .controlSize(.extraLarge)
             }
-            HStack(spacing: 8) {
-                Button { vm.copyFullText() } label: {
-                    Text("Text kopieren").frame(maxWidth: .infinity)
-                }
-                Button { vm.saveText() } label: {
-                    Text("Als Text sichern …").frame(maxWidth: .infinity)
-                }
-            }
-            .buttonStyle(.bordered)
-            .disabled(!vm.hasText)
+            // Nichts erkannt: kein Sichern-Knopf, der nur das Original
+            // kopieren würde (Sichtabnahme 2026-10-12, L7); der Kopf sagt,
+            // dass alle Seiten schon Text hatten.
+            textActions
         }
+    }
+
+    /// Kopieren und „Als Text sichern" – nach dem Lauf wie bei einer PDF,
+    /// die schon überall Text hat.
+    private var textActions: some View {
+        HStack(spacing: 8) {
+            Button { vm.copyFullText() } label: {
+                Text("Text kopieren").frame(maxWidth: .infinity)
+            }
+            Button { vm.saveText() } label: {
+                Text("Als Text sichern …").frame(maxWidth: .infinity)
+            }
+        }
+        .buttonStyle(.bordered)
+        .disabled(!vm.hasText)
     }
 
     private var hitCaption: String {
@@ -355,18 +378,6 @@ struct OCRView: View {
             : String(localized: "\(current) von \(shown.formatted()) Treffern")
     }
 
-    private var statsLine: String {
-        var parts = [String(localized: "\(vm.totalWords.formatted()) Wörter"),
-                     String(localized: "\(vm.recognizedPageCount) Seiten erkannt")]
-        if vm.skippedPageCount > 0 {
-            parts.append(String(localized: "\(vm.skippedPageCount) hatten schon Text"))
-        }
-        // Keine „Ø Sicherheit" mehr (Sichtabnahme 2026-10-12, M6): Vision
-        // meldet je Zeile fast immer 1,0 – auch bei sichtbarem
-        // Erkennungsmüll. Die Zahl stand so gut wie immer auf 100 % und
-        // sagte nichts über die Qualität.
-        return parts.joined(separator: " · ")
-    }
 }
 
 // MARK: - Textspalte (AppKit)

@@ -101,29 +101,21 @@ final class CompressionViewModel: ObservableObject {
     /// Inspector-Wunschzustand – überlebt Toolwechsel, da im VM gehalten.
     @Published var inspectorPinned = false
 
-    // MARK: - Custom-Einstellungen (persistiert)
+    // MARK: - Eigene Einstellungen
 
-    @Published var customDPI: Double {
-        didSet { defaults.set(customDPI, forKey: "customDPI") }
-    }
-    @Published var customQuality: Double {
-        didSet { defaults.set(customQuality, forKey: "customQuality") }
-    }
-    @Published var customCapEnabled: Bool {
-        didSet { defaults.set(customCapEnabled, forKey: "customCapEnabled") }
-    }
-    @Published var customMaxPixels: Double {
-        didSet { defaults.set(customMaxPixels, forKey: "customMaxPixels") }
-    }
-    @Published var customGraphicsJPEG: Bool {
-        didSet { defaults.set(customGraphicsJPEG, forKey: "customGraphicsJPEG") }
-    }
-    @Published var customForceGray: Bool {
-        didSet { defaults.set(customForceGray, forKey: "customForceGray") }
-    }
-    @Published var customStripMetadata: Bool {
-        didSet { defaults.set(customStripMetadata, forKey: "customStripMetadata") }
-    }
+    /// „Eigene" beginnt bei Smart (Rundgang 2026-10-19): Auflösung, JPEG-
+    /// Qualität und Schalter sind beim Öffnen die Werte des Smart-Modus,
+    /// die Technik steht auf den Werkseinstellungen der Presets. Die Werte
+    /// gelten für den Lauf der App und werden nicht mehr gesichert – mit
+    /// gesicherten 150 DPI / 70 % schätzte Eigene beim Öffnen mehr Ersparnis
+    /// als Smart und brauchte einen Link „Auf Smart-Werte zurücksetzen".
+    @Published var customDPI: Double
+    @Published var customQuality: Double
+    @Published var customCapEnabled: Bool
+    @Published var customMaxPixels: Double
+    @Published var customGraphicsJPEG: Bool
+    @Published var customForceGray: Bool
+    @Published var customStripMetadata: Bool
 
     // MARK: Phase 9 – Linearisierung (eigener Schalter) und Advanced-Politiken
 
@@ -144,24 +136,15 @@ final class CompressionViewModel: ObservableObject {
         didSet { scheduleEstimateRefresh() }
     }
     /// S/W-Richtlinie: verlustfreier Race (G4/JBIG2) oder unangetastet.
-    @Published var customBilevelPolicy: BilevelPolicy {
-        didSet { defaults.set(customBilevelPolicy.rawValue, forKey: "customBilevelPolicy") }
-    }
+    @Published var customBilevelPolicy: BilevelPolicy
     /// „Modern" (Objekt-Streams, progressive Scans erlaubt) oder
     /// „Maximal kompatibel" (Baseline-JPEG, Objekt-Streams aus).
-    @Published var customCompatibility: CompatibilityPolicy {
-        didSet { defaults.set(customCompatibility.rawValue, forKey: "customCompatibility") }
-    }
+    @Published var customCompatibility: CompatibilityPolicy
     /// JPEG-Kodierer; Default mozjpeg, ImageIO als Fallback.
-    @Published var customJPEGBackend: JPEGBackend {
-        didSet { defaults.set(customJPEGBackend.rawValue, forKey: "customJPEGBackend") }
-    }
-    /// Phase 5b – Font-Subsetting. Riskantester Pass: Voreinstellung aus,
-    /// dahinter liegt ein Snapshot-Gate (Text-Extraction + Never-Grow),
-    /// das jede Abweichung komplett verwirft.
-    @Published var customFontSubsetting: Bool {
-        didSet { defaults.set(customFontSubsetting, forKey: "customFontSubsetting") }
-    }
+    @Published var customJPEGBackend: JPEGBackend
+    /// Phase 5b – Font-Subsetting (seit V2-11 der selektive Pfad mit
+    /// je-Font-QA, §14) – wie in den Presets an.
+    @Published var customFontSubsetting: Bool
 
     /// Ablage der persistierten Einstellungen. Injizierbar, damit Tests
     /// nicht die echten Einstellungen der App überschreiben (der Testlauf
@@ -170,24 +153,22 @@ final class CompressionViewModel: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        let d = defaults
-        let storedDPI = d.object(forKey: "customDPI") as? Double ?? 200
-        customDPI = Double(Self.dpiPresets[Self.nearestDPIIndex(storedDPI)])
-        customQuality = d.object(forKey: "customQuality") as? Double ?? 0.85
-        customCapEnabled = d.bool(forKey: "customCapEnabled")
-        customMaxPixels = d.object(forKey: "customMaxPixels") as? Double ?? 2200
-        customGraphicsJPEG = d.bool(forKey: "customGraphicsJPEG")
-        customForceGray = d.bool(forKey: "customForceGray")
-        customStripMetadata = d.bool(forKey: "customStripMetadata")
-        linearizeForWeb = d.bool(forKey: "compressLinearize")
+        // Die Bildwerte von Smart und die Werkseinstellungen der Technik –
+        // dieselbe Quelle wie der Smart-Modus selbst (`CompressionOptions.smart`).
+        let smart = CompressionOptions.smart
+        customDPI = Double(Self.dpiPresets[Self.nearestDPIIndex(smart.image.targetDPI)])
+        customQuality = min(max(smart.image.jpegQuality, 0.4), 0.95)
+        customCapEnabled = smart.image.hardPixelCap
+        customMaxPixels = Double(min(max(smart.image.maxPixelEdge, 800), 4000))
+        customGraphicsJPEG = smart.image.aggressiveGraphics
+        customForceGray = smart.image.forceGrayscale
+        customStripMetadata = smart.metadataPolicy == .strip
+        linearizeForWeb = defaults.bool(forKey: "compressLinearize")
         targetSizeText = ""
-        customBilevelPolicy = d.string(forKey: "customBilevelPolicy")
-            .flatMap(BilevelPolicy.init(rawValue:)) ?? .auto
-        customCompatibility = d.string(forKey: "customCompatibility")
-            .flatMap(CompatibilityPolicy.init(rawValue:)) ?? .modern
-        customJPEGBackend = d.string(forKey: "customJPEGBackend")
-            .flatMap(JPEGBackend.init(rawValue:)) ?? .mozjpeg
-        customFontSubsetting = d.bool(forKey: "customFontSubsetting")
+        customBilevelPolicy = smart.image.bilevelPolicy
+        customCompatibility = smart.compatibilityPolicy
+        customJPEGBackend = smart.image.jpegBackend
+        customFontSubsetting = smart.fontSubsettingPolicy == .on
     }
 
     static func nearestDPIIndex(_ value: Double) -> Int {

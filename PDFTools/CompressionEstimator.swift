@@ -311,7 +311,8 @@ enum CompressionEstimator {
                                      contentIsNeutral: contentIsNeutral)
                 : nil
             imagesOut += bytes * (scanRetention
-                ?? quickRetention(resource: resource, ratio: ratio, qualityFloor: floor))
+                ?? quickRetention(resource: resource, ratio: ratio, qualityFloor: floor,
+                                  fixedQuality: isFixedQualityPolicy))
         }
 
         let point = Int64(max(structural + imagesOut, 1).rounded())
@@ -385,8 +386,15 @@ enum CompressionEstimator {
     }
 
     /// Erwarteter Anteil der Bildbytes nach dem Lauf.
+    ///
+    /// `fixedQuality` (Eigene): JPEGs innerhalb der Zielauflösung bleiben
+    /// dort unverändert (keine Leiter, kein Gate, das sie neu kodiert) –
+    /// der Stufenterm der Presets gilt für sie nicht. Ohne diese Regel
+    /// schätzte Eigene mit den Smart-Werten (220 DPI, 90 %) MEHR Ersparnis
+    /// als Smart, weil der Term bei hoher Stufe stärker schrumpft
+    /// (Rundgang 2026-10-19).
     static func quickRetention(resource: PDFImageResource, ratio: Double,
-                               qualityFloor: Double) -> Double {
+                               qualityFloor: Double, fixedQuality: Bool = false) -> Double {
         guard resource.transformCapability.isSafe, !resource.isImageMask else { return 1 }
         if resource.bitsPerComponent == 1 { return QuickModel.bilevelRetention }
         let resized = ratio < 0.999
@@ -395,7 +403,9 @@ enum CompressionEstimator {
         let level = qualityFloor / QuickModel.referenceFloor
         switch resource.terminalFilter {
         case .dct:
-            let kept = min(1, QuickModel.dctKeptRetention * pow(level, QuickModel.dctKeptFloorExponent))
+            let kept = fixedQuality
+                ? QuickModel.dctKeptRetention
+                : min(1, QuickModel.dctKeptRetention * pow(level, QuickModel.dctKeptFloorExponent))
             guard resized else { return kept }
             if bitsPerSample >= QuickModel.dctPhotoBitsPerSample
                 || resource.pixelCount >= QuickModel.dctPhotoMinimumPixels {

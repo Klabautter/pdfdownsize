@@ -293,14 +293,13 @@ private struct ControlPanel: View {
 
     private var modeSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Picker("Modus", selection: $viewModel.mode) {
-                ForEach(CompressionMode.allCases) { m in
-                    Text(Self.label(m)).tag(m)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .disabled(viewModel.isWorking)
+            // Vier gleich breite Segmente über die volle Pultbreite: Der
+            // SwiftUI-Picker bemisst Segmente nach Inhalt (60/60/71/64 pt),
+            // damit sprangen die Breiten mit der Auswahl (Rundgang
+            // 2026-10-19). Dasselbe Systemcontrol, nur gleich verteilt.
+            ModeSegments(mode: $viewModel.mode)
+                .frame(maxWidth: .infinity)
+                .disabled(viewModel.isWorking)
 
             Text(Self.purpose(viewModel.mode))
                 .font(.callout)
@@ -1115,6 +1114,52 @@ private struct BulkStage: View {
     }
 }
 
+// MARK: - Modus-Segmente
+
+/// Die Modus-Wahl als `NSSegmentedControl` mit gleich verteilten Segmenten
+/// (`fillEqually`): dasselbe Control, das der SwiftUI-Picker hostet, nur
+/// dass die vier Segmente gleich breit sind und die volle Breite füllen –
+/// nichts springt, wenn die Auswahl wechselt.
+private struct ModeSegments: NSViewRepresentable {
+    @Binding var mode: CompressionMode
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeNSView(context: Context) -> NSSegmentedControl {
+        let control = NSSegmentedControl(
+            labels: CompressionMode.allCases.map(ControlPanel.label),
+            trackingMode: .selectOne,
+            target: context.coordinator,
+            action: #selector(Coordinator.changed(_:)))
+        control.segmentDistribution = .fillEqually
+        control.segmentStyle = .automatic
+        control.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        control.setAccessibilityLabel(String(localized: "Modus"))
+        return control
+    }
+
+    func updateNSView(_ control: NSSegmentedControl, context: Context) {
+        context.coordinator.parent = self
+        if let index = CompressionMode.allCases.firstIndex(of: mode),
+           control.selectedSegment != index {
+            control.selectedSegment = index
+        }
+        control.isEnabled = isEnabled
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject {
+        var parent: ModeSegments
+        init(_ parent: ModeSegments) { self.parent = parent }
+
+        @objc func changed(_ sender: NSSegmentedControl) {
+            let modes = CompressionMode.allCases
+            guard modes.indices.contains(sender.selectedSegment) else { return }
+            parent.mode = modes[sender.selectedSegment]
+        }
+    }
+}
+
 // MARK: - Eigene Einstellungen (im Pult)
 
 /// Eigene Einstellungen als Zeilen im Pult. Werte ändern die Schätzung
@@ -1184,17 +1229,13 @@ private struct CustomSettingsPanel: View {
                     .disabled(viewModel.customCompatibility == .maximum)
                 }
             }
-            VStack(alignment: .leading, spacing: 8) {
-                // Ein Weg zurück zu sinnvollen Werten (Befund S16): die
-                // Bildwerte von Smart, Technik auf Werkseinstellung.
-                Button("Auf Smart-Werte zurücksetzen") { resetToSmart() }
-                    .buttonStyle(.link)
-                // Ehrlich zur Sofort-Schätzung (Befund B5, Review 2026-10-09).
-                Text("Die Sofort-Schätzung folgt Auflösung, Bildkante und Qualität. Graustufen und Grafik-JPEG wirken erst im Lauf.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            // Ehrlich zur Sofort-Schätzung (Befund B5, Review 2026-10-09).
+            // Kein „Auf Smart-Werte zurücksetzen" mehr: Eigene beginnt bei
+            // Smart (Rundgang 2026-10-19).
+            Text("Die Sofort-Schätzung folgt Auflösung, Bildkante und Qualität. Graustufen und Grafik-JPEG wirken erst im Lauf.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .onChange(of: viewModel.currentOptions) { _, _ in viewModel.refreshEstimate() }
     }
@@ -1254,23 +1295,6 @@ private struct CustomSettingsPanel: View {
                 .fixedSize()
         }
         .help(help)
-    }
-
-    /// Die Smart-Bildwerte (`ImageCompressionOptions.smart`) plus die
-    /// Werkseinstellungen der Technik-Politiken.
-    private func resetToSmart() {
-        let smart = ImageCompressionOptions.smart
-        viewModel.customDPI = Double(CompressionViewModel.dpiPresets[
-            CompressionViewModel.nearestDPIIndex(smart.targetDPI)])
-        viewModel.customQuality = min(max(smart.jpegQuality, 0.4), 0.95)
-        viewModel.customCapEnabled = false
-        viewModel.customForceGray = false
-        viewModel.customGraphicsJPEG = false
-        viewModel.customStripMetadata = false
-        viewModel.customCompatibility = .modern
-        viewModel.customJPEGBackend = .mozjpeg
-        viewModel.customBilevelPolicy = .auto
-        viewModel.customFontSubsetting = false
     }
 
     private var bilevelRaceBinding: Binding<Bool> {
