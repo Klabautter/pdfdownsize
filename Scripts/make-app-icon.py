@@ -19,14 +19,16 @@ svg('page.svg', f'<path d="{page}" fill="#FFFFFF"/>')
 fr = 22
 svg('fold.svg', f'<path d="M{x1-fold},{y0} L{x1-fold},{y0+fold-fr} Q{x1-fold},{y0+fold} {x1-fold+fr},{y0+fold} L{x1},{y0+fold} Z" fill="#C9D7F5"/>')
 # Inhalt
-lx, lw, lh = x0 + 68, (x1 - x0) - 136, 28
-rows = [(0.62, 0.7), (0.50, 1), (0.38, 0.82), (0.26, 1), (0.14, 0.6)]
+# Drei kräftige Zeilen statt fünf feiner: Bei 16 pt verschwammen fünf zu
+# einer grauen Fläche (HIG: wenige Formen, keine sehr dünnen Linien).
+lx, lw, lh = x0 + 68, (x1 - x0) - 136, 42
+rows = [(0.50, 1), (0.34, 0.82), (0.18, 0.6)]
 H = y1 - y0
 lines = ''.join(f'<rect x="{lx}" y="{y1 - H*fy - lh:.0f}" width="{lw*fw:.0f}" height="{lh}" rx="{lh/2}" fill="#C3CEE3"/>' for fy, fw in rows)
 svg('lines.svg', lines)
-svg('picture.svg', f'<rect x="{lx}" y="{y1 - H*0.74 - 88:.0f}" width="150" height="88" rx="16" fill="#3D7FFF"/>')
+svg('picture.svg', f'<rect x="{lx}" y="{y1 - H*0.74 - 100:.0f}" width="168" height="100" rx="18" fill="#3D7FFF"/>')
 # Pfeile
-cy, h, d, sw = 514, 88, 66, 38
+cy, h, d, sw = 514, 88, 66, 46
 def chev(tip, dirn): return f'M{tip-dirn*d},{cy-h} L{tip},{cy} L{tip-dirn*d},{cy+h}'
 svg('arrows.svg', f'<path d="{chev(x0-44,1)} {chev(x1+44,-1)}" fill="none" stroke="#FFFFFF" stroke-width="{sw}" stroke-linecap="round" stroke-linejoin="round"/>')
 
