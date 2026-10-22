@@ -1,21 +1,14 @@
-Schneller bei Scans, die schon kompakt sind: Solche Bilder erkennt die Engine nach einem Versuch statt zwanzig, bei gleichem Ergebnis. OCR zeigt vorab, ob die PDF schon Text hat. „Eigene“ startet mit den Smart-Werten. PDFs mit Inline-Bildern lassen sich jetzt komprimieren.
+New app icon, about 9 % faster compression, a more precise quality check in Small, and a fix for images with pre-blended transparency.
 
-## Schneller bei Scans, die schon kompakt sind
+## What's new in 1.0.4
 
-Bilder, die bereits so klein kodiert sind, dass keine Stufe der Komprimierung sie unterbietet (etwa Scans mit JPEG 2000 und JBIG2), erkennt die Engine jetzt nach einem Versuch statt nach zwanzig. Das Ergebnis bleibt dasselbe, nur der Weg dorthin ist kürzer: Ein 306-seitiger Buchscan braucht 45 statt 106 Sekunden, der Vergleichskorpus läuft in allen drei Modi rund 30 % schneller bei unveränderter Ersparnis. Die Schätzung vor dem Lauf erkennt solche Scans ebenfalls und verspricht nichts mehr, was der Lauf nicht liefert.
+- **Liquid Glass app icon** – rebuilt with Icon Composer, with variants for the dark, clear and tinted appearances of macOS 26.
+- **Faster** – JPEG encoding now uses the NEON instructions of Apple silicon: about 9 % shorter run times with byte-identical results.
+- **More precise check in Small** – large images are checked on a finer grid, so visible blur is no longer accepted. Files stay practically the same size.
+- **Fix** – images with pre-blended transparency (a soft mask with “Matte”) are now resized together with their mask; before, viewers could show fringes or errors.
 
-## Weitere Verbesserungen
+## Notes
 
-- PDFs mit Inline-Bildern (zum Beispiel aus PrimoPDF) lassen sich jetzt komprimieren.
-- Verständliche Meldung, wenn eine Datei zum Schutz ihres Inhalts unverändert bleibt.
-- Die Zielgröße gilt je Dokument.
-- OCR prüft vor dem Lauf, ob die PDF schon Text hat, und zeigt ihn direkt an.
-- „Eigene“ startet mit den Werten von Smart.
-- Das geöffnete Dokument folgt beim Wechsel zwischen den Werkzeugen.
-- Hauptknöpfe und Modus-Auswahl sind in allen Werkzeugen einheitlich.
-
-## Hinweise
-
-- macOS 26, Apple Silicon.
-- Die App ist nicht mit einer Apple Developer ID signiert; beim ersten Start „Trotzdem öffnen“ in den Systemeinstellungen unter Datenschutz & Sicherheit.
-- Installierte Versionen ab 1.0.2 bieten dieses Update selbst an.
+- macOS 26, Apple silicon.
+- Not signed with an Apple Developer ID: on first launch, click “Open Anyway” in System Settings → Privacy & Security.
+- Installed versions from 1.0.2 on offer this update themselves.
