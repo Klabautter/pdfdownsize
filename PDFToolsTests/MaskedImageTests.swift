@@ -68,6 +68,82 @@ import PDFKit
         #expect(base.width < 2400, "Das Bild wurde nicht verkleinert")
     }
 
+    /// Eine weiche Maske mit /Matte geht die Verkleinerung mit.
+    ///
+    /// Die Farben des Basisbildes sind gegen die Matte-Farbe vorgemischt;
+    /// PDF 32000-1 §11.6.5.3 verlangt dann dieselben Masse für Bild und
+    /// Maske. Bis 1.0.3 wurde nur das Bild verkleinert – Poppler meldete
+    /// „Softmask with matte entry … must have same geometry" (CSWP.04162018,
+    /// S. 19, Klein).
+    @Test(.hangGuard) func matteSoftMaskFollowsTheResize() throws {
+        let url = try PDFFixtures.softMaskedPhotoPDF(matte: true,
+                                                     name: "matte-masked")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let result = try Compressor().compress(inputURL: url, mode: .small)
+        defer { try? FileManager.default.removeItem(at: result.outputURL) }
+
+        let pairs = try Self.imageAndMaskGeometry(of: result.outputURL)
+        let pair = try #require(pairs.first { $0.matte }, """
+            Kein Bild mit /Matte-Maske mehr im Ergebnis – Transparenz \
+            verloren? \(pairs)
+            """)
+        #expect(pair.image.width < 2400, "Das Bild wurde nicht verkleinert")
+        #expect(pair.image == pair.mask, """
+            Maske mit /Matte hat \(pair.mask), das Bild \(pair.image) – \
+            §11.6.5.3 verlangt gleiche Masse.
+            """)
+    }
+
+    struct Geometry: Equatable, CustomStringConvertible {
+        let width: Int, height: Int
+        var description: String { "\(width)×\(height)" }
+    }
+
+    /// Masse aller Seitenbilder mit weicher Maske, direkt aus den Wörter-
+    /// büchern gelesen – `imageResources()` meldet die Maske nur als Flag.
+    static func imageAndMaskGeometry(of url: URL) throws
+        -> [(image: Geometry, mask: Geometry, matte: Bool)] {
+        let doc = try #require(CGPDFDocument(url as CFURL))
+        var found: [(image: Geometry, mask: Geometry, matte: Bool)] = []
+        for index in 1...max(doc.numberOfPages, 1) {
+            guard let page = doc.page(at: index)?.dictionary else { continue }
+            var resources: CGPDFDictionaryRef?
+            var xobjects: CGPDFDictionaryRef?
+            guard CGPDFDictionaryGetDictionary(page, "Resources", &resources),
+                  let resources,
+                  CGPDFDictionaryGetDictionary(resources, "XObject", &xobjects),
+                  let xobjects else { continue }
+            var streams: [CGPDFStreamRef] = []
+            withUnsafeMutablePointer(to: &streams) { ctx in
+                CGPDFDictionaryApplyFunction(xobjects, { _, object, info in
+                    var stream: CGPDFStreamRef?
+                    if CGPDFObjectGetValue(object, .stream, &stream), let stream {
+                        info!.assumingMemoryBound(to: [CGPDFStreamRef].self)
+                            .pointee.append(stream)
+                    }
+                }, ctx)
+            }
+            for stream in streams {
+                guard let dict = CGPDFStreamGetDictionary(stream) else { continue }
+                var smask: CGPDFStreamRef?
+                guard CGPDFDictionaryGetStream(dict, "SMask", &smask), let smask,
+                      let maskDict = CGPDFStreamGetDictionary(smask) else { continue }
+                var matte: CGPDFArrayRef?
+                found.append((image: geometry(dict), mask: geometry(maskDict),
+                              matte: CGPDFDictionaryGetArray(maskDict, "Matte", &matte)))
+            }
+        }
+        return found
+    }
+
+    private static func geometry(_ dict: CGPDFDictionaryRef) -> Geometry {
+        var w: CGPDFInteger = 0, h: CGPDFInteger = 0
+        CGPDFDictionaryGetInteger(dict, "Width", &w)
+        CGPDFDictionaryGetInteger(dict, "Height", &h)
+        return Geometry(width: w, height: h)
+    }
+
     /// Farbschlüssel-Maskierung bleibt ausgeschlossen.
     ///
     /// `/Mask` als Array benennt Farbwerte im Original. Eine verlustbehaftete

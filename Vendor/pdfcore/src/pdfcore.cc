@@ -2530,6 +2530,129 @@ bool blocks_jpeg_replacement(QPDFObjectHandle imageDict, bool decodeApplied)
 }
 
 
+/// Flächenmittelnde Umrechnung einer Zeile/Spalte von `srcN` auf `dstN`
+/// Werte (Schrittweite `stride` in beiden Puffern). Jeder Zielwert ist das
+/// mit der Überdeckung gewichtete Mittel seines Quellintervalls – beim
+/// Vergrössern fällt das auf den nächsten Nachbarn zurück. Gerechnet wird in
+/// double, gespeichert in `float`: Zwischenraster in double kosteten bei
+/// einer 8000×6000-Maske über 400 MB.
+template <typename In>
+void area_resample_line(In const* src, int srcN, float* dst, int dstN,
+                        size_t stride)
+{
+    double const scale = static_cast<double>(srcN) / dstN;
+    for (int o = 0; o < dstN; ++o) {
+        double const lo = o * scale;
+        double const hi = (o + 1) * scale;
+        int const first = static_cast<int>(std::floor(lo));
+        int const last = std::min(srcN, static_cast<int>(std::ceil(hi)));
+        double sum = 0, weight = 0;
+        for (int i = first; i < last; ++i) {
+            double const w = std::min(hi, i + 1.0) - std::max(lo, static_cast<double>(i));
+            if (w <= 0) { continue; }
+            sum += w * src[static_cast<size_t>(i) * stride];
+            weight += w;
+        }
+        dst[static_cast<size_t>(o) * stride] =
+            static_cast<float>(weight > 0 ? sum / weight : 0);
+    }
+}
+
+/// Weiche Maske mit /Matte an die NEUEN Bildmasse anpassen.
+///
+/// Die allgemeine Regel oben („eine SMask darf eigene Masse haben") hat
+/// eine Ausnahme: Trägt die Maske /Matte, sind die Farben des Basisbildes
+/// gegen die Matte-Farbe vorgemischt, und PDF 32000-1 §11.6.5.3 verlangt
+/// dann dieselbe /Width und /Height wie das Basisbild – das Entmischen
+/// braucht Bildpunkt-Entsprechung. Poppler meldet sonst „Softmask with
+/// matte entry … must have same geometry", Leser zeigen Säume oder
+/// ignorieren die Maske (CSWP.04162018, S. 19, im Klein-Modus).
+///
+/// Die Maske wird deshalb flächenmittelnd auf die Zielmasse gebracht. Das
+/// ist beim vorgemischten Alpha genau die richtige Arithmetik: Mittelt man
+/// c' = m + a·(c − m) und a getrennt, ergibt das Entmischen das alpha-
+/// gewichtete Mittel der Originalfarben. Die Maske wird als NEUES Objekt
+/// angelegt – eine geteilte Maske kann noch an anderen Bildern hängen.
+///
+/// Rückgabe false: Die Maske lässt sich nicht sicher umrechnen (nicht
+/// dekodierbar, nicht 8 Bit, Grösse unstimmig) – dann muss der Aufrufer die
+/// Ersetzung verweigern, bevor er irgendetwas am Dokument ändert.
+bool fit_matte_smask(QPDF& qpdf, QPDFObjectHandle newDict,
+                     int width, int height)
+{
+    QPDFObjectHandle mask = newDict.getKey("/SMask");
+    if (!mask.isStream()) { return true; }
+    QPDFObjectHandle md = mask.getDict();
+    if (!md.hasKey("/Matte")) { return true; }
+    QPDFObjectHandle mw = md.getKey("/Width");
+    QPDFObjectHandle mh = md.getKey("/Height");
+    if (!mw.isInteger() || !mh.isInteger()) { return false; }
+    int const srcW = static_cast<int>(mw.getIntValue());
+    int const srcH = static_cast<int>(mh.getIntValue());
+    if (srcW == width && srcH == height) { return true; }
+    if (srcW <= 0 || srcH <= 0 || width <= 0 || height <= 0) { return false; }
+    QPDFObjectHandle bpc = md.getKey("/BitsPerComponent");
+    if (!bpc.isInteger() || bpc.getIntValue() != 8) { return false; }
+
+    Pl_Buffer collector("matte-smask");
+    if (!mask.pipeStreamData(&collector, nullptr, 0, qpdf_dl_all,
+                             /*suppress_warnings=*/true, false)) {
+        return false;
+    }
+    std::unique_ptr<Buffer> raw(collector.getBuffer());
+    size_t const srcCount = static_cast<size_t>(srcW) * srcH;
+    if (!raw || raw->getSize() < srcCount) { return false; }
+    unsigned char const* in = raw->getBuffer();
+
+    // Erst waagrecht (srcW → width je Quellzeile, direkt aus den Bytes),
+    // dann senkrecht.
+    std::vector<float> mid(static_cast<size_t>(width) * srcH);
+    for (int y = 0; y < srcH; ++y) {
+        area_resample_line(in + static_cast<size_t>(y) * srcW, srcW,
+                           &mid[static_cast<size_t>(y) * width], width, 1);
+    }
+    std::vector<float> out(static_cast<size_t>(width) * height);
+    for (int x = 0; x < width; ++x) {
+        area_resample_line(&mid[x], srcH, &out[x], height,
+                           static_cast<size_t>(width));
+    }
+    std::string pixels(out.size(), '\0');
+    for (size_t i = 0; i < out.size(); ++i) {
+        pixels[i] = static_cast<char>(
+            std::lround(std::min(255.0f, std::max(0.0f, out[i]))));
+    }
+
+    uLong bound = compressBound(static_cast<uLong>(pixels.size()));
+    std::string packed(static_cast<size_t>(bound), '\0');
+    uLong destLen = bound;
+    if (compress2(reinterpret_cast<Bytef*>(&packed[0]), &destLen,
+                  reinterpret_cast<Bytef const*>(pixels.data()),
+                  static_cast<uLong>(pixels.size()),
+                  Z_BEST_COMPRESSION) != Z_OK) {
+        return false;
+    }
+    packed.resize(static_cast<size_t>(destLen));
+
+    QPDFObjectHandle fitted = QPDFObjectHandle::newStream(&qpdf, packed);
+    QPDFObjectHandle fd = fitted.getDict();
+    fd.replaceKey("/Type", QPDFObjectHandle::newName("/XObject"));
+    fd.replaceKey("/Subtype", QPDFObjectHandle::newName("/Image"));
+    fd.replaceKey("/Width", QPDFObjectHandle::newInteger(width));
+    fd.replaceKey("/Height", QPDFObjectHandle::newInteger(height));
+    fd.replaceKey("/BitsPerComponent", QPDFObjectHandle::newInteger(8));
+    fd.replaceKey("/ColorSpace", QPDFObjectHandle::newName("/DeviceGray"));
+    fd.replaceKey("/Filter", QPDFObjectHandle::newName("/FlateDecode"));
+    // /Decode wirkt linear auf die Abtastwerte und vertauscht sich daher
+    // mit dem Mitteln – Matte, Decode und Interpolate bleiben, wie sie sind.
+    for (char const* key : {"/Matte", "/Decode", "/Interpolate"}) {
+        QPDFObjectHandle v = md.getKey(key);
+        if (!v.isNull()) { fd.replaceKey(key, v); }
+    }
+    fitted.setFilterOnWrite(false);
+    newDict.replaceKey("/SMask", fitted);
+    return true;
+}
+
 /// Gemeinsamer Kern beider Ersetzungsvarianten. `filterName` ist der Filter
 /// des NEUEN Streams; die Bytes müssen bereits so kodiert sein.
 ///
@@ -2627,6 +2750,12 @@ int replace_image_stream(pdfcore_document_t *doc,
     for (char const* key : {"/SMask", "/Mask", "/SMaskInData"}) {
         QPDFObjectHandle v = oldDict.getKey(key);
         if (!v.isNull()) { newDict.replaceKey(key, v); }
+    }
+    // Ausnahme /Matte: Die Maske muss die neuen Masse mitgehen.
+    if (!fit_matte_smask(doc->qpdf, newDict,
+                         newDict.getKey("/Width").getIntValueAsInt(),
+                         newDict.getKey("/Height").getIntValueAsInt())) {
+        return PDFCORE_ERR_CHECK_FAILED;
     }
 
     // Übernommen wird die REFERENZ, nicht eine Kopie.
@@ -3921,6 +4050,9 @@ int replace_image_bilevel(pdfcore_document_t *doc,
     for (char const* key : {"/SMask", "/Mask", "/SMaskInData"}) {
         QPDFObjectHandle v = oldDict.getKey(key);
         if (!v.isNull()) { newDict.replaceKey(key, v); }
+    }
+    if (!fit_matte_smask(doc->qpdf, newDict, width, height)) {
+        return PDFCORE_ERR_CHECK_FAILED;
     }
     for (char const* key : {"/Intent", "/Interpolate", "/Metadata",
                             "/StructParent", "/OC"}) {
@@ -8644,6 +8776,9 @@ int pdfcore_replace_image_object_indexed(pdfcore_document_t *doc,
         for (char const* key : {"/SMask", "/Mask", "/SMaskInData"}) {
             QPDFObjectHandle v = oldDict.getKey(key);
             if (!v.isNull()) { newDict.replaceKey(key, v); }
+        }
+        if (!fit_matte_smask(doc->qpdf, newDict, width, height)) {
+            return PDFCORE_ERR_CHECK_FAILED;
         }
         for (char const* key : {"/Intent", "/Interpolate", "/Metadata",
                                 "/StructParent", "/OC"}) {

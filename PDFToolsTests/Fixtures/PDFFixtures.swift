@@ -382,7 +382,11 @@ enum PDFFixtures {
     /// §8.9.6.4 muss sie das nicht sein, sie wird skaliert. Genau darauf
     /// beruht, dass wir das Bild neu kodieren dürfen, ohne die Maske
     /// anzufassen.
+    /// - Parameter matte: Maske mit `/Matte [0 0 0]` (vorgemischtes Alpha).
+    ///   Dann verlangt §11.6.5.3 dieselben Masse wie das Bild – die Maske
+    ///   ist in dem Fall so gross wie das Bild, nicht halb so gross.
     static func softMaskedPhotoPDF(pixelWidth: Int = 2400,
+                                   matte: Bool = false,
                                    name: String = "soft-masked") throws -> URL {
         let height = pixelWidth * 3 / 4
         // Farbbild
@@ -402,8 +406,10 @@ enum PDFFixtures {
             throw CocoaError(.fileWriteUnknown)
         }
 
-        // Maske: halb so gross, weicher Verlauf von durchsichtig nach deckend.
-        let mw = pixelWidth / 2, mh = height / 2
+        // Maske: halb so gross (mit /Matte: gleich gross), weicher Verlauf
+        // von durchsichtig nach deckend.
+        let mw = matte ? pixelWidth : pixelWidth / 2
+        let mh = matte ? height : height / 2
         var maskBytes = [UInt8](repeating: 0, count: mw * mh)
         for y in 0..<mh {
             for x in 0..<mw {
@@ -415,7 +421,8 @@ enum PDFFixtures {
         let pages = b.reserveNumber()
         let mask = b.addStream(
             dictionary: "/Type/XObject/Subtype/Image/Width \(mw)/Height \(mh)"
-                + "/ColorSpace/DeviceGray/BitsPerComponent 8",
+                + "/ColorSpace/DeviceGray/BitsPerComponent 8"
+                + (matte ? "/Matte[0 0 0]" : ""),
             data: Data(maskBytes))
         let image = b.addStream(
             dictionary: "/Type/XObject/Subtype/Image/Width \(pixelWidth)"
