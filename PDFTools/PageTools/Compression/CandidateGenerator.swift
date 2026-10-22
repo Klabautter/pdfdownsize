@@ -551,8 +551,9 @@ enum CandidateGenerator {
                   let original = options.forceGrayscale
                     ? ImageResampler.resize(decodedOriginal, to: native, components: 1)
                     : decodedOriginal,
-                  let reference = CandidateGenerator.referenceSample(original: original,
-                                                                    target: target),
+                  let reference = CandidateGenerator.referenceSample(
+                      original: original, target: target,
+                      fine: CandidateGenerator.measuresFine(options)),
                   let comparison = ImageResampler.resize(transformed,
                       to: PixelSize(width: reference.width, height: reference.height),
                       components: 3) else { return nil }
@@ -1245,7 +1246,8 @@ enum CandidateGenerator {
                     : decoded
             }
             let sourceSample = source.flatMap {
-                CandidateGenerator.referenceSample(original: $0, target: target)
+                CandidateGenerator.referenceSample(original: $0, target: target,
+                                                   fine: CandidateGenerator.measuresFine(options))
             }
             if case .adaptive = jpegOptions.qualityPolicy, sourceSample == nil {
                 keepReason = .decodeFailed
@@ -1627,8 +1629,9 @@ enum CandidateGenerator {
             }
             guard let original = decodedRaster(for: PixelSize(width: resource.width,
                                                                height: resource.height)),
-                  let sourceSample = CandidateGenerator.referenceSample(original: original,
-                                                                        target: policyTarget)
+                  let sourceSample = CandidateGenerator.referenceSample(
+                      original: original, target: policyTarget,
+                      fine: CandidateGenerator.measuresFine(options))
             else { return }
 
             let policy = BracketedJPEGSearch.Policy.bracketed(
@@ -1960,9 +1963,24 @@ extension CandidateGenerator {
     /// erlaubten Verkleinerung durch (Foto-Regression, 54 % statt 95 %).
     /// Stufen UNTER dem Ziel und Farbwandlungen bleiben auf diesem Raster
     /// voll messbar. Ohne Ziel (keine Platzierung/kein Resize) gilt 320 px.
-    static func measurementEdge(target: PixelSize?) -> Int {
+    ///
+    /// `fine` (Klein, 2026-10-22): Raster bis `fineMeasurementEdge`. Auf
+    /// 320 px maß Klein bei großen Fotos 0,98–0,999 für JEDE Stufe – selbst
+    /// Weichzeichnen (Radius 2, voll gemessen p05 0,40) bestand. Das Gate
+    /// entschied nichts; 96 DPI + q0,50 kamen allein über die Leiterenden.
+    static func measurementEdge(target: PixelSize?, fine: Bool = false) -> Int {
         guard let target else { return QualityMetrics.sampleEdge }
-        return max(16, min(QualityMetrics.sampleEdge, max(target.width, target.height)))
+        let cap = fine ? fineMeasurementEdge : QualityMetrics.sampleEdge
+        return max(16, min(cap, max(target.width, target.height)))
+    }
+
+    /// Feines Messraster – dasselbe wie der Smart-Anker.
+    static let fineMeasurementEdge = BracketedJPEGSearch.AnchorCheck.sampleEdge
+
+    /// Klein misst auf dem feinen Raster (mit seinen eigenen Grenzen, ohne
+    /// Anker). Smart hat dafür den Anker, Qualität strengere Grenzen.
+    static func measuresFine(_ options: ImageCompressionOptions) -> Bool {
+        QualityGatePreset(ssimThreshold: options.ssimThreshold) == .small
     }
 
     /// Referenzstichprobe des Originals auf dem Messraster – IMMER mit
@@ -1981,8 +1999,9 @@ extension CandidateGenerator {
     /// feine Linien und Beschriftungen ohne echten Verlust (USGS-Karte: 19–51
     /// Kacheln blieben im Original). So unterscheidet beide nur die Kodierung.
     static func referenceSample(original: CGImage, target: PixelSize?,
-                                maxEdge: Int? = nil) -> QualityGates.Sample? {
-        let edge = maxEdge ?? measurementEdge(target: target)
+                                maxEdge: Int? = nil,
+                                fine: Bool = false) -> QualityGates.Sample? {
+        let edge = maxEdge ?? measurementEdge(target: target, fine: fine)
         var base = original
         if let target, target.width < original.width || target.height < original.height,
            let atTarget = ImageResampler.resize(original, to: target, components: 3) {

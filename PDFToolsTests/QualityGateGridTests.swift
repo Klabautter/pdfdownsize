@@ -20,6 +20,8 @@ import CoreGraphics
 ///  F. (P0.3) Auch auf dem vollen 320-px-Raster verkleinern Referenz und
 ///     Kandidat mit verschiedenen Filtern – ein UNVERÄNDERTES, körniges Bild
 ///     misst dann deutlich unter 1 (gemessen 0,90–0,93 an echten Scans/Fotos).
+///  G. (2026-10-22) Klein misst auf dem feinen Raster (≤ 1024 px). Auf 320 px
+///     bestand bei großen Bildern jede Stufe, auch halbierte Auflösung.
 @Suite struct QualityGateGridTests {
 
     /// Körniges Testbild (deterministisches Rauschen auf Verlauf) – das
@@ -153,5 +155,44 @@ import CoreGraphics
         let bad = try #require(evaluator.measure(candidate: belowOnGrid))
         #expect(bad.globalSSIM < ok.globalSSIM - 0.1,
                 "unter Ziel \(bad.globalSSIM) vs Ziel \(ok.globalSSIM)")
+    }
+
+    // G
+    @Test func kleinMisstAufFeinemRaster() {
+        let big = PixelSize(width: 1600, height: 1200)
+        #expect(CandidateGenerator.measurementEdge(target: big, fine: true) == 1024)
+        #expect(CandidateGenerator.measurementEdge(target: big) == 320)
+        #expect(CandidateGenerator.measurementEdge(target: PixelSize(width: 600, height: 400),
+                                                   fine: true) == 600)
+        #expect(CandidateGenerator.measuresFine(.small))
+        #expect(!CandidateGenerator.measuresFine(.smart))
+        #expect(!CandidateGenerator.measuresFine(.quality))
+    }
+
+    // G: Halbierte Auflösung besteht auf 320 px, fällt auf dem feinen Raster durch.
+    @Test func halbierteAufloesungFaelltAufFeinemRasterDurch() throws {
+        let original = Self.grainy(1600)
+        let target = PixelSize(width: 1600, height: 1600)
+        let half = try #require(ImageResampler.resize(original,
+            to: PixelSize(width: 800, height: 800), components: 3))
+        let softened = try #require(ImageResampler.resize(half, to: target, components: 3))
+        let gate = QualityGatePolicy.policy(preset: .small, imageClass: .photo)
+
+        func verdict(fine: Bool) throws -> (QualityGateMeasurement, Bool) {
+            let reference = try #require(CandidateGenerator.referenceSample(
+                original: original, target: target, fine: fine))
+            let onGrid = try #require(ImageResampler.resize(softened,
+                to: PixelSize(width: reference.width, height: reference.height), components: 3))
+            // Der Evaluator tastet den Kandidaten auf dem Raster der Referenz ab.
+            let m = try #require(QualityGates.Evaluator(reference: reference).measure(candidate: onGrid))
+            if case .pass = QualityGates.qualityVerdict(policy: gate, measurement: m) {
+                return (m, true)
+            }
+            return (m, false)
+        }
+        let (coarse, coarsePass) = try verdict(fine: false)
+        let (fine, finePass) = try verdict(fine: true)
+        #expect(coarsePass, "320 px: SSIM \(coarse.globalSSIM) p05 \(coarse.p05TileSSIM)")
+        #expect(!finePass, "1024 px: SSIM \(fine.globalSSIM) p05 \(fine.p05TileSSIM)")
     }
 }

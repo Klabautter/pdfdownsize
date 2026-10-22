@@ -486,8 +486,15 @@ enum QualityGates {
 
         var isUsable: Bool { reference.width >= 8 && reference.height >= 8 }
 
+        /// Kandidaten auf dem Raster der Referenz abtasten – auch wenn die
+        /// Referenz feiner als 320 px ist (Klein, 2026-10-22). Für Raster
+        /// ≤ 320 px dieselbe Stichprobe wie zuvor.
+        private var edge: Int {
+            max(QualityMetrics.sampleEdge, reference.width, reference.height)
+        }
+
         func measure(candidate: CGImage) -> QualityGateMeasurement? {
-            guard isUsable, let candidateSample = QualityGates.sample(candidate) else {
+            guard isUsable, let candidateSample = QualityGates.sample(candidate, maxEdge: edge) else {
                 return nil
             }
             return measure(candidate: candidateSample)
@@ -501,7 +508,7 @@ enum QualityGates {
         /// Teilt sich die Referenz-Stichprobe; der Kandidat wird einmal
         /// gesampelt – dieselben Kosten wie `measure(candidate:)`.
         func edgeIntroduction(candidate: CGImage) -> Double? {
-            guard isUsable, let candidateSample = QualityGates.sample(candidate) else {
+            guard isUsable, let candidateSample = QualityGates.sample(candidate, maxEdge: edge) else {
                 return nil
             }
             return QualityGates.edgeIntroduction(reference: reference,

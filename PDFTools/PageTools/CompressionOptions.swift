@@ -439,7 +439,9 @@ struct ImageCompressionOptions: Equatable, Codable, Sendable {
     /// Zielraster) folgt dem Ziel automatisch.
     /// Klein – für Mailanhänge und Uploads.
     ///
-    /// 110 DPI. Gemessen an einem Dokument mit fünfzehn 12-Megapixel-Fotos
+    /// Ziel 110 DPI; die Auflösungsleiter (144/110/96) darf bis 96 DPI
+    /// gehen, und große Fotos landen dort (Messung 2026-10-22: 96 DPI +
+    /// q0,50, voll gemessen SSIM ≈ 0,93). Gemessen an einem Dokument mit fünfzehn 12-Megapixel-Fotos
     /// (16,5 MB) liefert diese Stufe rund 0,8 MB, also 95 % Ersparnis. Auf
     /// dem Bildschirm bleibt Text bequem lesbar; zum Drucken taugt es nicht,
     /// und dafuer ist die Stufe auch nicht gedacht.
