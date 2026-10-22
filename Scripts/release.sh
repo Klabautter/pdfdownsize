@@ -96,13 +96,42 @@ echo "   Version $VERSION, Tag $TAG, Notizen: $SUMMARY"
 # --- 2. Bauen, packen, signieren -------------------------------------------
 
 echo "→ Baue Release …"
+# Ohne Code-Coverage und mit umgeschriebenen Quellpfaden (2026-10-22): Das
+# automatisch erzeugte Schema schaltet Coverage auch für Release ein. 1.0.3
+# trug dadurch 3000 Zählersymbole und über 6000 Pfade des Entwicklungsrechners
+# (Benutzername) im Binary, 3 MB mehr. Die Ausgabe der App ist byte-gleich.
+#
+# Gestrippt werden NUR Debug-Symbole (STRIP_STYLE=debugging): Sie tragen die
+# Pfade der Objektdateien. Globale Symbole müssen bleiben – die Bridge sucht
+# pdfcore_remove_page_thumbs und pdfcore_minify_content_streams per dlsym im
+# eigenen Binary; vollständig gestrippt fielen beide Optimierungen still weg
+# (gemessen bis +7 % Ausgabegröße).
 xcodebuild build -project PDFTools.xcodeproj -scheme PDFTools \
-    -configuration Release -derivedDataPath "$DERIVED" 2>&1 \
+    -configuration Release -derivedDataPath "$DERIVED" \
+    CLANG_COVERAGE_MAPPING=NO ENABLE_CODE_COVERAGE=NO \
+    "OTHER_SWIFT_FLAGS=\$(inherited) -file-prefix-map $ROOT=." \
+    "OTHER_CFLAGS=\$(inherited) -ffile-prefix-map=$ROOT=." \
+    DEPLOYMENT_POSTPROCESSING=YES STRIP_INSTALLED_PRODUCT=YES \
+    STRIP_STYLE=debugging 2>&1 \
     | grep -E " error: |BUILD (SUCCEEDED|FAILED)" || true
 
 APP="$DERIVED/Build/Products/Release/PDFdownsize.app"
 [ -d "$APP" ] || { echo "Build fehlgeschlagen: $APP fehlt" >&2; exit 1; }
 codesign --verify --deep --strict "$APP"
+
+# Kein Pfad des Entwicklungsrechners im veröffentlichten Bundle.
+if grep -rlaF "$HOME/" "$APP" >/dev/null 2>&1; then
+    echo "Das Bundle enthält Pfade unter $HOME – Release abgebrochen:" >&2
+    grep -rlaF "$HOME/" "$APP" >&2
+    exit 1
+fi
+# Per dlsym gesuchte Engine-Funktionen müssen exportiert bleiben.
+# (Erst einlesen: `nm | grep -q` endet mit SIGPIPE, pipefail wertet das als Fehlschlag.)
+EXPORTS="$(nm -gU "$APP/Contents/MacOS/PDFdownsize")"
+for sym in pdfcore_remove_page_thumbs pdfcore_minify_content_streams; do
+    grep -q "_$sym\$" <<< "$EXPORTS" || {
+        echo "Symbol $sym fehlt im Binary (gestrippt?) – Release abgebrochen" >&2; exit 1; }
+done
 
 BUILT_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")"
