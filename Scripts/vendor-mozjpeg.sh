@@ -33,8 +33,12 @@
 #
 # Build-Konfiguration:
 #   - ENABLE_STATIC=1 / ENABLE_SHARED=0 → nur libjpeg.a (statisch)
-#   - WITH_SIMD=0 → konsistent zur turbo-Lib in vendor-qpdf.sh, keine
-#     NASM-Abhängigkeit; Kompressionsgrad identisch, nur Durchsatz niedriger
+#   - WITH_SIMD: arm64 = 1 (NEON-Intrinsics, kein NASM nötig), x86_64 = 0
+#     (bräuchte NASM; die App wird nur für Apple Silicon ausgeliefert).
+#     Seit 2026-10-22. Ausgabe bytegleich zum C-Pfad: 243 Vergleichsdateien
+#     (RGB/Grau/CMYK-Kodierung über 8 Qualitäten, Repack progressiv und
+#     baseline, Bildgrößen 1×1 bis 2000×1334) ohne Unterschied; Kodierung
+#     rund 20 %, Repack 20–37 % schneller.
 #   - WITH_TURBOJPEG=0 → TurboJPEG-API (turbojpeg.a/tjbench) nicht benötigt
 #   - PNG_SUPPORTED=0 → hermetischer Build, keine libpng/zlib-Find-Abhängigkeit
 #   - mozjpeg-Erweiterungen (Trellis, progressive Defaults) sind in der
@@ -99,7 +103,7 @@ for ARCH in arm64 x86_64; do
             -DENABLE_SHARED=0 -DENABLE_STATIC=1 \
             -DWITH_JPEG8=0 \
             -DWITH_MEM_SRCDST=1 \
-            -DWITH_SIMD=0 \
+            -DWITH_SIMD=$([ "$ARCH" = arm64 ] && echo 1 || echo 0) \
             -DWITH_TURBOJPEG=0 \
             -DPNG_SUPPORTED=0 > /dev/null
         "$CM" --build "$WORK/mozjpeg-$ARCH" --parallel > /dev/null
@@ -153,7 +157,8 @@ Dieses Verzeichnis enthält eine statische, universelle Build-Artefakt-Kopie
   (COMPRESSION_ROADMAP.md, Phase 1). Keine Änderungen am Quellcode.
 - Build-Konfiguration: Release, `ENABLE_SHARED=0`, `ENABLE_STATIC=1`,
   `WITH_JPEG8=0` (libjpeg-v6b-ABI, identisch zur libjpeg-turbo 3.1.0 in
-  `Vendor/pdfcore`), `WITH_MEM_SRCDST=1`, `WITH_SIMD=0`, `WITH_TURBOJPEG=0`,
+  `Vendor/pdfcore`), `WITH_MEM_SRCDST=1`, `WITH_SIMD=1` (arm64, NEON) bzw.
+  `WITH_SIMD=0` (x86_64), `WITH_TURBOJPEG=0`,
   `PNG_SUPPORTED=0`. Deployment-Target macOS 11.0.
 - Die Tools cjpeg/djpeg/jpegtran sind nicht Teil dieses Verzeichnisses
   (verbleiben im Build-Arbeitsverzeichnis unter /tmp/opencode).
@@ -206,7 +211,7 @@ cat > "$DEST/INTEGRATION_NOTES.md" <<EOF
   → späterer Austausch API-kompatibel. \`jpeg_mem_src/jpeg_mem_dest\` sind im
   6b-Modus verfügbar (WITH_MEM_SRCDST=1). mozjpeg-Erweiterungen zusätzlich:
   \`jpeg_c_set_int_param\` / \`jpeg_c_set_bool_param\` / \`JINT_COMPRESS_PROFILE\`.
-- Build: \`WITH_SIMD=0\` (konsistent zur turbo-Lib, keine NASM-Abhängigkeit),
+- Build: \`WITH_SIMD=1\` auf arm64 (NEON), \`WITH_SIMD=0\` auf x86_64 (keine NASM-Abhängigkeit),
   \`WITH_TURBOJPEG=0\`, \`PNG_SUPPORTED=0\`, ENABLE_SHARED=0/ENABLE_STATIC=1.
   cjpeg/djpeg/jpegtran landen nur unter /tmp/opencode (nicht in Vendor).
 

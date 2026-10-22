@@ -10,7 +10,8 @@ Dieses Verzeichnis enthält eine statische, universelle Build-Artefakt-Kopie
   (COMPRESSION_ROADMAP.md, Phase 1). Keine Änderungen am Quellcode.
 - Build-Konfiguration: Release, `ENABLE_SHARED=0`, `ENABLE_STATIC=1`,
   `WITH_JPEG8=0` (libjpeg-v6b-ABI, identisch zur libjpeg-turbo 3.1.0 in
-  `Vendor/pdfcore`), `WITH_MEM_SRCDST=1`, `WITH_SIMD=0`, `WITH_TURBOJPEG=0`,
+  `Vendor/pdfcore`), `WITH_MEM_SRCDST=1`, `WITH_SIMD=1` (arm64, NEON) bzw.
+  `WITH_SIMD=0` (x86_64), `WITH_TURBOJPEG=0`,
   `PNG_SUPPORTED=0`. Deployment-Target macOS 11.0.
 - Die Tools cjpeg/djpeg/jpegtran sind nicht Teil dieses Verzeichnisses
   (verbleiben im Build-Arbeitsverzeichnis unter /tmp/opencode).

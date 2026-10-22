@@ -15,7 +15,7 @@
   → späterer Austausch API-kompatibel. `jpeg_mem_src/jpeg_mem_dest` sind im
   6b-Modus verfügbar (WITH_MEM_SRCDST=1). mozjpeg-Erweiterungen zusätzlich:
   `jpeg_c_set_int_param` / `jpeg_c_set_bool_param` / `JINT_COMPRESS_PROFILE`.
-- Build: `WITH_SIMD=0` (konsistent zur turbo-Lib, keine NASM-Abhängigkeit),
+- Build: `WITH_SIMD=1` auf arm64 (NEON), `WITH_SIMD=0` auf x86_64 (keine NASM-Abhängigkeit),
   `WITH_TURBOJPEG=0`, `PNG_SUPPORTED=0`, ENABLE_SHARED=0/ENABLE_STATIC=1.
   cjpeg/djpeg/jpegtran landen nur unter /tmp/opencode (nicht in Vendor).
 
