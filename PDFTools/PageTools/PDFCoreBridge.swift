@@ -449,6 +449,36 @@ extension PDFCoreDocument {
         // verschiedenen Formen unter demselben Namen stehen.
         let placedByPageAndObject = try formPlacementSizes()
 
+        // Beide Quellen ergänzen sich; die GRÖSSTE bekannte Platzierung zählt
+        // (bestehende Regel – sie limitiert das Verkleinern am stärksten,
+        // effectiveDPI nimmt das Minimum).
+        func placedSize(of info: PDFCoreImageInfo) -> (Double, Double) {
+            let key = "\(info.pageIndex)|\(Self.normalizedResourceName(info.name))"
+            let formKey = "\(info.pageIndex)|\(info.objectID.objectNumber)|\(info.objectID.generation)"
+            var placed = (0.0, 0.0)
+            for candidate in [placedByPageAndName[key],
+                              placedByPageAndObject[formKey]].compactMap({ $0 })
+            where candidate.0 > placed.0 {
+                placed = candidate
+            }
+            return placed
+        }
+
+        // Übergroße Scan-Seiten: Die Korrektur gilt für die ganze Seite.
+        var pageSizeDPIScales: [Int: Double] = [:]
+        for info in placements where pageSizeDPIScales[info.pageIndex] == nil {
+            let placed = placedSize(of: info)
+            guard max(placed.0, placed.1) > OversizedScanPage.minimumLongEdgePoints * 0.9,
+                  info.pageIndex < pageCount else { continue }
+            let page = try pageInfo(at: info.pageIndex)
+            let box = page.cropBox.count >= 4 && page.cropBox[2] != page.cropBox[0]
+                ? page.cropBox : page.mediaBox
+            guard box.count >= 4 else { continue }
+            pageSizeDPIScales[info.pageIndex] = OversizedScanPage.dpiScale(
+                pageWidth: abs(box[2] - box[0]), pageHeight: abs(box[3] - box[1]),
+                placedWidth: placed.0, placedHeight: placed.1, pixelWidth: info.width)
+        }
+
         var grouped: [PDFObjectID: [PDFCoreImageInfo]] = [:]
         var order: [PDFObjectID] = []
         for info in placements {
@@ -469,22 +499,14 @@ extension PDFCoreDocument {
             }
             let placementModels = infos.map { info -> PDFImagePlacement in
                 let key = "\(info.pageIndex)|\(Self.normalizedResourceName(info.name))"
-                let formKey = "\(info.pageIndex)|\(objectID.objectNumber)|\(objectID.generation)"
-                // Beide Quellen ergänzen sich; die GRÖSSTE bekannte
-                // Platzierung zählt (bestehende Regel – sie limitiert das
-                // Verkleinern am stärksten, effectiveDPI nimmt das Minimum).
-                var placed = (0.0, 0.0)
-                for candidate in [placedByPageAndName[key],
-                                  placedByPageAndObject[formKey]].compactMap({ $0 })
-                where candidate.0 > placed.0 {
-                    placed = candidate
-                }
+                let placed = placedSize(of: info)
                 return PDFImagePlacement(
                     pageIndex: info.pageIndex,
                     resourceName: info.name,
                     placedWidthPoints: placed.0,
                     placedHeightPoints: placed.1,
-                    transform: transformByPageAndName[key])
+                    transform: transformByPageAndName[key],
+                    pageSizeDPIScale: pageSizeDPIScales[info.pageIndex])
             }
             return PDFImageResource(
                 objectID: objectID,

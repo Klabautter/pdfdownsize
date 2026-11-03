@@ -495,6 +495,12 @@ struct ImageCompressionOptions: Equatable, Codable, Sendable {
         jpegQuality: 0.90, qualityLadder: [0.60, 0.75, 0.90], ssimThreshold: 0.90,
         forceGrayscale: false, aggressiveGraphics: false)
 
+    /// Smart-Ziel für JPEG-Dokumentscans (Papier, Handschrift, Formulare).
+    /// Dort kostet 150 DPI sichtbar nichts und bringt rund 90 % (gemessen
+    /// 2026-11-03 an sechs Handschrift-Seiten: SSIM 0,983). Fotos und
+    /// Folienfotos bleiben beim allgemeinen Smart-Ziel.
+    static let smartDocumentScanDPI: Double = 150
+
     /// Referenz-DPI des Schnellschätzers (Zielgrößen-Modell): der Smart-
     /// Anker des Produkts. Vom Preset abgeleitet, damit es nur EINE Stelle
     /// gibt – der Schätzer selbst darf keine Bildentscheidung treffen und

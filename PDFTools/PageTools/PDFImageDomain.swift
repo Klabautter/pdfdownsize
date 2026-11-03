@@ -40,6 +40,37 @@ struct PDFImagePlacement: Hashable, Codable, Sendable {
     /// CTM beim Zeichnen [a b c d e f] (Einheitsquadrat → Seite); nil, wenn
     /// unbekannt (z. B. Bilder in Formen). Nur für die Lage auf der Seite.
     var transform: [Double]? = nil
+    /// Korrektur für Scans auf übergroßer Seite (siehe `OversizedScanPage`):
+    /// So viel höher ist die Auflösung gegenüber der nominellen Seitengröße.
+    /// nil = die Seitengröße stimmt.
+    var pageSizeDPIScale: Double? = nil
+}
+
+/// Scans, deren Seitengröße nichts über die Vorlage aussagt.
+///
+/// iOS und andere Scanner schreiben oft einen Punkt je Pixel: ein Blatt A4
+/// wird zur 67 × 93 cm großen Seite mit 72 DPI. Damit läge das Bild unter
+/// JEDEM Ziel, und alle Stufen ließen es unangetastet. Eine solche Seite wird
+/// deshalb wie A4 bewertet.
+///
+/// Die Grenze von 100 DPI schützt echte Großformate: Pläne und Karten werden
+/// mit 150 DPI und mehr gescannt und zum Hineinzoomen gebraucht.
+enum OversizedScanPage {
+    /// Längste Kante von A3; darüber ist eine Seite kein normales Blatt mehr.
+    static let minimumLongEdgePoints = 1191.0
+    static let maximumNominalDPI = 100.0
+    static let minimumCoverage = 0.90
+
+    /// Faktor zur nominellen Auflösung; nil, wenn die Seite normal ist.
+    static func dpiScale(pageWidth: Double, pageHeight: Double,
+                         placedWidth: Double, placedHeight: Double,
+                         pixelWidth: Int) -> Double? {
+        let short = min(pageWidth, pageHeight), long = max(pageWidth, pageHeight)
+        guard short > 0, long > minimumLongEdgePoints, placedWidth > 0,
+              placedWidth * placedHeight / (short * long) >= minimumCoverage,
+              Double(pixelWidth) / placedWidth * 72.0 <= maximumNominalDPI else { return nil }
+        return max(short / 595.0, long / 842.0)
+    }
 }
 
 // MARK: - Farbraum
@@ -265,6 +296,7 @@ struct PDFImageResource: Hashable, Codable, Sendable {
         let values = placements.compactMap { placement -> Double? in
             guard placement.placedWidthPoints > 1 else { return nil }
             return Double(width) / placement.placedWidthPoints * 72.0
+                * (placement.pageSizeDPIScale ?? 1)
         }
         return values.min()
     }

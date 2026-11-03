@@ -429,7 +429,7 @@ enum CandidateGenerator {
     /// zerlegt (Typchecker-freundlich).
     private struct Session {
         let resource: PDFImageResource
-        let options: ImageCompressionOptions
+        private(set) var options: ImageCompressionOptions
         let pixels: ImagePixelSource
         let store: CandidateStore
         /// §8.4 – Seitenanalysen (pageIndex → PageAnalysis) für die V2-
@@ -458,6 +458,10 @@ enum CandidateGenerator {
         let allowsQuantizedPalette: Bool
 
         /// Budget der Kandidatensuche (§9.2, KEEP eingerechnet).
+        /// Papier hat wenige Helligkeitsstufen: Sechs Handschrift-Seiten lagen
+        /// bei 1,9–2,9 bit, zwölf Folienfotos bei 5,1–5,7 bit (2026-11-03).
+        static let maximumPaperEntropy = 4.0
+
         var hasSearchBudget: Bool {
             transforms.count + 1 < CandidateGenerator.maximumCandidatesPerImage
         }
@@ -716,6 +720,9 @@ enum CandidateGenerator {
             }
 
             // 3. Zielgröße aus Effective DPI + Kantenlimit (Never Upscale).
+            if isDocumentScanForSmart() {
+                options.targetDPI = ImageCompressionOptions.smartDocumentScanDPI
+            }
             let resize = CompressionPlanner.plannedSize(for: resource,
                                                         options: options)
             let needsColorChange = options.forceGrayscale
@@ -787,6 +794,33 @@ enum CandidateGenerator {
             PageScanAnalyzer.classificationContext(
                 for: resource.placements.first.flatMap { pageContext[$0.pageIndex] },
                 resource: resource)
+        }
+
+        /// Smart-Ziel für JPEG-Dokumentscans: Jede Platzierung liegt als
+        /// Vollbild auf einer Scan-Seite, und der Inhalt hat die schmale
+        /// Helligkeitsverteilung von Papier. Das trennt Dokumente von
+        /// vollseitigen Fotos; die Inhaltsklasse taugt dafür nicht, weil
+        /// dieselbe Handschrift-Seite je nach Raster als Scan oder als
+        /// Grafik gilt.
+        private func isDocumentScanForSmart() -> Bool {
+            guard QualityGatePreset(ssimThreshold: options.ssimThreshold) == .smart,
+                  case .adaptive = options.qualityPolicy,
+                  resource.terminalFilter == .dct,
+                  resource.colorSpace.allowsLossyReplacement,
+                  !resource.placements.isEmpty,
+                  resource.placements.allSatisfy({ placement in
+                      guard let page = pageContext[placement.pageIndex] else { return false }
+                      return page.classification == .rasterScan
+                          || page.classification == .rasterScanWithOCR
+                  }),
+                  let target = CompressionPlanner.plannedSize(
+                      for: resource, options: options,
+                      dpi: ImageCompressionOptions.smartDocumentScanDPI),
+                  let raster = decodedRaster(for: target),
+                  let features = StageTimer.run(stageTimer, .featureAnalysisMs, {
+                      ContentFeatureExtractor.extract(from: raster)
+                  }) else { return false }
+            return features.entropy <= Self.maximumPaperEntropy
         }
 
         /// Ab der Klassifikation – Inhalt nach Legacy-Route verteilt.

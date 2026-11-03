@@ -84,6 +84,7 @@ enum PageScanAnalyzer {
                 largest = ratio
                 largestDPI = Double(entry.resource.width)
                     / placed.placedWidthPoints * 72.0
+                    * (placed.pageSizeDPIScale ?? 1)
             }
         }
         coverage = min(1.0, coverage)
