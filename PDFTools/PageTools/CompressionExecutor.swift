@@ -304,6 +304,10 @@ enum CompressionExecutor {
             }
             }
         }
+        // Die weichen Masken gehen mit: erst jetzt, weil eine geteilte Maske
+        // die Masse ALLER ihrer Bilder kennen muss. Ein zurückgestuftes Bild
+        // bleibt im nächsten Plan gross – und seine Maske damit auch.
+        try document.fitSoftMasks()
         }
 
         // Phase 1b – verlustfreier Repack (jpegtran-Semantik) für behaltene

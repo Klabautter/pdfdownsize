@@ -144,6 +144,242 @@ import PDFKit
         return Geometry(width: w, height: h)
     }
 
+    // MARK: Weiche Masken ohne /Matte gehen mit
+    //
+    // Fehlerbilder, gegen die diese Tests stehen: Maske bleibt gross und
+    // dominiert das Ergebnis; geteilte Maske unter den Bedarf des grössten
+    // Bildes oder unter ein unverkleinertes Bild gerechnet; geteilte Maske je
+    // Bild kopiert; harte Kante verschwimmt auf dem Bildraster; /Decode geht
+    // verloren; Zweitlauf rechnet die Maske weiter herunter; nicht 8 Bit wird
+    // als 8 Bit gelesen.
+
+    /// Eine weiche Maske folgt dem verkleinerten Bild, die Seite sieht gleich aus.
+    @Test(.hangGuard) func softMaskFollowsTheResize() throws {
+        let url = try Self.maskedPDF(name: "soft-follow", mask: .gradient(2400, 1800),
+                                     placements: [512])
+        defer { try? FileManager.default.removeItem(at: url) }
+        let inBytes = Compressor.fileSize(of: url)
+
+        let result = try Compressor().compress(inputURL: url, mode: .small)
+        defer { try? FileManager.default.removeItem(at: result.outputURL) }
+
+        let pair = try #require(try Self.imageAndMaskGeometry(of: result.outputURL).first)
+        #expect(pair.image.width < 2400, "Das Bild wurde nicht verkleinert")
+        #expect(pair.mask == pair.image, "Maske \(pair.mask), Bild \(pair.image)")
+        #expect(result.outputBytes < inBytes / 2, "\(inBytes) → \(result.outputBytes)")
+        try Self.expectRenderMatch(url, result.outputURL)
+    }
+
+    /// Klein <= Smart <= Qualität, und die Stufen unterscheiden sich sichtbar.
+    @Test(.hangGuard) func softMaskSeparatesThePresets() throws {
+        let url = try Self.maskedPDF(name: "soft-presets", mask: .gradient(2400, 1800),
+                                     placements: [300])
+        defer { try? FileManager.default.removeItem(at: url) }
+        var sizes: [Int] = []
+        for mode in [CompressionMode.small, .smart, .quality] {
+            let result = try Compressor().compress(inputURL: url, mode: mode)
+            defer { try? FileManager.default.removeItem(at: result.outputURL) }
+            sizes.append(Int(result.outputBytes))
+            try Self.expectRenderMatch(url, result.outputURL)
+        }
+        #expect(sizes[0] < sizes[1] && sizes[1] < sizes[2], "\(sizes)")
+    }
+
+    /// Eine geteilte Maske bleibt ein Objekt und reicht für das grösste Bild.
+    @Test(.hangGuard) func sharedMaskServesTheLargestPlacement() throws {
+        let url = try Self.maskedPDF(name: "soft-shared", mask: .gradient(2400, 1800),
+                                     placements: [512, 40])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let result = try Compressor().compress(inputURL: url, mode: .small)
+        defer { try? FileManager.default.removeItem(at: result.outputURL) }
+
+        let pairs = try Self.imageAndMaskGeometry(of: result.outputURL)
+        try #require(pairs.count == 2, "\(pairs)")
+        let largest = try #require(pairs.map(\.image.width).max())
+        #expect(largest < 2400, "\(pairs)")
+        #expect(pairs[0].image.width != pairs[1].image.width, "\(pairs)")
+        for pair in pairs {
+            #expect(pair.mask.width == largest, "\(pairs)")
+        }
+        try Self.expectRenderMatch(url, result.outputURL)
+    }
+
+    /// Benutzt ein unverkleinertes Bild die Maske mit, bleibt sie, wie sie ist.
+    @Test(.hangGuard) func sharedMaskStaysForAnUnchangedImage() throws {
+        // Das zweite Bild liegt unter jeder Zielauflösung: 400 px auf 400 pt.
+        let url = try Self.maskedPDF(name: "soft-shared-kept", mask: .gradient(2400, 1800),
+                                     placements: [512, 400],
+                                     imageWidths: [2400, 400])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let result = try Compressor().compress(inputURL: url, mode: .small)
+        defer { try? FileManager.default.removeItem(at: result.outputURL) }
+
+        let pairs = try Self.imageAndMaskGeometry(of: result.outputURL)
+        try #require(pairs.count == 2, "\(pairs)")
+        #expect(pairs.contains { $0.image.width == 400 }, "\(pairs)")
+        #expect(pairs.contains { $0.image.width < 2400 && $0.image.width != 400 }, "\(pairs)")
+        for pair in pairs {
+            #expect(pair.mask.width == 2400, "\(pairs)")
+        }
+    }
+
+    /// Eine harte Kante behält Reserve über dem Bildraster und bleibt scharf.
+    @Test(.hangGuard) func hardMaskKeepsItsEdge() throws {
+        let url = try Self.maskedPDF(name: "soft-hard", mask: .hardShapes(2400, 1800),
+                                     placements: [300])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let result = try Compressor().compress(inputURL: url, mode: .small)
+        defer { try? FileManager.default.removeItem(at: result.outputURL) }
+
+        let pair = try #require(try Self.imageAndMaskGeometry(of: result.outputURL).first)
+        #expect(pair.image.width < 1200, "\(pair)")
+        #expect(pair.mask.width == pair.image.width * 2, "\(pair)")
+        try Self.expectRenderMatch(url, result.outputURL)
+    }
+
+    /// /Decode gehört zur Bedeutung der Maske: Invertiert bleibt invertiert.
+    @Test(.hangGuard) func maskDecodeSurvivesTheResize() throws {
+        let url = try Self.maskedPDF(name: "soft-decode", mask: .gradient(2400, 1800),
+                                     placements: [512], maskExtra: "/Decode[1 0]")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let result = try Compressor().compress(inputURL: url, mode: .small)
+        defer { try? FileManager.default.removeItem(at: result.outputURL) }
+
+        let pair = try #require(try Self.imageAndMaskGeometry(of: result.outputURL).first)
+        #expect(pair.mask.width < 2400, "\(pair)")
+        try Self.expectRenderMatch(url, result.outputURL)
+    }
+
+    /// Der Zweitlauf rechnet die Maske nicht weiter herunter.
+    @Test(.hangGuard) func secondRunLeavesTheMaskAlone() throws {
+        let url = try Self.maskedPDF(name: "soft-second", mask: .hardShapes(2400, 1800),
+                                     placements: [512])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let first = try Compressor().compress(inputURL: url, mode: .small)
+        defer { try? FileManager.default.removeItem(at: first.outputURL) }
+        let second = try Compressor().compress(inputURL: first.outputURL, mode: .small)
+        defer { try? FileManager.default.removeItem(at: second.outputURL) }
+
+        let before = try #require(try Self.imageAndMaskGeometry(of: first.outputURL).first)
+        let after = try #require(try Self.imageAndMaskGeometry(of: second.outputURL).first)
+        #expect(before.mask == after.mask, "\(before) → \(after)")
+        #expect(second.outputBytes <= first.outputBytes)
+    }
+
+    /// Eine 1-Bit-Maske liest die Umrechnung nicht – sie bleibt, das Bild schrumpft.
+    @Test(.hangGuard) func bilevelSoftMaskStaysUntouched() throws {
+        let url = try Self.maskedPDF(name: "soft-1bit", mask: .bilevel(2400, 1800),
+                                     placements: [512])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let result = try Compressor().compress(inputURL: url, mode: .small)
+        defer { try? FileManager.default.removeItem(at: result.outputURL) }
+
+        let pair = try #require(try Self.imageAndMaskGeometry(of: result.outputURL).first)
+        #expect(pair.image.width < 2400, "\(pair)")
+        #expect(pair.mask.width == 2400, "\(pair)")
+        try Self.expectRenderMatch(url, result.outputURL)
+    }
+
+    enum MaskContent {
+        case gradient(Int, Int), hardShapes(Int, Int), bilevel(Int, Int)
+    }
+
+    /// Bilder auf farbigem Grund (sonst wäre die Transparenz unsichtbar), alle
+    /// mit DERSELBEN Maske. `placements` sind die Breiten in pt.
+    private static func maskedPDF(name: String, mask: MaskContent, placements: [Double],
+                                  imageWidths: [Int]? = nil,
+                                  maskExtra: String = "") throws -> URL {
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let maskRef: Int
+        switch mask {
+        case .gradient(let w, let h):
+            var bytes = [UInt8](repeating: 0, count: w * h)
+            for y in 0..<h { for x in 0..<w { bytes[y * w + x] = UInt8(255 * x / (w - 1)) } }
+            maskRef = b.addStream(dictionary: maskDict(w, h, bits: 8) + maskExtra, data: Data(bytes))
+        case .hardShapes(let w, let h):
+            var bytes = [UInt8](repeating: 0, count: w * h)
+            for y in 0..<h { for x in 0..<w {
+                let dx = Double(x - w / 2), dy = Double(y - h / 2)
+                let disc = dx * dx + dy * dy < Double(h * h) / 5
+                bytes[y * w + x] = disc && (y / 40) % 3 != 2 ? 255 : 0
+            } }
+            maskRef = b.addStream(dictionary: maskDict(w, h, bits: 8) + maskExtra, data: Data(bytes))
+        case .bilevel(let w, let h):
+            let row = (w + 7) / 8
+            var bytes = [UInt8](repeating: 0, count: row * h)
+            for y in 0..<h where (y / 40) % 3 != 2 {
+                for x in (row / 4)..<(row * 3 / 4) { bytes[y * row + x] = 0xFF }
+            }
+            maskRef = b.addStream(dictionary: maskDict(w, h, bits: 1) + maskExtra, data: Data(bytes))
+        }
+
+        var xobjects = ""
+        var content = "0.1 0.2 0.8 rg 0 0 612 792 re f\n"
+        var top = 780.0
+        for (index, placed) in placements.enumerated() {
+            let w = imageWidths?[index] ?? 2400
+            let h = w * 3 / 4
+            // Ein angehängtes Byte hält die Bilder auseinander, sonst legt der
+            // Duplikat-Abgleich sie zusammen.
+            let jpeg = try stripedJPEG(width: w, height: h)
+                + Data([UInt8(index)])
+            let image = b.addStream(
+                dictionary: "/Type/XObject/Subtype/Image/Width \(w)/Height \(h)"
+                    + "/ColorSpace/DeviceRGB/BitsPerComponent 8/Filter/DCTDecode"
+                    + "/SMask \(maskRef) 0 R",
+                data: jpeg)
+            xobjects += "/Im\(index) \(image) 0 R"
+            let height = placed * 3 / 4
+            top -= height + 4
+            content += "q \(placed) 0 0 \(height) 40 \(top) cm /Im\(index) Do Q\n"
+        }
+        let stream = b.addStream(dictionary: "", content: content)
+        let page = b.addObject("<</Type/Page/Parent \(pages) 0 R/MediaBox[0 0 612 792]"
+            + "/Resources<</XObject<<\(xobjects)>>>>/Contents \(stream) 0 R>>")
+        b.fill(pages, "<</Type/Pages/Kids[\(page) 0 R]/Count 1>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R>>")
+        let url = PDFFixtures.fixtureURL(prefix: name)
+        try b.build(rootObject: root).write(to: url)
+        return url
+    }
+
+    private static func maskDict(_ w: Int, _ h: Int, bits: Int) -> String {
+        "/Type/XObject/Subtype/Image/Width \(w)/Height \(h)"
+            + "/ColorSpace/DeviceGray/BitsPerComponent \(bits)"
+    }
+
+    private static func stripedJPEG(width: Int, height: Int) throws -> Data {
+        let space = CGColorSpaceCreateDeviceRGB()
+        let ctx = try #require(CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: space, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        for x in stride(from: 0, to: width, by: 6) {
+            let t = CGFloat(x) / CGFloat(width)
+            ctx.setFillColor(red: t, green: 1 - t, blue: 0.5 + 0.5 * sin(t * 40), alpha: 1)
+            ctx.fill(CGRect(x: x, y: 0, width: 6, height: height))
+        }
+        let image = try #require(ctx.makeImage())
+        return try #require(NSBitmapImageRep(cgImage: image)
+            .representation(using: .jpeg, properties: [.compressionFactor: 0.9]))
+    }
+
+    /// Dieselbe Prüfung wie die Abnahme: gerenderte Seite gegen die Quelle.
+    private static func expectRenderMatch(_ source: URL, _ output: URL,
+                                          sourceLocation: SourceLocation = #_sourceLocation) throws {
+        let pages = try RenderDifferential.compare(sourceURL: source, outputURL: output)
+        for page in pages {
+            #expect(page.ssim >= 0.97, "SSIM \(page.ssim)", sourceLocation: sourceLocation)
+            #expect(page.meanAbsDiff <= 4, "MAD \(page.meanAbsDiff)", sourceLocation: sourceLocation)
+        }
+    }
+
     /// Farbschlüssel-Maskierung bleibt ausgeschlossen.
     ///
     /// `/Mask` als Array benennt Farbwerte im Original. Eine verlustbehaftete

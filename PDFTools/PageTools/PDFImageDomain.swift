@@ -355,7 +355,9 @@ extension PDFImageResource {
         // umgerechnet werden. Die Norm verlangt das nicht: Nach
         // PDF 32000-1 §8.9.6.4 muss eine weiche Maske nicht dieselben Masse
         // haben wie ihr Basisbild, sie wird darauf skaliert. Die Bridge
-        // übernimmt /SMask und /Mask unverändert ins neue Wörterbuch.
+        // übernimmt /SMask und /Mask ins neue Wörterbuch; eine /Mask-Schablone
+        // bleibt unverändert, eine weiche Maske folgt danach dem verkleinerten
+        // Bild (`pdfcore_fit_soft_masks`, /Matte schon bei der Ersetzung).
         //
         // Die Annahme kostete 143,5 MB im Korpus – 40 % aller Bilddaten,
         // der grösste Posten, den wir gar nicht angefasst haben.

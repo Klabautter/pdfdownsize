@@ -828,6 +828,21 @@ extension PDFCoreDocument {
         }
     }
 
+    /// Zieht die weichen Masken der verkleinerten Bilder nach (siehe
+    /// `pdfcore_fit_soft_masks`). Rückgabe: Zahl der umgerechneten Masken.
+    @discardableResult
+    func fitSoftMasks() throws -> Int {
+        gate.lock(); defer { gate.unlock() }
+        var fitted: Int32 = 0
+        let rc = pdfcore_fit_soft_masks(handle, &fitted)
+        guard rc == PDFCORE_OK.rawValue else {
+            throw rc == PDFCORE_ERR_CHECK_FAILED.rawValue
+                ? PDFCoreError.checkFailed
+                : PDFCoreError.internalError
+        }
+        return Int(fitted)
+    }
+
     /// Phase 6C – ersetzt GENAU EIN vierkanaliges Bildobjekt (CMYK) durch
     /// JPEG-Daten aus dem kontrollierten mozjpeg-Shim (YCCK, transform 2).
     /// Die Verweigerungspolitik der JPEG-Ersetzung gilt unverändert; ein
