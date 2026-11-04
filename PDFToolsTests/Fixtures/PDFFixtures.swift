@@ -3833,6 +3833,7 @@ extension PDFFixtures {
     static func ccittG4ExternalPDF(pixels: Int = 800, rows: Int = 600,
                                    inverted: Bool = false,
                                    endOfBlock: Bool = true,
+                                   declaresRows: Bool = true,
                                    name: String = "ccitt-external") throws -> URL {
         let pattern = bilevelSparsePattern(width: pixels, height: rows)
         guard let buffer = BilevelBuffer(width: pixels, height: rows, data: pattern) else {
@@ -3855,7 +3856,8 @@ extension PDFFixtures {
         if endOfBlock {
             data.append(contentsOf: [0x00, 0x10, 0x01])   // EOFB: EOL EOL
         }
-        var parms = "/K -1/Columns \(pixels)/Rows \(rows)"
+        var parms = "/K -1/Columns \(pixels)"
+        if declaresRows { parms += "/Rows \(rows)" }
         if endOfBlock { parms += "/EndOfBlock true" }
         if inverted { parms += "/BlackIs1 true" }
         return try ccittStreamPDF(width: pixels, height: rows,

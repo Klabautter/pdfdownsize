@@ -5051,9 +5051,10 @@ int pdfcore_get_image_ccitt_parms(pdfcore_document_t *doc,
         if (!columns.isInteger()) { return PDFCORE_ERR_CHECK_FAILED; }
         out->columns = static_cast<int>(columns.getIntValue());
 
+        /* /Rows ist optional (Vorgabe 0 = Höhe aus dem Bildwörterbuch). */
         QPDFObjectHandle rows = parms.getKey("/Rows");
-        if (!rows.isInteger()) { return PDFCORE_ERR_CHECK_FAILED; }
-        out->rows = static_cast<int>(rows.getIntValue());
+        if (!rows.isNull() && !rows.isInteger()) { return PDFCORE_ERR_CHECK_FAILED; }
+        out->rows = rows.isInteger() ? static_cast<int>(rows.getIntValue()) : 0;
 
         auto boolOrDefault = [&](char const* key) -> int {
             QPDFObjectHandle v = parms.getKey(key);

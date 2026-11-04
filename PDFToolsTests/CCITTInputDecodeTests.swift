@@ -319,6 +319,39 @@ import PDFKit
         #expect(comparison.inkDelta == 0)
     }
 
+    /// /Rows ist laut PDF-Spezifikation optional (Vorgabe 0 = Höhe aus dem
+    /// Bild). Bürosscans lassen es oft weg; solche Bilder blieben als
+    /// `decodeFailed` in jeder Stufe liegen (NASA-Scan 19940006903).
+    @Test(.hangGuard) func g4OhneRowsNimmtAmRaceTeil() throws {
+        let input = try PDFFixtures.ccittG4ExternalPDF(endOfBlock: false, declaresRows: false,
+                                                       name: "ccitt-ohne-rows")
+        defer { try? FileManager.default.removeItem(at: input) }
+        let (core, resource) = try Self.firstResource(input)
+        let parms = try #require(core.ccittDecodeParms(objectID: resource.objectID))
+        #expect(parms.rows == 0)
+        #expect(parms.acceptanceIssue(expectedWidth: resource.width,
+                                      expectedHeight: resource.height) == nil)
+        // Eine angegebene, abweichende Höhe bleibt eine Verweigerung.
+        let wrong = PDFCoreDocument.CCITTDecodeParms(
+            k: parms.k, columns: parms.columns, rows: resource.height - 1,
+            blackIs1: parms.blackIs1, endOfLine: parms.endOfLine,
+            endOfBlock: parms.endOfBlock, encodedByteAlign: parms.encodedByteAlign,
+            damagedRowsBeforeError: parms.damagedRowsBeforeError,
+            knownKeysOnly: parms.knownKeysOnly)
+        #expect(wrong.acceptanceIssue(expectedWidth: resource.width,
+                                      expectedHeight: resource.height) != nil)
+
+        let out = Self.tempURL("ohne-rows")
+        defer { try? FileManager.default.removeItem(at: out) }
+        let outcome = try CompressionPipeline.run(inputURL: input, outputURL: out,
+                                                  options: .smart)
+        #expect(outcome.execution.replacedImages == 1, "Plan: \(outcome.plan.actions)")
+        let comparison = try #require(
+            RenderDifferential.compare(sourceURL: input, outputURL: out, dpi: 150).first)
+        #expect(comparison.changedAreaRatio == 0)
+        #expect(comparison.inkDelta == 0)
+    }
+
     /// G3-Eingang (K = 0, ohne EOLs): Race verwandelt ihn in den kleinsten
     /// bitidenten Kandidaten (§9.10: KEEP / G4 / JBIG2), Output rendert
     /// pixelgleich.

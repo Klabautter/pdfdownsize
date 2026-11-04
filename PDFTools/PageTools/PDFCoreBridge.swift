@@ -1203,7 +1203,7 @@ extension PDFCoreDocument {
             guard k == -1 || (0...64).contains(k) else {
                 return "/K \(k) außerhalb des abgedeckten Bereichs"
             }
-            guard columns == expectedWidth, rows == expectedHeight else {
+            guard columns == expectedWidth, rows == expectedHeight || rows == 0 else {
                 return "Columns/Rows (\(columns)x\(rows)) weichen von " +
                        "Width/Height (\(expectedWidth)x\(expectedHeight)) ab"
             }

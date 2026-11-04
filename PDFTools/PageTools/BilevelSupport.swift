@@ -121,7 +121,7 @@ enum BilevelCodec {
         cParms.present = 1
         cParms.k = Int32(parms.k)
         cParms.columns = Int32(parms.columns)
-        cParms.rows = Int32(parms.rows)
+        cParms.rows = Int32(parms.rows > 0 ? parms.rows : height)
         cParms.black_is_1 = parms.blackIs1 ? 1 : 0
         cParms.end_of_line = parms.endOfLine ? 1 : 0
         cParms.end_of_block = parms.endOfBlock ? 1 : 0
