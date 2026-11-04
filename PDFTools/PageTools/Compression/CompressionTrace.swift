@@ -301,6 +301,8 @@ enum CompressionTraceWriter {
             return "ccitt_g4"
         case .jbig2:
             return "jbig2"
+        case .bilevelResampled(_, let target, let codec, _, _):
+            return "bilevel_resampled \(codec.rawValue) target=\(target.width)x\(target.height)"
         case .indexed(_, let target, let bpc, let components, let palette, _, _, let quantized, let dithered):
             return "indexed bpc=\(bpc) target=\(target.width)x\(target.height) "
                 + "palette=\(palette.count / max(components, 1))x\(components)"
@@ -330,6 +332,8 @@ enum CompressionTraceWriter {
             return "kleinster verlustfreier Kandidat – exakte Palette, bitgenau verifiziert (§9.6)"
         case .ccittG4, .jbig2:
             return "kleinster bitidenter Bilevel-Kandidat"
+        case .bilevelResampled:
+            return "Bilevel verkleinert (sehr hohe Auflösung), Tinte und Preset-Grenzen gehalten"
         case .mrc:
             return "MRC-Seitenbündel (§13) – Seiten-QA bestanden, kleinste Stufe"
         }

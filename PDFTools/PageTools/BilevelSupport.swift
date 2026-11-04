@@ -547,6 +547,163 @@ enum BilevelSource {
     }
 }
 
+// MARK: - Verkleinern sehr hoher Auflösungen
+
+/// Bilevel über 600 DPI trägt mehr, als Bildschirm und Bürodrucker zeigen. Klein
+/// darf ab rund 600 DPI halbieren, Smart erst darüber; das Ergebnis liegt nie
+/// unter 300 DPI (Klein) und bleibt damit gestochen. Qualität und Custom bleiben
+/// bei „Bilevel wird nie resampelt“.
+enum BilevelResampling {
+
+    struct Reduction {
+        let buffer: BilevelBuffer
+        /// Anteil der Zielzellen mit irgendeiner Tinte, die Tinte behalten.
+        let inkCellSurvival: Double
+        /// Relative Änderung der Tintenfläche.
+        let inkAreaChange: Double
+
+        /// Haarlinien und feine Raster enden in Zellen unter der Hälfte und
+        /// verschwinden; dann bleibt das Original.
+        var preservesInk: Bool {
+            inkCellSurvival >= BilevelResampling.minimumInkCellSurvival
+                && inkAreaChange <= BilevelResampling.maximumInkAreaChange
+        }
+    }
+
+    /// Gemessen an gesetztem Text (Times, Faktor → Überleben / Flächenänderung):
+    /// 11 pt, 1200 → 600 DPI: 0,96 / 0,06; 600 → 300: 0,93 / 0,10; 1200 → 300:
+    /// 0,80 / 0,05. Abgelehnt: 5,5 pt, 600 → 300: 0,88 / 0,17; 1200 → 300: 0,68 / 0,07.
+    static let minimumInkCellSurvival = 0.75
+    static let maximumInkAreaChange = 0.15
+    /// Klein: „etwa 600 DPI“; das Band fängt Scans auf, die knapp größer
+    /// platziert sind. Smart: erst klar über 600 DPI (Toleranz wie die Bilder).
+    static let smallMinimumDPI = 570.0
+    static let smartMinimumDPI = 690.0
+    static let smallFloorDPI = 300.0
+    /// Messraster: halbe Kandidatenkante (bei 300 DPI also rund 150 DPI, nah an
+    /// der normalen Ansicht), höchstens diese Kante.
+    static let measurementEdge = 2048
+
+    /// Kleinster Faktor (2, 4, …) nach Stufe; `nil`, wenn nicht verkleinert wird.
+    /// Maßgeblich ist die kleinere Auflösung aller Platzierungen und Achsen.
+    static func factor(for resource: PDFImageResource,
+                       options: ImageCompressionOptions) -> Int? {
+        guard case .adaptive = options.qualityPolicy else { return nil }
+        let dpis = resource.placements.flatMap { placement -> [Double] in
+            guard placement.placedWidthPoints > 1, placement.placedHeightPoints > 1 else { return [] }
+            let scale = placement.pageSizeDPIScale ?? 1
+            return [Double(resource.width) / placement.placedWidthPoints * 72 * scale,
+                    Double(resource.height) / placement.placedHeightPoints * 72 * scale]
+        }
+        guard let dpi = dpis.min(), dpi > 0 else { return nil }
+        var factor = 2
+        switch QualityGatePreset(ssimThreshold: options.ssimThreshold) {
+        case .small:
+            guard dpi >= smallMinimumDPI else { return nil }
+            while dpi / Double(factor * 2) >= smallFloorDPI { factor *= 2 }
+        case .smart:
+            guard dpi > smartMinimumDPI else { return nil }
+            while dpi / Double(factor) > smartMinimumDPI { factor *= 2 }
+        case .quality, .custom:
+            return nil
+        }
+        return factor
+    }
+
+    /// Kastenfilter: Eine Zielzelle wird Tinte, wenn mindestens die Hälfte ihrer
+    /// Quellpixel Tinte ist (Bit 1 = schwarz). Deterministisch; der Executor
+    /// erzeugt dieselben Bits neu.
+    static func reduce(_ source: BilevelBuffer, factor: Int) -> Reduction? {
+        guard factor >= 2 else { return nil }
+        let width = (source.width + factor - 1) / factor
+        let height = (source.height + factor - 1) / factor
+        let sourceRow = BilevelBuffer.rowBytes(width: source.width)
+        let targetRow = BilevelBuffer.rowBytes(width: width)
+        var out = [UInt8](repeating: 0, count: targetRow * height)
+        var counts = [Int32](repeating: 0, count: width)
+        var inkCells = 0, keptCells = 0, sourceInk = 0, targetInk = 0
+        source.data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let bits = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+            for cellY in 0..<height {
+                for i in 0..<width { counts[i] = 0 }
+                let firstRow = cellY * factor
+                let rows = min(factor, source.height - firstRow)
+                for row in firstRow..<(firstRow + rows) {
+                    let line = bits + row * sourceRow
+                    for byteIndex in 0..<sourceRow where line[byteIndex] != 0 {
+                        let byte = line[byteIndex]
+                        sourceInk += byte.nonzeroBitCount
+                        for bit in 0..<8 where byte & (0x80 >> UInt8(bit)) != 0 {
+                            counts[(byteIndex * 8 + bit) / factor] += 1
+                        }
+                    }
+                }
+                for cellX in 0..<width where counts[cellX] > 0 {
+                    inkCells += 1
+                    let columns = min(factor, source.width - cellX * factor)
+                    if Int(counts[cellX]) * 2 >= columns * rows {
+                        keptCells += 1
+                        targetInk += 1
+                        out[cellY * targetRow + cellX / 8] |= 0x80 >> UInt8(cellX % 8)
+                    }
+                }
+            }
+        }
+        guard let buffer = BilevelBuffer(width: width, height: height, data: Data(out)) else { return nil }
+        let inkArea = Double(targetInk * factor * factor)
+        return Reduction(
+            buffer: buffer,
+            inkCellSurvival: inkCells == 0 ? 1 : Double(keptCells) / Double(inkCells),
+            inkAreaChange: sourceInk == 0 ? 0 : abs(inkArea - Double(sourceInk)) / Double(sourceInk))
+    }
+
+    /// Beide Puffer gehen durch denselben Kastenfilter auf dasselbe Graustufen-
+    /// Raster und von dort in die üblichen Gates.
+    static func measure(source: BilevelBuffer, candidate: BilevelBuffer) -> QualityGateMeasurement? {
+        let edge = min(measurementEdge, max(candidate.width, candidate.height) / 2)
+        guard let size = QualityGates.sampleSize(width: source.width, height: source.height,
+                                                 maxEdge: edge),
+              let reference = grayImage(source, size: size),
+              let comparison = grayImage(candidate, size: size),
+              let sample = QualityGates.sample(reference, maxEdge: edge) else { return nil }
+        return QualityGates.Evaluator(reference: sample).measure(candidate: comparison)
+    }
+
+    private static func grayImage(_ buffer: BilevelBuffer, size: PixelSize) -> CGImage? {
+        var ink = [UInt32](repeating: 0, count: size.width * size.height)
+        var area = [UInt32](repeating: 0, count: size.width * size.height)
+        let rowBytes = BilevelBuffer.rowBytes(width: buffer.width)
+        let columnCell = (0..<buffer.width).map { $0 * size.width / buffer.width }
+        var columnPixels = [UInt32](repeating: 0, count: size.width)
+        for cell in columnCell { columnPixels[cell] += 1 }
+        buffer.data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let bits = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+            for row in 0..<buffer.height {
+                let base = (row * size.height / buffer.height) * size.width
+                for x in 0..<size.width { area[base + x] += columnPixels[x] }
+                let line = bits + row * rowBytes
+                for byteIndex in 0..<rowBytes where line[byteIndex] != 0 {
+                    let byte = line[byteIndex]
+                    for bit in 0..<8 where byte & (0x80 >> UInt8(bit)) != 0 {
+                        ink[base + columnCell[byteIndex * 8 + bit]] += 1
+                    }
+                }
+            }
+        }
+        var gray = [UInt8](repeating: 255, count: ink.count)
+        for i in gray.indices where ink[i] > 0 && area[i] > 0 {
+            gray[i] = UInt8(255 - min(255, ink[i] * 255 / area[i]))
+        }
+        guard let provider = CGDataProvider(data: Data(gray) as CFData) else { return nil }
+        return CGImage(width: size.width, height: size.height, bitsPerComponent: 8,
+                       bitsPerPixel: 8, bytesPerRow: size.width,
+                       space: CGColorSpaceCreateDeviceGray(),
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false,
+                       intent: .defaultIntent)
+    }
+}
+
 extension ImagePixelSource {
     /// Gepackte 1-bit-Pixel eines Bildobjekts in der Bilevel-Pixelfolge.
     /// Default `nil` – nur die libqpdf-Pixelquelle liefert echte Bits.

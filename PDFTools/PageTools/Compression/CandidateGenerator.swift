@@ -137,7 +137,8 @@ enum BracketedJPEGSearch {
     static func run(reference: CGImage, grayscale: Bool, backend: JPEGBackend,
                     policy: Policy,
                     sourceSample: QualityGates.Sample? = nil,
-                    anchorCheck: AnchorCheck? = nil) -> [JPEGSearchRung] {
+                    anchorCheck: AnchorCheck? = nil,
+                    perceptualLimitIsGate: Bool = false) -> [JPEGSearchRung] {
         let evaluator = makeEvaluator(reference: reference, sourceSample: sourceSample)
         let prepared = JPEGEncoder.preparePixels(reference)
         let evaluateOne: @Sendable (Double) -> JPEGSearchRung? = { quality in
@@ -171,6 +172,10 @@ enum BracketedJPEGSearch {
             }
             if passed, let anchorCheck {
                 passed = anchorCheck.admits(decoded)
+            }
+            if passed, perceptualLimitIsGate,
+               (perceptual ?? 0) > PerceptualScore.catastrophicLimit {
+                passed = false
             }
             return JPEGSearchRung(quality: quality, data: data,
                                   measurement: measurement,
@@ -347,6 +352,73 @@ enum CandidateGenerator {
     /// Schranke gilt die Suche als chancenlos.
     static let probeMargin = 1.02
 
+    // MARK: Neukodieren auf Originalgröße im DPI-Budget (2026-11-03)
+
+    /// Ab dieser Dichte gilt ein JPEG im DPI-Budget als verschwenderisch
+    /// kodiert. `nil`: Die Stufe fasst JPEGs im Budget nie an – Qualität hält
+    /// damit ihre Zusage, feste Qualitäten (Custom) kennen die Regel nicht.
+    ///
+    /// Gemessen an 183 Bildern des Korpus (RealWorld + Synthetic, ≥ 60 000 px;
+    /// IJG-Qualität aus den Quantisierungstabellen geschätzt), Anzahl der
+    /// Bilder ab der jeweiligen Dichte:
+    ///
+    ///     bit/px    q ≤ 80 (n=78)   q 81–90 (n=22)   q > 90 (n=83)
+    ///     1,5             17              11              54
+    ///     2,0              6               4              46
+    ///     2,5              1               0              40
+    ///     4,0              0               0              27
+    ///
+    /// Smart: 2,5 trifft fast nur hohe Qualitäten (1 von 100 Bildern bis q 90
+    /// gegen 40 von 83 darüber). Klein geht bewusst weiter: 1,5 nimmt auch
+    /// detailreiche Bilder um q 75 mit; die dürfen dort sichtbarer verlieren,
+    /// und die Größenschranke unten lässt nur Fälle mit echtem Hebel durch.
+    /// Niedrige Dichte allein heißt nicht „q niedrig“: Die Handyfotos aus
+    /// `medium.pdf` tragen q 92 bei 0,6–0,8 bit/px und bleiben im Budget
+    /// unangetastet – dort gäbe es wenig zu holen, aber Verlust dazu.
+    static func wastefulJPEGBitsPerPixel(_ options: ImageCompressionOptions) -> Double? {
+        guard reencodesWithinBudget(options) else { return nil }
+        return QualityGatePreset(ssimThreshold: options.ssimThreshold) == .small ? 1.5 : 2.5
+    }
+
+    /// Nur Klein und Smart mit Gates: Qualität bleibt im Budget verlustfrei,
+    /// feste Custom-Qualitäten und Graustufen-Wandlung behalten ihre Wege.
+    static func reencodesWithinBudget(_ options: ImageCompressionOptions) -> Bool {
+        guard case .adaptive = options.qualityPolicy, !options.forceGrayscale else { return false }
+        switch QualityGatePreset(ssimThreshold: options.ssimThreshold) {
+        case .small, .smart: return true
+        case .quality, .custom: return false
+        }
+    }
+
+    static func isWastefullyEncodedJPEG(_ resource: PDFImageResource,
+                                        options: ImageCompressionOptions) -> Bool {
+        guard resource.terminalFilter == .dct, resource.colorSpace.allowsLossyReplacement,
+              resource.pixelCount > 0, resource.encodedByteCount > 0,
+              let threshold = wastefulJPEGBitsPerPixel(options) else { return false }
+        return Double(resource.encodedByteCount) * 8 / Double(resource.pixelCount) >= threshold
+    }
+
+    /// Grafik und saubere Textseiten tragen fast alle Pixel auf wenigen
+    /// Grauwerten (Flächen, Schrift samt Kantenglättung), Fotos und verrauschte
+    /// Scans verteilen sie breit. Nicht messbar: wie harte Kanten, also verlustfrei.
+    static func isHardEdgedGray(_ image: CGImage) -> Bool {
+        guard let raw = ImageResampler.rawBitmap(image, components: 1), !raw.isEmpty else {
+            return true
+        }
+        var histogram = [Int](repeating: 0, count: 256)
+        for value in raw { histogram[Int(value)] += 1 }
+        let dominant = histogram.sorted(by: >).prefix(8).reduce(0, +)
+        return Double(dominant) >= Double(raw.count) * 0.90
+    }
+
+    /// Zweite Bremse gegen Generationsverlust: Ein JPEG wird auf Originalgröße
+    /// nur ersetzt, wenn es dabei auf höchstens 70 % schrumpft. Das Neukodieren
+    /// eines JPEG mit (fast) derselben Qualität spart kaum etwas, q 90 → q 75
+    /// dagegen rund die Hälfte. Eigene Ausgaben erreichen das im Zweitlauf nicht
+    /// mehr – auch bei verrauschten Bildern, die trotz q 75 über der Dichte-
+    /// schwelle liegen.
+    static let nativeReencodeMaximumRatio = 0.70
+
     static func generate(resource: PDFImageResource,
                          options: ImageCompressionOptions,
                          classifierPolicy: ClassifierPolicy,
@@ -450,6 +522,10 @@ enum CandidateGenerator {
         private(set) var globals: [CandidateID: Data] = [:]
         private(set) var keepReason = KeepReason.withinBudget
         private(set) var classification: ResourceClassification?
+        /// JPEG-Quelle im DPI-Budget, die nur wegen ihrer Bitdichte hier ist.
+        private var isWastefulJPEGWithinBudget = false
+        /// Graue Grafik im Budget: Sie bleibt verlustfrei, auch in Klein.
+        private var isGrayGraphicsWithinBudget = false
 
         /// Quantisierte Palette NUR für Small/Target-Size (§4: keine
         /// Farbreduktion in Smart/Qualität/Custom). Der Planner setzt das
@@ -627,6 +703,45 @@ enum CandidateGenerator {
             }
         }
 
+        /// Sehr hochauflösendes Bilevel halbieren (2026-11-03): dasselbe Race
+        /// auf dem verkleinerten Puffer, als verlustbehafteter Kandidat neben
+        /// dem bitidentischen. Aufnahme nur, wenn die Tinte erhalten bleibt und
+        /// die Preset-Grenzen der Scan-Klasse halten; der Optimierer prüft die
+        /// Messung erneut und nimmt wie immer den kleinsten zulässigen.
+        private mutating func addResampledBilevel(buffer: BilevelBuffer) {
+            guard let factor = BilevelResampling.factor(for: resource, options: options),
+                  let reduction = BilevelResampling.reduce(buffer, factor: factor),
+                  reduction.preservesInk,
+                  let measurement = BilevelResampling.measure(source: buffer,
+                                                              candidate: reduction.buffer),
+                  case .pass = QualityGates.qualityVerdict(
+                      policy: .policy(preset: QualityGatePreset(ssimThreshold: options.ssimThreshold),
+                                      imageClass: .scan),
+                      measurement: measurement) else { return }
+            let target = PixelSize(width: reduction.buffer.width, height: reduction.buffer.height)
+            let (race, payload, raceGlobals) = CompressionPlanner.bilevelRace(
+                buffer: reduction.buffer, resource: resource, pixels: pixels)
+            let codec: MRCMaskCodec
+            let expected: Int
+            switch race {
+            case .ccittG4(_, _, let bytes): (codec, expected) = (.ccittG4, bytes)
+            case .jbig2(_, _, let bytes): (codec, expected) = (.jbig2, bytes)
+            default: return
+            }
+            let added = add(kind: .bilevelResampled(target: target, codec: codec),
+                            isLossless: false, data: payload, measurement: measurement,
+                            runtimeMs: 0, workingBytes: Int64(reduction.buffer.data.count),
+                            reason: "Bilevel auf 1/\(factor) der Auflösung, Tinte und "
+                                + "Preset-Grenzen gehalten",
+                            action: .bilevelResampled(objectID: objectID, target: target,
+                                                      codec: codec,
+                                                      originalEncodedBytes: originalBytes,
+                                                      expectedEncodedBytes: expected))
+            if added, let raceGlobals, let last = transforms.last {
+                globals[last.candidate.id] = raceGlobals
+            }
+        }
+
         /// Strukturelles KEEP vor jeder Dekodierung abschließen.
         mutating func finishStructural(_ reason: KeepReason) {
             keepReason = reason
@@ -677,7 +792,8 @@ enum CandidateGenerator {
 
         mutating func run(classifierPolicy: ClassifierPolicy) {
             // 0. Bilevel-Vorprüfung (Dictionary-Ebene, vor jeder Dekodierung)
-            //    – Bilevel wird nie resampelt.
+            //    – Bilevel wird nur bei sehr hoher Auflösung verkleinert
+            //    (`addResampledBilevel`), sonst nie.
             // Die Erkennung läuft in JEDER Politik: `.keep` heißt „Bilevel
             // bleibt unangetastet" – auch exakt zweiwertiges 8-bit. Vorher
             // übersprang `.keep` die Erkennung, und solche Scans liefen in
@@ -702,6 +818,7 @@ enum CandidateGenerator {
                 applyBilevelRace(action: action, payload: payload,
                                  raceGlobals: raceGlobals,
                                  workingBytes: Int64(buffer.data.count))
+                addResampledBilevel(buffer: buffer)
                 return
             }
 
@@ -738,8 +855,13 @@ enum CandidateGenerator {
             // auch bei fester Custom-Qualität: Der Nutzer hat die Qualität
             // gewählt, vorher blieb der Regler für solche Bilder wirkungslos
             // (Befund B1, Review 2026-10-09).
+            // Ausnahme (Entscheidung Linus 2026-11-03): Klein und Smart dürfen
+            // ein klar verschwenderisch kodiertes JPEG auf Originalgröße neu
+            // kodieren (`isWastefullyEncodedJPEG`); gut kodierte bleiben liegen.
             let allowsNativeReencode = true
-            guard resize != nil || needsColorChange
+            isWastefulJPEGWithinBudget = resize == nil && !needsColorChange
+                && CandidateGenerator.isWastefullyEncodedJPEG(resource, options: options)
+            guard resize != nil || needsColorChange || isWastefulJPEGWithinBudget
                     || (allowsNativeReencode
                         && resource.terminalFilter != .dct
                         && resource.pixelColorSpace.allowsLossyReplacement) else {
@@ -891,10 +1013,12 @@ enum CandidateGenerator {
             let grayscale = options.forceGrayscale || stats.isGrayscale
 
             // Graustufen angefordert, Bild schon grau, kein Resize nötig.
-            // (Greift auch ohne Grau-Anforderung für graue Bilder im Budget –
-            // bewusst so belassen, 2026-10-09: ein Lockern hätte Smart für
-            // graue Flate-Bilder im Budget verändert.)
-            if resize == nil && stats.isGrayscale {
+            // Qualität und Custom bleiben hier stehen. Klein und Smart laufen
+            // seit 2026-11-03 auch für graue Bilder im Budget in die normalen
+            // Kandidaten auf Originalgröße: Vorher blieb etwa ein grauer
+            // Flate-Scan in allen Stufen gleich groß wie die Eingabe.
+            if resize == nil && stats.isGrayscale
+                && !CandidateGenerator.reencodesWithinBudget(options) {
                 keepReason = .alreadyGrayscale
                 return
             }
@@ -944,6 +1068,18 @@ enum CandidateGenerator {
             // Einschalten ließ die Datei größer (Befund A5, Review 2026-10-09).
             let clearlyOversized = resource.maxEdge > options.maxPixelEdge
                 || (resource.effectiveDPI ?? 0) > options.targetDPI * 1.5
+
+            // Graue Flate-Bilder im Budget: Die Merkmale taugen hier nicht als
+            // Trennung. Sie stammen aus verkleinerten Stichproben, in denen
+            // Rauschen verschwindet: Ein körniger Scan sieht dort aus wie Grafik,
+            // und eine Vollseite gilt umgekehrt immer als Scan. Deshalb zählen
+            // die Pixel selbst. Harte Kanten bleiben verlustfrei, der Rest geht
+            // hinter die JPEG-Gates seiner Inhaltsklasse.
+            if resize == nil, stats.isGrayscale, resource.terminalFilter != .dct,
+               CandidateGenerator.reencodesWithinBudget(options) {
+                isGrayGraphicsWithinBudget = CandidateGenerator.isHardEdgedGray(targetImage)
+                imageClass = isGrayGraphicsWithinBudget ? .graphics : .photo
+            }
 
             switch imageClass {
             case .graphics where !(options.aggressiveGraphics && clearlyOversized):
@@ -1028,9 +1164,15 @@ enum CandidateGenerator {
                 let gateClass = classification.map {
                     QualityGateClass(contentClass: $0.contentClass)
                 } ?? .photo
+                // Im Budget nur Originalgröße: Die Klein-Leiter hätte sonst
+                // für Bilder im Toleranzband noch 96 DPI angeboten.
+                let staysNative = resize == nil && CandidateGenerator.reencodesWithinBudget(options)
+                    && (isWastefulJPEGWithinBudget || stats.isGrayscale)
                 // Die Nativ-Stufe eines Bilds über der Dekodiergrenze entfällt.
-                let ladder = CandidateGenerator.resolutionLadder(
-                    resource: resource, target: resize, options: options)
+                let ladder = (staysNative
+                    ? [PixelSize(width: resource.width, height: resource.height)]
+                    : CandidateGenerator.resolutionLadder(
+                        resource: resource, target: resize, options: options))
                     .filter { CompressionPlanner.canDecode(resource, target: $0, pixels: pixels) }
                 generateJPEGCandidates(
                     ladder: ladder,
@@ -1038,7 +1180,26 @@ enum CandidateGenerator {
                     targetImage: targetImage,
                     grayscale: grayscale,
                     jpegOptions: options,
-                    gateClass: gateClass)
+                    gateClass: gateClass,
+                    // Im Budget gibt es keine sichere Stufe darunter: Ohne das
+                    // hielt die Suche bei einem q 0,50, das der Optimierer dann
+                    // als Katastrophe verwarf, und q 0,75 kam nie zum Zug.
+                    perceptualLimitIsGate: staysNative)
+                // Klein misst auf dem feinen Raster strenger als Smart mit dem
+                // Anker: Auf körnigen Bildern blieb Klein darüber größer als
+                // Smart. Im Budget treten deshalb Smarts Stufen mit an, sobald
+                // Klein nicht von selbst unter Smarts unterste Qualität kommt.
+                // Es gelten Smarts Messung und Anker; der Optimierer wählt.
+                if staysNative,
+                   QualityGatePreset(ssimThreshold: options.ssimThreshold) == .small,
+                   !hasCandidate(atOrBelow: ImageCompressionOptions.smart.qualityLadder.min() ?? 0) {
+                    var smartLike = ImageCompressionOptions.smart
+                    smartLike.jpegBackend = options.jpegBackend
+                    generateJPEGCandidates(ladder: ladder, target: target, targetImage: targetImage,
+                                           grayscale: grayscale, jpegOptions: smartLike,
+                                           gateClass: gateClass, rungIndexOffset: ladder.count,
+                                           perceptualLimitIsGate: true)
+                }
                 // Klein-Sicherheitsstufen (2026-09-30): Verletzt JEDER Klein-
                 // Kandidat die perzeptuelle Katastrophen-Grenze, fehlte bisher
                 // eine sichere Stufe – das Original blieb in voller Größe,
@@ -1145,6 +1306,11 @@ enum CandidateGenerator {
         private mutating func addIndexedCandidate(target: PixelSize,
                                                   targetImage: CGImage,
                                                   grayscale: Bool) {
+            // Graue Grafik im Budget nur als Flate: Die exakte Palette ist zwar
+            // bitgleich, aber PDFKit glättet indizierte Bilder beim Verkleinern
+            // nicht. Gemessen: 2 bit statt 8 bit, 252 DPI, Ansicht 150 DPI →
+            // 5,9 % geänderte Fläche, Tinte um 3 % verschoben.
+            guard !isGrayGraphicsWithinBudget else { return }
             guard let contentClass = classification?.contentClass,
                   contentClass == .screenshot || contentClass == .lineArt
                       || contentClass == .chart || contentClass == .unknown
@@ -1296,7 +1462,8 @@ enum CandidateGenerator {
             grayscale: Bool,
             jpegOptions: ImageCompressionOptions,
             gateClass: QualityGateClass,
-            rungIndexOffset: Int = 0) {
+            rungIndexOffset: Int = 0,
+            perceptualLimitIsGate: Bool = false) {
 
             var sawPassingRung = false
             var bestFailedSSIM: Double?
@@ -1348,7 +1515,7 @@ enum CandidateGenerator {
             }
             let sourceSample = source.flatMap {
                 CandidateGenerator.referenceSample(original: $0, target: target,
-                                                   fine: CandidateGenerator.measuresFine(options))
+                                                   fine: CandidateGenerator.measuresFine(jpegOptions))
             }
             if case .adaptive = jpegOptions.qualityPolicy, sourceSample == nil {
                 keepReason = .decodeFailed
@@ -1422,7 +1589,8 @@ enum CandidateGenerator {
                                             backend: jpegOptions.jpegBackend,
                                             policy: policy,
                                             sourceSample: sourceSample,
-                                            anchorCheck: anchorCheck)
+                                            anchorCheck: anchorCheck,
+                                            perceptualLimitIsGate: perceptualLimitIsGate)
                 }
                 for rungResult in rungs {
                     measuredAnything = true
@@ -1447,6 +1615,12 @@ enum CandidateGenerator {
                        !grayscale, originalBytes > 0,
                        Double(rungResult.data.count) > Double(originalBytes) * 0.90 {
                         traceJPEG(target: rung, result: rungResult, disposition: "marginal-native-saving")
+                        continue
+                    }
+                    if isWastefulJPEGWithinBudget, originalBytes > 0,
+                       Double(rungResult.data.count) > Double(originalBytes)
+                            * CandidateGenerator.nativeReencodeMaximumRatio {
+                        traceJPEG(target: rung, result: rungResult, disposition: "native-reencode-no-leverage")
                         continue
                     }
                     traceJPEG(target: rung, result: rungResult, disposition: "candidate")
@@ -1476,6 +1650,13 @@ enum CandidateGenerator {
                 keepReason = .qualityRejected(bestSSIM: best)
             } else if measuredAnything {
                 keepReason = .decodeFailed
+            }
+        }
+
+        private func hasCandidate(atOrBelow quality: Double) -> Bool {
+            transforms.contains {
+                if case .jpeg(_, let selected, _, _) = $0.candidate.kind { return selected <= quality }
+                return false
             }
         }
 
@@ -1686,6 +1867,10 @@ enum CandidateGenerator {
                                                    targetImage: CGImage,
                                                    grayscale: Bool,
                                                    losslessAdded: Bool) {
+            // Hart begrenzte Grafik im Budget bleibt verlustfrei. Auch als Rückfall
+            // kein JPEG: Sonst blieb der Erstlauf bei Flate, und der Zweitlauf
+            // kodierte verlustbehaftet, weil Flate nichts mehr einsparte.
+            guard !isGrayGraphicsWithinBudget else { return }
             let intermediate = CandidateGenerator.smartPhotoIntermediate(
                 resource: resource, target: target, options: options)
             // Klein/Zielgröße (§9.5: „JPEG nur: Small/Target Size · wenn klarer
@@ -2011,6 +2196,7 @@ enum CandidateGenerator {
         case .cmykJPEG: return 0.2
         case .jbig2Lossless: return 0.2
         case .ccittG4: return 0.05
+        case .bilevelResampled(_, let codec): return codec == .jbig2 ? 0.2 : 0.05
         default: return 0
         }
     }
@@ -2043,6 +2229,7 @@ enum CandidateGenerator {
             return CandidateID("indexed-\(base)-e\(entries)-b\(bpc)")
         case .ccittG4: return CandidateID("g4-\(base)")
         case .jbig2Lossless: return CandidateID("jbig2-\(base)")
+        case .bilevelResampled: return CandidateID("bilevel-resampled-\(base)")
         case .jpegRepack: return CandidateID("repack-\(base)")
         case .cmykJPEG(_, let quality):
             return CandidateID("cmyk-\(base)-q\(String(format: "%.4f", quality))")

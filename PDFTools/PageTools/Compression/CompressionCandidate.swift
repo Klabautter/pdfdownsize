@@ -95,6 +95,10 @@ enum CandidateKind: Hashable, Codable, Sendable {
     /// Lossless JBIG2 aus dem Bilevel-Race (§9.7).
     case jbig2Lossless
 
+    /// Verkleinertes Bilevel (nur sehr hohe Auflösungen): verlustbehaftet
+    /// gegenüber dem Original, die Kodierung selbst bitidentisch geprüft.
+    case bilevelResampled(target: PixelSize, codec: MRCMaskCodec)
+
     /// Kontrollierter YCCK-Re-Encode (§9.8, Phase 6C).
     case cmykJPEG(target: PixelSize, quality: Double)
 

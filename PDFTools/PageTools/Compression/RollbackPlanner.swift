@@ -232,6 +232,7 @@ enum RollbackPlanner {
         if plan.actions.contains(where: {
             if case .ccittG4 = $0 { return true }
             if case .jbig2 = $0 { return true }
+            if case .bilevelResampled = $0 { return true }
             return false
         }) || execution.bytesSavedBilevel > 0 {
             overrides.bilevelPolicy = .keep

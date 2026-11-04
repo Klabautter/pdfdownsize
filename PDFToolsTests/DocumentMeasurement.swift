@@ -97,6 +97,8 @@ import Foundation
                 lossN += 1; fromBytes += max(from, 0); toBytes += to
             case .ccittG4(_, let from, let to), .jbig2(_, let from, let to):
                 bilevelN += 1; fromBytes += max(from, 0); toBytes += to
+            case .bilevelResampled(_, _, _, let from, let to):
+                bilevelN += 1; fromBytes += max(from, 0); toBytes += to
             case .indexed(_, _, _, _, _, let from, let to, _, _):
                 lossN += 1; fromBytes += max(from, 0); toBytes += to
             case .mrc(_, _, let from, let to):
