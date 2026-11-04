@@ -216,6 +216,15 @@ enum MRCPageRewriter {
     /// tragen, damit der dominante Draw allein über MRC entschieden wird.
     static let maximumSecondaryCoverage = 0.05
 
+    /// Mehr Ebenen je Seite verweigert die Rekonstruktion
+    /// (`pdfcore_replace_page_image_draw_with_layers`, gleiche Grenze).
+    static let maximumPageLayers = 64
+
+    /// Ebenen eines Bündels: Hintergrund + Foto-Regionen + Maske.
+    static func fitsLayerLimit(photoRegionCount: Int) -> Bool {
+        photoRegionCount + 2 <= maximumPageLayers
+    }
+
     /// Eine MRC-faehige Seite: Scan-Klassifikation, dominantes Raster,
     /// messbare Platzierung. Dieselbe Eignung nutzt der Planner fuer die
     /// Bedarfsentscheidung (2026-10-15), bevor er die teure Provision anstoesst.
@@ -453,6 +462,11 @@ enum MRCPageRewriter {
                                        isCancelled: (() -> Bool)?) throws -> MRCProvision? {
         guard let raster = pixels.decodedImage(for: resource) else { return nil }
         guard let segmentation = MRCSegmenter.segment(raster) else { return nil }
+        // Zu viele Regionen scheitern sicher an der Rekonstruktion – erst
+        // nach Maske und allen Stufen zu scheitern wäre vergebene Arbeit.
+        guard fitsLayerLimit(photoRegionCount: segmentation.photoRegions.count) else {
+            return nil
+        }
         guard let mask = MRCEncoder.encodeMask(segmentation.mask) else { return nil }
 
         let rasterSize = PixelSize(width: raster.width, height: raster.height)

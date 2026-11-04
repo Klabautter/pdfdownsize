@@ -101,6 +101,49 @@ import Foundation
                 "Custom-Parameter duerfen MRC nicht implizit aktivieren")
     }
 
+    /// Plant die Seite und meldet, ob der Planner die Provision angefordert hat.
+    private func requestsProvision(_ input: URL, goal: CompressionGoal? = nil) throws -> Bool {
+        var options = CompressionOptions.make(mode: .smart, customConfig: nil,
+                                              stripMetadata: false, linearize: false)
+        options.mrcProvisionBudget.provisionIfCandidateExceedsBytes = 0
+        if let goal { options.goal = goal }
+        let document = try PDFCoreDocument(path: input.path)
+        let resources = try document.imageResources()
+        var requested = false
+        _ = try CompressionPlanner.plan(
+            resources: resources, options: options,
+            documentID: input.lastPathComponent,
+            documentBytes: Int(Compressor.fileSize(of: input)),
+            pixels: LibQPDFPixelSource(document: document),
+            mrcOnDemand: { _ in requested = true; return [] },
+            pageAnalyses: try PageScanAnalyzer.analyze(document: document, resources: resources))
+        return requested
+    }
+
+    @Test func jpegImDPIBudgetLoestKeineProvisionAus() throws {
+        let input = try PDFFixtures.mrcJPEGScanPagePDF()
+        defer { try? FileManager.default.removeItem(at: input) }
+        #expect(try !requestsProvision(input))
+    }
+
+    @Test func jpegUeberDemDPIBudgetBleibtMRCFaehig() throws {
+        let input = try PDFFixtures.mrcJPEGScanPagePDF(width: 2600, height: 3365)
+        defer { try? FileManager.default.removeItem(at: input) }
+        #expect(try requestsProvision(input))
+    }
+
+    @Test func flateImDPIBudgetBleibtMRCFaehig() throws {
+        let input = try PDFFixtures.mrcScanPagePDF()
+        defer { try? FileManager.default.removeItem(at: input) }
+        #expect(try requestsProvision(input))
+    }
+
+    @Test func zielgroesseDarfJPEGImDPIBudgetZerlegen() throws {
+        let input = try PDFFixtures.mrcJPEGScanPagePDF()
+        defer { try? FileManager.default.removeItem(at: input) }
+        #expect(try requestsProvision(input, goal: .targetBytes(1024)))
+    }
+
     @Test func provisionBudgetBegrenztSeitenPixelUndZeit() {
         let budget = MRCProvisionBudget(
             maximumPages: 2, maximumPixels: 1_000,

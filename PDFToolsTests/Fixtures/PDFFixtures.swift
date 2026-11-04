@@ -3615,6 +3615,37 @@ extension PDFFixtures {
         return try b.write(rootObject: root, prefix: name)
     }
 
+    /// Scan-Seite als JPEG auf US-Letter. Die Rastergröße bestimmt die DPI:
+    /// 850 × 1100 sind 100 DPI, 2600 × 3365 sind 306 DPI.
+    static func mrcJPEGScanPagePDF(width: Int = 850, height: Int = 1100,
+                                   name: String = "mrc-jpeg-scan") throws -> URL {
+        let raster = mrcScanRaster(width: width, height: height)
+        guard let provider = CGDataProvider(data: raster as CFData),
+              let image = CGImage(width: width, height: height, bitsPerComponent: 8,
+                                  bitsPerPixel: 24, bytesPerRow: width * 3,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                                  provider: provider, decode: nil,
+                                  shouldInterpolate: false, intent: .defaultIntent),
+              let jpeg = ImageResampler.encodeJPEG(image, quality: 0.85) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let imageObject = b.addStream(
+            dictionary: "/Type/XObject/Subtype/Image/Width \(width)"
+                + "/Height \(height)/BitsPerComponent 8/ColorSpace/DeviceRGB"
+                + "/Filter/DCTDecode",
+            data: jpeg)
+        let resources = b.addObject("<</XObject<</Im0 \(imageObject) 0 R>>>>")
+        let content = b.addStream(dictionary: "", content: "q 612 0 0 792 0 0 cm /Im0 Do Q ")
+        let page = b.addObject("<</Type/Page/Parent \(pages) 0 R"
+            + "/MediaBox[0 0 612 792]/Resources \(resources) 0 R/Contents \(content) 0 R>>")
+        b.fill(pages, "<</Type/Pages/Kids[\(page) 0 R]/Count 1>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R>>")
+        return try b.write(rootObject: root, prefix: name)
+    }
+
     /// Scan-Seite mit dominantem Vollbild-Raster PLUS kleinem Sekundärraster
     /// (Scope-Erweiterung §13.1): Nur der dominante Draw wird per MRC ersetzt,
     /// der Sekundär-Draw bleibt. `secondaryPoints` steuert die platzierte
