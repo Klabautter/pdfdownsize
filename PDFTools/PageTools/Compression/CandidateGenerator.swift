@@ -709,8 +709,8 @@ enum CandidateGenerator {
         /// die Preset-Grenzen der Scan-Klasse halten; der Optimierer prüft die
         /// Messung erneut und nimmt wie immer den kleinsten zulässigen.
         private mutating func addResampledBilevel(buffer: BilevelBuffer) {
-            guard let factor = BilevelResampling.factor(for: resource, options: options),
-                  let reduction = BilevelResampling.reduce(buffer, factor: factor),
+            guard let ratio = BilevelResampling.ratio(for: resource, options: options),
+                  let reduction = BilevelResampling.reduce(buffer, ratio: ratio),
                   reduction.preservesInk,
                   let measurement = BilevelResampling.measure(source: buffer,
                                                               candidate: reduction.buffer),
@@ -731,7 +731,7 @@ enum CandidateGenerator {
             let added = add(kind: .bilevelResampled(target: target, codec: codec),
                             isLossless: false, data: payload, measurement: measurement,
                             runtimeMs: 0, workingBytes: Int64(reduction.buffer.data.count),
-                            reason: "Bilevel auf 1/\(factor) der Auflösung, Tinte und "
+                            reason: "Bilevel auf \(ratio.target)/\(ratio.source) der Auflösung, Tinte und "
                                 + "Preset-Grenzen gehalten",
                             action: .bilevelResampled(objectID: objectID, target: target,
                                                       codec: codec,
@@ -792,8 +792,8 @@ enum CandidateGenerator {
 
         mutating func run(classifierPolicy: ClassifierPolicy) {
             // 0. Bilevel-Vorprüfung (Dictionary-Ebene, vor jeder Dekodierung)
-            //    – Bilevel wird nur bei sehr hoher Auflösung verkleinert
-            //    (`addResampledBilevel`), sonst nie.
+            //    – Bilevel wird nur von Klein und bei sehr hoher Auflösung auch
+            //    von Smart verkleinert (`addResampledBilevel`), sonst nie.
             // Die Erkennung läuft in JEDER Politik: `.keep` heißt „Bilevel
             // bleibt unangetastet" – auch exakt zweiwertiges 8-bit. Vorher
             // übersprang `.keep` die Erkennung, und solche Scans liefen in

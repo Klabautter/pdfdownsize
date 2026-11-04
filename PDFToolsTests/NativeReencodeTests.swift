@@ -240,7 +240,8 @@ import UniformTypeIdentifiers
 
     /// Text als 1-bit-Puffer (Bit 1 = Tinte), auf Wunsch mit Haarlinien.
     private static func textBilevel(width: Int, height: Int, pointSize: CGFloat,
-                                    hairlines: Bool = false) throws -> BilevelBuffer {
+                                    hairlines: Bool = false,
+                                    scanLike: Bool = false) throws -> BilevelBuffer {
         let context = try #require(CGContext(
             data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width,
             space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue))
@@ -253,10 +254,15 @@ import UniformTypeIdentifiers
             .font: NSFont(name: "Times New Roman", size: pointSize) ?? NSFont.systemFont(ofSize: pointSize),
             .foregroundColor: NSColor.black]
         var y = CGFloat(height) - pointSize * 2
+        var index = 0
         while y > pointSize {
-            NSAttributedString(string: line, attributes: attributes)
+            // Gleiche Zeilen und glatte Kanten kodiert JBIG2 so klein, dass die
+            // volle Größe jede Verkleinerung schlägt; echte Scans sind rauer.
+            let text = scanLike ? "\(line.dropFirst(index * 7 % 40)) \(index * 37)" : line
+            NSAttributedString(string: text, attributes: attributes)
                 .draw(at: CGPoint(x: pointSize, y: y))
             y -= pointSize * 1.6
+            index += 1
         }
         NSGraphicsContext.restoreGraphicsState()
         if hairlines {
@@ -269,8 +275,13 @@ import UniformTypeIdentifiers
         let gray = try #require(context.data).assumingMemoryBound(to: UInt8.self)
         let rowBytes = BilevelBuffer.rowBytes(width: width)
         var bits = [UInt8](repeating: 0, count: rowBytes * height)
-        for row in 0..<height { for x in 0..<width where gray[row * width + x] < 128 {
-            bits[row * rowBytes + x / 8] |= 0x80 >> UInt8(x % 8)
+        var state: UInt32 = 11
+        for row in 0..<height { for x in 0..<width {
+            state = state &* 1664525 &+ 1013904223
+            let threshold = scanLike ? 28 + Int(state >> 24) * 200 / 255 : 128
+            if Int(gray[row * width + x]) < threshold {
+                bits[row * rowBytes + x / 8] |= 0x80 >> UInt8(x % 8)
+            }
         } }
         return try #require(BilevelBuffer(width: width, height: height, data: Data(bits)))
     }
@@ -323,6 +334,50 @@ import UniformTypeIdentifiers
         #expect(try Self.dimensions(smart.output) == PixelSize(width: 3000, height: 3000))
     }
 
+    /// Der Büroscan: 300 DPI, 11-pt-Text. Klein rechnet auf 200 DPI, die anderen
+    /// Stufen bleiben pixelgleich; ein zweiter Klein-Lauf rechnet nicht weiter.
+    @Test(.hangGuard) func bilevelAt300DPIGoesTo200InKlein() throws {
+        let buffer = try Self.textBilevel(width: 2400, height: 3300, pointSize: 46, scanLike: true)
+        let input = try Self.bilevelDocument(buffer, dpi: 300)
+        defer { try? FileManager.default.removeItem(at: input) }
+        let klein = try Self.run(input, .small)
+        let smart = try Self.run(input, .smart)
+        let quality = try Self.run(input, .quality)
+        let second = try Self.run(klein.output, .small)
+        defer {
+            for r in [klein, smart, quality, second] { try? FileManager.default.removeItem(at: r.output) }
+        }
+        #expect(try Self.dimensions(klein.output) == PixelSize(width: 1600, height: 2200))
+        #expect(try Self.dimensions(smart.output) == PixelSize(width: 2400, height: 3300))
+        #expect(try Self.dimensions(quality.output) == PixelSize(width: 2400, height: 3300))
+        #expect(try Self.dimensions(second.output) == PixelSize(width: 1600, height: 2200))
+        #expect(Compressor.fileSize(of: klein.output) < Compressor.fileSize(of: smart.output))
+    }
+
+    /// 1-px-Raster bei 300 DPI: Ein Drittel der Linien fiele auf die Zellgrenze.
+    @Test(.hangGuard) func hairlinesBlockTwoThirdsReduction() throws {
+        let buffer = try Self.textBilevel(width: 2400, height: 3300, pointSize: 46, hairlines: true,
+                                          scanLike: true)
+        let input = try Self.bilevelDocument(buffer, dpi: 300)
+        defer { try? FileManager.default.removeItem(at: input) }
+        let run = try Self.run(input, .small)
+        defer { try? FileManager.default.removeItem(at: run.output) }
+        #expect(try Self.dimensions(run.output) == PixelSize(width: 2400, height: 3300))
+    }
+
+    /// Der Bruch 2/3: Executor und Planung kommen auf dieselbe Zielgröße, und ein
+    /// Quellpixel zwischen zwei Zellen zählt anteilig.
+    @Test func twoThirdsReductionIsAreaWeighted() throws {
+        let ratio = BilevelResampling.Ratio(target: 2, source: 3)
+        #expect(BilevelResampling.ratio(sourceWidth: 2400, sourceHeight: 3300,
+                                        target: PixelSize(width: 1600, height: 2200)) == ratio)
+        // Spalten 0 und 1 von 3 schwarz: Zelle 0 ganz, Zelle 1 nur zu einem Drittel.
+        let source = try #require(BilevelBuffer(width: 3, height: 3, data: Data([0xC0, 0xC0, 0xC0])))
+        let reduction = try #require(BilevelResampling.reduce(source, ratio: ratio))
+        #expect(reduction.buffer.width == 2 && reduction.buffer.height == 2)
+        #expect(Array(reduction.buffer.data) == [0x80, 0x80])
+    }
+
     /// Feinraster verschwindet beim Halbieren: Das Tintengate lehnt ab.
     @Test(.hangGuard) func hairlinesBlockResampling() throws {
         let buffer = try Self.textBilevel(width: 6000, height: 6000, pointSize: 183, hairlines: true)
@@ -337,20 +392,25 @@ import UniformTypeIdentifiers
 
     /// Kein Bild ohne bekannte Auflösung, keine Stufe außer Klein und Smart.
     @Test func factorFollowsPresetAndResolution() throws {
-        func factor(dpi: Double, _ image: ImageCompressionOptions) throws -> Int? {
+        func ratio(dpi: Double, _ image: ImageCompressionOptions) throws -> BilevelResampling.Ratio? {
             let buffer = try #require(BilevelBuffer(width: 2400, height: 2400,
                                                     data: Data(count: BilevelBuffer.rowBytes(width: 2400) * 2400)))
             let url = try Self.bilevelDocument(buffer, dpi: dpi)
             defer { try? FileManager.default.removeItem(at: url) }
             let resource = try #require(try PDFCoreDocument(path: url.path).imageResources().first)
-            return BilevelResampling.factor(for: resource, options: image)
+            return BilevelResampling.ratio(for: resource, options: image)
         }
-        #expect(try factor(dpi: 1200, .small) == 4)
-        #expect(try factor(dpi: 600, .small) == 2)
-        #expect(try factor(dpi: 500, .small) == nil)
-        #expect(try factor(dpi: 1200, .smart) == 2)
-        #expect(try factor(dpi: 2400, .smart) == 4)
-        #expect(try factor(dpi: 600, .smart) == nil)
-        #expect(try factor(dpi: 1200, .quality) == nil)
+        #expect(try ratio(dpi: 1200, .small) == .halving(4))
+        #expect(try ratio(dpi: 600, .small) == .halving(2))
+        #expect(try ratio(dpi: 500, .small) == .halving(2))
+        #expect(try ratio(dpi: 400, .small) == .halving(2))
+        #expect(try ratio(dpi: 300, .small) == BilevelResampling.Ratio(target: 2, source: 3))
+        #expect(try ratio(dpi: 240, .small) == nil)
+        #expect(try ratio(dpi: 1200, .smart) == .halving(2))
+        #expect(try ratio(dpi: 2400, .smart) == .halving(4))
+        #expect(try ratio(dpi: 600, .smart) == nil)
+        #expect(try ratio(dpi: 300, .smart) == nil)
+        #expect(try ratio(dpi: 300, .quality) == nil)
+        #expect(try ratio(dpi: 1200, .quality) == nil)
     }
 }

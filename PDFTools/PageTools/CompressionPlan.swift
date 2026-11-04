@@ -130,8 +130,8 @@ enum ImageCompressionAction: Hashable, Codable, Sendable {
                originalEncodedBytes: Int,
                expectedEncodedBytes: Int)
 
-    /// Verkleinertes Bilevel: neue Maße, sonst wie die beiden oben. Steht nur
-    /// bei sehr hoher Auflösung im Plan (`BilevelResampling`).
+    /// Verkleinertes Bilevel: neue Maße, sonst wie die beiden oben. Regeln
+    /// je Stufe in `BilevelResampling`.
     case bilevelResampled(objectID: PDFObjectID,
                           target: PixelSize,
                           codec: MRCMaskCodec,

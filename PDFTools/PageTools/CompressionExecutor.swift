@@ -740,9 +740,10 @@ enum CompressionExecutor {
             }
             return (encoded.page, encoded.globals)
         case .bilevelResampled(_, let target, let codec, _, _):
-            let factor = max(1, Int((Double(resource.width) / Double(target.width)).rounded()))
-            guard let buffer = BilevelSource.buffer(for: resource, pixels: pixels),
-                  let reduced = BilevelResampling.reduce(buffer, factor: factor)?.buffer else {
+            guard let ratio = BilevelResampling.ratio(sourceWidth: resource.width,
+                                                      sourceHeight: resource.height, target: target),
+                  let buffer = BilevelSource.buffer(for: resource, pixels: pixels),
+                  let reduced = BilevelResampling.reduce(buffer, ratio: ratio)?.buffer else {
                 throw ExecutionError.payloadUnavailable(action.objectID)
             }
             if codec == .ccittG4, let data = BilevelCodec.encodeG4(reduced) {

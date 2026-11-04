@@ -550,10 +550,22 @@ enum BilevelSource {
 // MARK: - Verkleinern sehr hoher Auflösungen
 
 /// Bilevel über 600 DPI trägt mehr, als Bildschirm und Bürodrucker zeigen. Klein
-/// darf ab rund 600 DPI halbieren, Smart erst darüber; das Ergebnis liegt nie
-/// unter 300 DPI (Klein) und bleibt damit gestochen. Qualität und Custom bleiben
-/// bei „Bilevel wird nie resampelt“.
+/// darf ab rund 600 DPI halbieren und liegt dort nie unter 300 DPI, Smart erst
+/// darüber. Schwarzweiß-Scans darunter (rund 300 bis 570 DPI) rechnet Klein auf
+/// rund 200 DPI; so unterscheidet es sich auch bei Bürodokumenten von den anderen
+/// Stufen (Entscheidung Linus, 4.11.2026). Qualität und Custom bleiben bei
+/// „Bilevel wird nie resampelt“.
 enum BilevelResampling {
+
+    /// Verkleinerung als Bruch: Aus `source` Quellpixeln werden `target` Zielpixel.
+    struct Ratio: Equatable {
+        let target: Int
+        let source: Int
+
+        static func halving(_ factor: Int) -> Ratio { Ratio(target: 1, source: factor) }
+
+        func size(of extent: Int) -> Int { (extent * target + source - 1) / source }
+    }
 
     struct Reduction {
         let buffer: BilevelBuffer
@@ -561,11 +573,13 @@ enum BilevelResampling {
         let inkCellSurvival: Double
         /// Relative Änderung der Tintenfläche.
         let inkAreaChange: Double
+        /// Geforderter Anteil; beim Bruch berühren mehr Zellen nur wenig Tinte.
+        let requiredInkCellSurvival: Double
 
         /// Haarlinien und feine Raster enden in Zellen unter der Hälfte und
         /// verschwinden; dann bleibt das Original.
         var preservesInk: Bool {
-            inkCellSurvival >= BilevelResampling.minimumInkCellSurvival
+            inkCellSurvival >= requiredInkCellSurvival
                 && inkAreaChange <= BilevelResampling.maximumInkAreaChange
         }
     }
@@ -574,20 +588,28 @@ enum BilevelResampling {
     /// 11 pt, 1200 → 600 DPI: 0,96 / 0,06; 600 → 300: 0,93 / 0,10; 1200 → 300:
     /// 0,80 / 0,05. Abgelehnt: 5,5 pt, 600 → 300: 0,88 / 0,17; 1200 → 300: 0,68 / 0,07.
     static let minimumInkCellSurvival = 0.75
+    /// 2/3 (300 → 200 DPI), NASA-Büroscan 19940006903: Textseiten 0,67–0,82 bei
+    /// höchstens 3 % Flächenänderung. Ein Raster aus 1-px-Linien ergibt rechnerisch
+    /// 0,5: Ein Drittel der Linien fällt auf die Zellgrenze und verschwindet.
+    static let minimumInkCellSurvivalAtTwoThirds = 0.65
     static let maximumInkAreaChange = 0.15
     /// Klein: „etwa 600 DPI“; das Band fängt Scans auf, die knapp größer
     /// platziert sind. Smart: erst klar über 600 DPI (Toleranz wie die Bilder).
     static let smallMinimumDPI = 570.0
     static let smartMinimumDPI = 690.0
     static let smallFloorDPI = 300.0
+    /// Klein unterhalb von `smallMinimumDPI`: ab 400 DPI halbieren, ab knapp
+    /// 300 DPI auf zwei Drittel. Das Ziel liegt jeweils bei rund 200 DPI.
+    static let smallScanMinimumDPI = 285.0
+    static let smallScanHalvingDPI = 400.0
     /// Messraster: halbe Kandidatenkante (bei 300 DPI also rund 150 DPI, nah an
     /// der normalen Ansicht), höchstens diese Kante.
     static let measurementEdge = 2048
 
-    /// Kleinster Faktor (2, 4, …) nach Stufe; `nil`, wenn nicht verkleinert wird.
-    /// Maßgeblich ist die kleinere Auflösung aller Platzierungen und Achsen.
-    static func factor(for resource: PDFImageResource,
-                       options: ImageCompressionOptions) -> Int? {
+    /// Verkleinerung nach Stufe; `nil`, wenn nicht verkleinert wird. Maßgeblich
+    /// ist die kleinere Auflösung aller Platzierungen und Achsen.
+    static func ratio(for resource: PDFImageResource,
+                      options: ImageCompressionOptions) -> Ratio? {
         guard case .adaptive = options.qualityPolicy else { return nil }
         let dpis = resource.placements.flatMap { placement -> [Double] in
             guard placement.placedWidthPoints > 1, placement.placedHeightPoints > 1 else { return [] }
@@ -599,7 +621,10 @@ enum BilevelResampling {
         var factor = 2
         switch QualityGatePreset(ssimThreshold: options.ssimThreshold) {
         case .small:
-            guard dpi >= smallMinimumDPI else { return nil }
+            guard dpi >= smallMinimumDPI else {
+                if dpi >= smallScanHalvingDPI { return .halving(2) }
+                return dpi >= smallScanMinimumDPI ? Ratio(target: 2, source: 3) : nil
+            }
             while dpi / Double(factor * 2) >= smallFloorDPI { factor *= 2 }
         case .smart:
             guard dpi > smartMinimumDPI else { return nil }
@@ -607,16 +632,32 @@ enum BilevelResampling {
         case .quality, .custom:
             return nil
         }
-        return factor
+        return .halving(factor)
     }
 
-    /// Kastenfilter: Eine Zielzelle wird Tinte, wenn mindestens die Hälfte ihrer
-    /// Quellpixel Tinte ist (Bit 1 = schwarz). Deterministisch; der Executor
-    /// erzeugt dieselben Bits neu.
-    static func reduce(_ source: BilevelBuffer, factor: Int) -> Reduction? {
-        guard factor >= 2 else { return nil }
-        let width = (source.width + factor - 1) / factor
-        let height = (source.height + factor - 1) / factor
+    /// Der Bruch, aus dem eine geplante Zielgröße entstand. Der Plan trägt nur
+    /// die Zielgröße; der Executor erzeugt damit dieselben Bits neu.
+    static func ratio(sourceWidth: Int, sourceHeight: Int, target: PixelSize) -> Ratio? {
+        var candidates = [Ratio(target: 2, source: 3)]
+        var factor = 2
+        while factor <= max(sourceWidth, sourceHeight) {
+            candidates.append(.halving(factor))
+            factor *= 2
+        }
+        return candidates.first {
+            $0.size(of: sourceWidth) == target.width && $0.size(of: sourceHeight) == target.height
+        }
+    }
+
+    /// Flächentreuer Kastenfilter: Eine Zielzelle wird Tinte, wenn mindestens die
+    /// Hälfte ihrer Fläche Tinte ist (Bit 1 = schwarz). Bei Bruchteilen zählt ein
+    /// Quellpixel anteilig in beiden Zellen. Deterministisch; der Executor erzeugt
+    /// dieselben Bits neu.
+    static func reduce(_ source: BilevelBuffer, ratio: Ratio) -> Reduction? {
+        let (p, q) = (ratio.target, ratio.source)
+        guard p >= 1, q > p else { return nil }
+        let width = ratio.size(of: source.width)
+        let height = ratio.size(of: source.height)
         let sourceRow = BilevelBuffer.rowBytes(width: source.width)
         let targetRow = BilevelBuffer.rowBytes(width: width)
         var out = [UInt8](repeating: 0, count: targetRow * height)
@@ -624,24 +665,34 @@ enum BilevelResampling {
         var inkCells = 0, keptCells = 0, sourceInk = 0, targetInk = 0
         source.data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
             guard let bits = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+            for row in 0..<source.height {
+                let line = bits + row * sourceRow
+                for byteIndex in 0..<sourceRow { sourceInk += line[byteIndex].nonzeroBitCount }
+            }
             for cellY in 0..<height {
                 for i in 0..<width { counts[i] = 0 }
-                let firstRow = cellY * factor
-                let rows = min(factor, source.height - firstRow)
-                for row in firstRow..<(firstRow + rows) {
+                let cellTop = cellY * q, cellBottom = cellTop + q
+                var coveredY = 0
+                for row in (cellTop / p)..<min(source.height, (cellBottom + p - 1) / p) {
+                    let overlapY = min((row + 1) * p, cellBottom) - max(row * p, cellTop)
+                    guard overlapY > 0 else { continue }
+                    coveredY += overlapY
                     let line = bits + row * sourceRow
                     for byteIndex in 0..<sourceRow where line[byteIndex] != 0 {
                         let byte = line[byteIndex]
-                        sourceInk += byte.nonzeroBitCount
                         for bit in 0..<8 where byte & (0x80 >> UInt8(bit)) != 0 {
-                            counts[(byteIndex * 8 + bit) / factor] += 1
+                            let x = byteIndex * 8 + bit
+                            for cellX in (x * p / q)...(((x + 1) * p - 1) / q) {
+                                let overlapX = min((x + 1) * p, (cellX + 1) * q) - max(x * p, cellX * q)
+                                counts[cellX] += Int32(overlapX * overlapY)
+                            }
                         }
                     }
                 }
                 for cellX in 0..<width where counts[cellX] > 0 {
                     inkCells += 1
-                    let columns = min(factor, source.width - cellX * factor)
-                    if Int(counts[cellX]) * 2 >= columns * rows {
+                    let coveredX = min((cellX + 1) * q, source.width * p) - cellX * q
+                    if Int(counts[cellX]) * 2 >= coveredX * coveredY {
                         keptCells += 1
                         targetInk += 1
                         out[cellY * targetRow + cellX / 8] |= 0x80 >> UInt8(cellX % 8)
@@ -650,11 +701,12 @@ enum BilevelResampling {
             }
         }
         guard let buffer = BilevelBuffer(width: width, height: height, data: Data(out)) else { return nil }
-        let inkArea = Double(targetInk * factor * factor)
+        let inkArea = Double(targetInk * q * q) / Double(p * p)
         return Reduction(
             buffer: buffer,
             inkCellSurvival: inkCells == 0 ? 1 : Double(keptCells) / Double(inkCells),
-            inkAreaChange: sourceInk == 0 ? 0 : abs(inkArea - Double(sourceInk)) / Double(sourceInk))
+            inkAreaChange: sourceInk == 0 ? 0 : abs(inkArea - Double(sourceInk)) / Double(sourceInk),
+            requiredInkCellSurvival: p > 1 ? minimumInkCellSurvivalAtTwoThirds : minimumInkCellSurvival)
     }
 
     /// Beide Puffer gehen durch denselben Kastenfilter auf dasselbe Graustufen-
