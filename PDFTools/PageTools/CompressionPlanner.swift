@@ -938,7 +938,10 @@ enum CompressionPlanner {
         let barrier = repackBarrier(resource: resource, pixels: pixels)
 
         guard let resized = ImageResampler.resize(image, to: target,
-                                                  components: 4) else {
+                                                  components: 4),
+              let display = CMYKReencode.displaySamples(resized, resource: resource),
+              let encoderInput = CMYKReencode.encoderSamples(resized, resource: resource)
+        else {
             return keep(.decodeFailed)
         }
 
@@ -946,11 +949,11 @@ enum CompressionPlanner {
         let limits = CMYKReencode.limits(preset: preset)
 
         for quality in options.qualityLadder.sorted() {
-            guard let candidate = JPEGEncoder.encodeCMYK(resized, quality: quality),
+            guard let candidate = JPEGEncoder.encodeCMYK(encoderInput, quality: quality),
                   candidate.count < barrier else { continue }
-            guard CMYKReencode.passesGate(reference: resized,
-                                          candidateJPEG: candidate,
-                                          limits: limits) else { continue }
+            guard CMYKReencode.passesDisplayGate(displayReference: display,
+                                                 candidateJPEG: candidate,
+                                                 limits: limits) else { continue }
             return (.cmykJpegReencode(objectID: resource.objectID,
                                       target: target,
                                       selectedQuality: quality,
@@ -1161,6 +1164,23 @@ enum ImageResampler {
             kCGImageSourceShouldCacheImmediately: true
         ] as CFDictionary) else { return nil }
         return materialized(decoded)
+    }
+
+    /// Die CMYK-Abtastwerte als ihr Gegenteil (255 − Wert). Die Polarität
+    /// erklärt `CMYKReencode`.
+    static func invertedCMYK(_ image: CGImage) -> CGImage? {
+        guard var samples = rawBitmap(image, components: 4) else { return nil }
+        samples.withUnsafeMutableBytes { raw in
+            for i in raw.indices { raw[i] = 255 &- raw[i] }
+        }
+        guard let provider = CGDataProvider(data: samples as CFData) else { return nil }
+        return CGImage(width: image.width, height: image.height,
+                       bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: image.width * 4,
+                       space: CGColorSpaceCreateDeviceCMYK(),
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                       provider: provider, decode: nil,
+                       shouldInterpolate: false, intent: .defaultIntent)
     }
 
     /// Dieselben Pixel als eigenständiges Bitmap (Grau oder RGB). CMYK

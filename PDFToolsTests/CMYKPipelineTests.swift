@@ -291,14 +291,11 @@ import PDFKit
         #expect(r.terminalFilter == .dct)
     }
 
-    /// Und der verlustfreie Pfad bleibt auch für ÜBERSIZED CMYK-JPEGs
-    /// zuständig, solange das Preset ihn verlangt (Smart): verkleinern im
-    /// eigenen Farbraum, nie als JPEG neu kodieren. Die lossy-Ausnahme ist
-    /// an das Quality-Preset gebunden (CMYKLossyTests).
-    @Test(.hangGuard) func oversizedCmykJpegWirdVerlustfreiVerkleinert() throws {
-        // 2000 px auf 150 pt → ~960 DPI, weit über dem Smart-Budget; das
-        // verlustfreie Resample fällt dadurch so klein, dass es das JPEG
-        // sicher unterbietet (Never-Grow des Plans).
+    /// ÜBERSIZED CMYK-JPEGs laufen auch in Smart über den kontrollierten
+    /// YCCK-Kandidaten (CMYKLossyTests): verkleinert, im eigenen Farbraum,
+    /// als YCCK markiert. Der verlustfreie Resize bleibt der Rückfall.
+    @Test(.hangGuard) func oversizedCmykJpegWirdAlsYcckVerkleinert() throws {
+        // 2000 px auf 150 pt → ~960 DPI, weit über dem Smart-Budget.
         let jpeg = try Self.cmykJpeg(2000, quality: 0.95)
         let url = try Self.cmykJpegPDF(jpeg: jpeg, pixels: 2000, placedPoints: 150)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -310,8 +307,10 @@ import PDFKit
         let core = try PDFCoreDocument(path: result.outputURL.path)
         let r = try #require(try core.imageResources().first)
         #expect(r.colorSpace == .deviceCMYK, "Farbraum geändert: \(r.colorSpace)")
-        #expect(r.terminalFilter != .dct,
-                "CMYK wurde als JPEG neu kodiert – Phase 6C ist dafür nicht freigegeben")
+        #expect(r.terminalFilter == .dct, "Kein YCCK-Kandidat im Dokument")
+        let bytes = try #require(core.imageStreamData(objectID: r.objectID,
+                                                      decoded: false))
+        #expect(CMYKReencode.adobeTransformByte(bytes) == 2)
         #expect(r.width < 2000, "Nicht verkleinert")
     }
 }

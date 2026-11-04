@@ -30,20 +30,25 @@ enum CMYKReencode {
 
     /// Darf dieses Bild den kontrollierten CMYK-Re-Encode bestreiten?
     ///
-    /// - Preset: nur Quality (SSIM-Zusage 0,95). Das interne Maximum-Preset
-    ///   fährt die Bildwerte von Quality und teilt deshalb dessen Zeile.
+    /// - Preset: Quality (SSIM-Zusage 0,95); das interne Maximum-Preset fährt
+    ///   dessen Bildwerte und teilt die Zeile. Klein und Smart ebenfalls, aber
+    ///   nur, wenn das Bild tatsächlich verkleinert wird: Ein Bild im DPI-
+    ///   Budget wird nicht auf Originalgröße neu kodiert – deshalb frisst ein
+    ///   zweiter Lauf es nicht weiter an. Vorher liefen beide als Flate, und
+    ///   Smart wurde größer als Qualität.
     ///   Custom folgt der bestehenden Aggressive-Ausnahme: Nur mit
     ///   `aggressiveGraphics` UND nur bei echtem Größenüberhang – derselbe
     ///   „clearlyOversized“-Schutz wie im RGB-Grafikpfad.
-    ///   Smart/Klein bleiben verlustfrei (6a/6b-Pfade).
     /// - Farbraum: DeviceCMYK oder ICCBased-4 (genau die, die
     ///   `allowsLossyReplacement` ausschließen).
     /// - Struktur: JPEG-Input ohne Vorfilter – der Race-Gegner ist der
     ///   6b-Repack, der nur an reinen DCT-Streams existiert.
-    /// - Kein /Decode, keine Maske: Die bestehende Verweigerungspolitik wird
-    ///   für den verlustbehafteten CMYK-Pfad bewusst STRENGER gezogen als
-    ///   die Capability (ein verschobener Tonwert trifft bei Druckdaten
-    ///   härter als im Seitenbild).
+    /// - Keine Maske: Die bestehende Verweigerungspolitik wird für den
+    ///   verlustbehafteten CMYK-Pfad bewusst STRENGER gezogen als die
+    ///   Capability (ein verschobener Tonwert trifft bei Druckdaten härter
+    ///   als im Seitenbild).
+    /// - /Decode nur als Vorgabe oder als Adobe-Umkehrung; beides ist exakt
+    ///   übersetzbar (siehe Polarität).
     static func lossyAllowed(resource: PDFImageResource,
                              options: ImageCompressionOptions) -> Bool {
         guard resource.terminalFilter == .dct,
@@ -53,7 +58,8 @@ enum CMYKReencode {
               !resource.hasExplicitMask,
               !resource.hasColorKeyMask,
               !resource.isImageMask,
-              !resource.hasDecodeArray,
+              !resource.hasEffectiveDecodeArray
+                || resource.hasInvertingCMYKDecodeArray,
               resource.colorSpace.allowsLossyReplacement == false
         else { return false }
 
@@ -67,10 +73,58 @@ enum CMYKReencode {
                 || (resource.effectiveDPI ?? 0) > options.targetDPI * 1.5
             return clearlyOversized
         case .small, .smart:
-            // Verlustfrei: 6a (Flate-Resample) und 6b (Repack) sind hier die
-            // einzigen CMYK-Pfade.
-            return false
+            return CompressionPlanner.plannedSize(for: resource,
+                                                  options: options) != nil
         }
+    }
+
+    /// Bleibt nach einem Scheitern der YCCK-Leiter noch der verlustfreie
+    /// Resize? Klein und Smart verkleinern dann wie zuvor als Flate; Quality
+    /// und Custom behalten das Bild (der 6b-Repack übernimmt).
+    static func fallsBackToLosslessResize(options: ImageCompressionOptions) -> Bool {
+        switch QualityGatePreset(ssimThreshold: options.ssimThreshold) {
+        case .small, .smart: return true
+        case .quality, .custom: return false
+        }
+    }
+
+    // MARK: - Polarität
+
+    // Drei gemessene Tatsachen (CoreGraphics, Ghostscript und Poppler stimmen
+    // überein; R = Abtastwert im JPEG, wie ein PDF-Leser ihn sieht):
+    //
+    //   Anzeige einer Quelle:   ohne /Decode R, mit [1 0 1 0 1 0 1 0] 255 − R
+    //   ImageIO liefert:        255 − R (das CGImage trägt selbst ein
+    //                           Umkehr-Decode, auch ohne Adobe-Marker)
+    //   Eingabe P in den Shim:  Die Datei trägt 255 − P, also Anzeige 255 − P
+    //
+    // Flate-Bytes werden dagegen wörtlich angezeigt. Die dekodierten Pixel
+    // eines CMYK-JPEGs direkt als Flate zu schreiben hieß deshalb: Ein Bild
+    // ohne /Decode kam als Negativ heraus.
+
+    /// Ist der Anzeigewert das Gegenteil der von ImageIO dekodierten Pixel?
+    /// Nur für CMYK-JPEGs ohne Umkehr-/Decode – alle anderen Bilder tragen
+    /// ihre Anzeigewerte bereits.
+    static func decodedPixelsAreInverted(resource: PDFImageResource) -> Bool {
+        resource.terminalFilter == .dct
+            && resource.colorSpace.componentCount == 4
+            && !resource.hasInvertingCMYKDecodeArray
+    }
+
+    /// Was ein Leser anzeigt, als Bild ohne /Decode – die Bytes für den
+    /// verlustfreien Resize und die Sicht des Gates. `nil`: Bild nicht lesbar.
+    static func displaySamples(_ image: CGImage,
+                               resource: PDFImageResource) -> CGImage? {
+        decodedPixelsAreInverted(resource: resource)
+            ? ImageResampler.invertedCMYK(image) : image
+    }
+
+    /// Eingabe für den YCCK-Kodierer: das Gegenteil der Anzeigewerte, weil
+    /// das Ergebnis ohne /Decode im Dokument steht.
+    static func encoderSamples(_ image: CGImage,
+                               resource: PDFImageResource) -> CGImage? {
+        decodedPixelsAreInverted(resource: resource)
+            ? image : ImageResampler.invertedCMYK(image)
     }
 
     // MARK: - Grenzwerte (Matrix-Stil)
@@ -92,14 +146,28 @@ enum CMYKReencode {
     /// gemessen liegen reine JPEG-Kandidaten (q0,85) auf CMYK-Fixtures bei
     /// ΔE ≈ 1, also bleibt 2,0 eine echte Sperre mit Abstand. Custom behält
     /// die Katakasten-Floors des Nutzerpfads (keine globale SSIM-Grenze,
-    /// ΔE 30 wie in der Custom-Zeile). Small/Smart erreichen den Pfad nicht;
-    /// sie erben die Quality-Zeile, damit die Tabelle total bleibt.
+    /// ΔE 30 wie in der Custom-Zeile). Klein und Smart nehmen ihre eigene
+    /// Foto-Zeile für SSIM, die Farbgrenzen gelten unverändert.
     static func limits(preset: QualityGatePreset) -> Limits {
         switch preset {
-        case .quality, .small, .smart:
+        case .quality:
             return Limits(
                 policy: QualityGatePolicy(globalSSIM: 0.95, p05TileSSIM: 0.85,
                                           edgeWeightedScore: 0.83,
+                                          textRegionScore: nil,
+                                          maxDeltaE76: 2.0),
+                maxTileDeltaE76: 6.0)
+        case .smart:
+            return Limits(
+                policy: QualityGatePolicy(globalSSIM: 0.90, p05TileSSIM: 0.80,
+                                          edgeWeightedScore: 0.78,
+                                          textRegionScore: nil,
+                                          maxDeltaE76: 2.0),
+                maxTileDeltaE76: 6.0)
+        case .small:
+            return Limits(
+                policy: QualityGatePolicy(globalSSIM: 0.86, p05TileSSIM: 0.76,
+                                          edgeWeightedScore: 0.74,
                                           textRegionScore: nil,
                                           maxDeltaE76: 2.0),
                 maxTileDeltaE76: 6.0)
@@ -149,9 +217,32 @@ enum CMYKReencode {
                            candidateJPEG: Data,
                            limits: Limits) -> Bool {
         // Marker-Erhalt: transform 2 ist das geschriebene YCCK-Format.
-        guard adobeTransformByte(candidateJPEG) == 2 else { return false }
-        guard let candidate = ImageResampler.decodeJPEG(candidateJPEG),
-              let referenceSample = QualityGates.sample(reference),
+        guard adobeTransformByte(candidateJPEG) == 2,
+              let candidate = ImageResampler.decodeJPEG(candidateJPEG)
+        else { return false }
+        return passesGate(reference: reference, candidate: candidate,
+                          limits: limits)
+    }
+
+    /// Dasselbe Gate in der Anzeigesicht: Das Auge sieht nicht die von ImageIO
+    /// dekodierten Pixel, sondern deren Gegenteil. In der falschen Sicht läge
+    /// die weiße Papierfläche als tiefes Schwarz vor, wo ΔE und SSIM Fehler
+    /// kaum noch sehen. `displayReference` trägt die Anzeigewerte.
+    static func passesDisplayGate(displayReference: CGImage,
+                                  candidateJPEG: Data,
+                                  limits: Limits) -> Bool {
+        guard adobeTransformByte(candidateJPEG) == 2,
+              let decoded = ImageResampler.decodeJPEG(candidateJPEG),
+              let candidate = ImageResampler.invertedCMYK(decoded)
+        else { return false }
+        return passesGate(reference: displayReference, candidate: candidate,
+                          limits: limits)
+    }
+
+    private static func passesGate(reference: CGImage,
+                                   candidate: CGImage,
+                                   limits: Limits) -> Bool {
+        guard let referenceSample = QualityGates.sample(reference),
               let candidateSample = QualityGates.sample(candidate)
         else { return false }
         guard let measurement = QualityGates.measure(reference: referenceSample,
