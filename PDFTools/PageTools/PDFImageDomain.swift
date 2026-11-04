@@ -44,6 +44,15 @@ struct PDFImagePlacement: Hashable, Codable, Sendable {
     /// So viel höher ist die Auflösung gegenüber der nominellen Seitengröße.
     /// nil = die Seitengröße stimmt.
     var pageSizeDPIScale: Double? = nil
+    /// Das Bild liegt nicht im XObject-Baum der Seite, sondern hinter einem
+    /// Muster, einer Annotation oder einer Soft-Mask-Gruppe. Solche Stellen
+    /// sagen nichts über die Art der Seite: Scan-Erkennung und MRC sehen sie
+    /// nicht (`pageContentPlacements`).
+    var isOffPage: Bool? = nil
+    /// Die Geometrie ist nicht verlässlich bestimmbar. Dann gilt für das GANZE
+    /// Bild nur das Kantenlimit: Die übrigen Platzierungen dürfen es nicht
+    /// allein bestimmen.
+    var forbidsDPIPolicy: Bool? = nil
 }
 
 /// Scans, deren Seitengröße nichts über die Vorlage aussagt.
@@ -336,10 +345,17 @@ struct PDFImageResource: Hashable, Codable, Sendable {
         filters.last { $0 != .ascii85 && $0 != .asciiHex }
     }
 
+    /// Die Platzierungen im XObject-Baum der Seite: Grundlage aller Urteile über
+    /// die Seite selbst (Scan, Foto, MRC-Dominante).
+    var pageContentPlacements: [PDFImagePlacement] {
+        placements.filter { $0.isOffPage != true }
+    }
+
     /// Höchste effektive Auflösung über alle Platzierungen.
     /// Ein Bild, das einmal klein und einmal groß platziert ist, darf nur so
     /// weit verkleinert werden, wie es die GRÖSSTE Platzierung erlaubt.
     var effectiveDPI: Double? {
+        if placements.contains(where: { $0.forbidsDPIPolicy == true }) { return nil }
         let values = placements.compactMap { placement -> Double? in
             guard placement.placedWidthPoints > 1 else { return nil }
             return Double(width) / placement.placedWidthPoints * 72.0

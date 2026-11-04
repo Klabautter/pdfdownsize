@@ -757,6 +757,7 @@ struct ImagePlacement {
     QPDFObjGen objGen{};
     double placedW = 0;   // Platzierung in pt (aus cm/Do-Scan, Phase 23b)
     double placedH = 0;
+    bool offPage = false; // erreicht über Muster, Annotation oder Maskengruppe
 };
 
 std::string strip_slash(std::string s)
@@ -966,6 +967,245 @@ void collect_form_resources(QPDFObjectHandle res, int pageIdx,
     }
 }
 
+// ============================================================================
+// Bilder außerhalb des XObject-Baums der Seite
+// ============================================================================
+
+/// Eine Kante im Zeichengraphen einer Seite: Wer (parent) zeichnet was
+/// (target), und mit welcher eigenen Matrix. Die Bilder hinter tiling Patterns,
+/// Annotations-Appearances und Soft-Mask-Gruppen sieht walk_resources nicht.
+/// Die Geometrie entsteht wie bei den Formen im Swift-Scan der Content-Bytes
+/// (siehe `offPagePlacements`); hier steht nur die Struktur.
+struct PaintEdge {
+    QPDFObjGen parent;   // -1|-1 = die Seite selbst
+    char const* kind;    // image, form, pattern, softmask, annot
+    std::string name;    // Name in der Map des Eltern-Contents (annot: leer)
+    QPDFObjGen target;
+    bool hasMatrix = false;   // false = Geometrie nicht verlässlich bestimmbar
+    double m[6] = {1, 0, 0, 1, 0, 0};
+};
+
+bool read_numbers(QPDFObjectHandle const& arr, int n, double* out)
+{
+    if (!arr.isArray() || arr.getArrayNItems() != n) { return false; }
+    for (int i = 0; i < n; ++i) {
+        QPDFObjectHandle item = arr.getArrayItem(i);
+        if (!(item.isInteger() || item.isReal())) { return false; }
+        out[i] = item.getNumericValue();
+        if (!std::isfinite(out[i])) { return false; }
+    }
+    return true;
+}
+
+/// /Matrix eines Streams: fehlt sie, gilt die Einheitsmatrix. Eine kaputte oder
+/// singuläre Matrix heißt „unbekannt“ – raten würde das Bild verschwimmen lassen.
+bool stream_matrix(QPDFObjectHandle const& dict, double* m)
+{
+    QPDFObjectHandle matrix = dict.getKey("/Matrix");
+    if (matrix.isNull()) {
+        m[0] = 1; m[1] = 0; m[2] = 0; m[3] = 1; m[4] = 0; m[5] = 0;
+        return true;
+    }
+    if (!read_numbers(matrix, 6, m)) { return false; }
+    return std::fabs(m[0] * m[3] - m[1] * m[2]) > 1e-12;
+}
+
+/// Musterzelle: /XStep und /YStep ändern die Größe des Motivs nicht, sie
+/// wiederholen es nur. Fehlen sie oder sind 0, ist das Muster aber nicht
+/// wohldefiniert, und die Matrix allein sagt nichts mehr aus.
+bool pattern_matrix(QPDFObjectHandle const& dict, double* m)
+{
+    double bbox[4];
+    if (!read_numbers(dict.getKey("/BBox"), 4, bbox)
+        || bbox[0] == bbox[2] || bbox[1] == bbox[3]) { return false; }
+    QPDFObjectHandle xs = dict.getKey("/XStep");
+    QPDFObjectHandle ys = dict.getKey("/YStep");
+    if (!(xs.isInteger() || xs.isReal()) || !(ys.isInteger() || ys.isReal())
+        || xs.getNumericValue() == 0 || ys.getNumericValue() == 0) { return false; }
+    return stream_matrix(dict, m);
+}
+
+/// PDF 32000-1, 12.5.5, Algorithmus 8.1: AA = /Matrix × A, wobei A die mit
+/// /Matrix transformierte /BBox auf /Rect abbildet. NoZoom (Bit 4) entkoppelt
+/// die Größe von der Seite: dort gibt es keine verlässliche Platzierung.
+bool annotation_matrix(QPDFObjectHandle const& annot, QPDFObjectHandle const& dict,
+                       double* out)
+{
+    QPDFObjectHandle flags = annot.getKey("/F");
+    if (flags.isInteger() && (flags.getIntValue() & 8)) { return false; }
+    double rect[4], bbox[4], m[6];
+    if (!read_numbers(annot.getKey("/Rect"), 4, rect)
+        || !read_numbers(dict.getKey("/BBox"), 4, bbox)
+        || !stream_matrix(dict, m)) { return false; }
+    double const cornersX[4] = {bbox[0], bbox[2], bbox[2], bbox[0]};
+    double const cornersY[4] = {bbox[1], bbox[1], bbox[3], bbox[3]};
+    double minX = 0, maxX = 0, minY = 0, maxY = 0;
+    for (int i = 0; i < 4; ++i) {
+        double x = cornersX[i] * m[0] + cornersY[i] * m[2] + m[4];
+        double y = cornersX[i] * m[1] + cornersY[i] * m[3] + m[5];
+        minX = i ? std::min(minX, x) : x;
+        maxX = i ? std::max(maxX, x) : x;
+        minY = i ? std::min(minY, y) : y;
+        maxY = i ? std::max(maxY, y) : y;
+    }
+    double const rx0 = std::min(rect[0], rect[2]), rx1 = std::max(rect[0], rect[2]);
+    double const ry0 = std::min(rect[1], rect[3]), ry1 = std::max(rect[1], rect[3]);
+    if (maxX - minX <= 0 || maxY - minY <= 0 || rx1 - rx0 <= 0 || ry1 - ry0 <= 0) {
+        return false;
+    }
+    double const sx = (rx1 - rx0) / (maxX - minX);
+    double const sy = (ry1 - ry0) / (maxY - minY);
+    double const tx = rx0 - minX * sx;
+    double const ty = ry0 - minY * sy;
+    out[0] = m[0] * sx; out[1] = m[1] * sy;
+    out[2] = m[2] * sx; out[3] = m[3] * sy;
+    out[4] = m[4] * sx + tx; out[5] = m[5] * sy + ty;
+    return true;
+}
+
+/// Zeichengraph einer Seite, je Container höchstens einmal abgestiegen
+/// (Zykeln), mit demselben Budget wie collect_form_resources.
+struct PaintGraph {
+    std::vector<PaintEdge> edges;
+    /// /Resources der Container, ab denen Bilder nicht mehr im XObject-Baum
+    /// der Seite liegen. walk_resources holt von dort die Bild-Zeilen.
+    std::vector<QPDFObjectHandle> offPageRoots;
+    std::set<QPDFObjGen> visited;
+};
+
+void collect_paint_edges(QPDFObjectHandle res, QPDFObjGen parent, PaintGraph& g);
+
+void descend_paint_edges(QPDFObjectHandle const& stream, bool offPage, PaintGraph& g)
+{
+    QPDFObjGen og = stream.getObjGen();
+    if (g.visited.count(og) || g.visited.size() >= 64) { return; }
+    g.visited.insert(og);
+    QPDFObjectHandle own = dict_of(stream).getKey("/Resources");
+    if (offPage && own.isDictionary()) { g.offPageRoots.push_back(own); }
+    collect_paint_edges(own, og, g);
+}
+
+void collect_paint_edges(QPDFObjectHandle res, QPDFObjGen parent, PaintGraph& g)
+{
+    if (res.isNull() || !res.isDictionary()) { return; }
+    QPDFObjectHandle xobjs = res.getKey("/XObject");
+    if (xobjs.isDictionary()) {
+        for (auto const& key : xobjs.getKeys()) {
+            QPDFObjectHandle xo = xobjs.getKey(key);
+            if (!xo.isStream()) { continue; }
+            QPDFObjectHandle dict = dict_of(xo);
+            QPDFObjectHandle st = dict.getKey("/Subtype");
+            if (!st.isName()) { continue; }
+            PaintEdge e;
+            e.parent = parent;
+            e.name = key;
+            e.target = xo.getObjGen();
+            if (st.getName() == "/Image") {
+                e.kind = "image";
+                e.hasMatrix = true;
+                g.edges.push_back(e);
+            } else if (st.getName() == "/Form") {
+                e.kind = "form";
+                e.hasMatrix = stream_matrix(dict, e.m);
+                g.edges.push_back(e);
+                descend_paint_edges(xo, false, g);
+            }
+        }
+    }
+    QPDFObjectHandle patterns = res.getKey("/Pattern");
+    if (patterns.isDictionary()) {
+        for (auto const& key : patterns.getKeys()) {
+            QPDFObjectHandle pat = patterns.getKey(key);
+            if (!pat.isStream()) { continue; }   // Shading-Muster: Dictionary
+            QPDFObjectHandle dict = dict_of(pat);
+            QPDFObjectHandle type = dict.getKey("/PatternType");
+            if (!type.isInteger() || type.getIntValue() != 1) { continue; }
+            PaintEdge e;
+            e.parent = parent;
+            e.kind = "pattern";
+            e.name = key;
+            e.target = pat.getObjGen();
+            e.hasMatrix = pattern_matrix(dict, e.m);
+            g.edges.push_back(e);
+            descend_paint_edges(pat, true, g);
+        }
+    }
+    QPDFObjectHandle states = res.getKey("/ExtGState");
+    if (states.isDictionary()) {
+        for (auto const& key : states.getKeys()) {
+            QPDFObjectHandle state = states.getKey(key);
+            if (!state.isDictionary()) { continue; }
+            QPDFObjectHandle smask = state.getKey("/SMask");
+            if (!smask.isDictionary()) { continue; }
+            QPDFObjectHandle group = smask.getKey("/G");
+            if (!group.isStream()) { continue; }
+            PaintEdge e;
+            e.parent = parent;
+            e.kind = "softmask";
+            e.name = key;
+            e.target = group.getObjGen();
+            e.hasMatrix = stream_matrix(dict_of(group), e.m);
+            g.edges.push_back(e);
+            descend_paint_edges(group, true, g);
+        }
+    }
+}
+
+/// Annotations-Appearances, und zwar NUR, was beim Rendern gezeichnet wird:
+/// /AP /N (bei Zustands-Dictionaries der aktive Zustand /AS), keine versteckte
+/// Annotation. Alles andere sieht kein Rendervergleich – es bleibt unverändert.
+void collect_annotation_edges(QPDFObjectHandle const& page, PaintGraph& g)
+{
+    QPDFObjectHandle annots = page.getKey("/Annots");
+    if (!annots.isArray()) { return; }
+    for (auto const& annot : annots.getArrayAsVector()) {
+        if (!annot.isDictionary()) { continue; }
+        QPDFObjectHandle flags = annot.getKey("/F");
+        if (flags.isInteger() && (flags.getIntValue() & (2 | 32))) { continue; }
+        QPDFObjectHandle ap = annot.getKey("/AP");
+        if (!ap.isDictionary()) { continue; }
+        QPDFObjectHandle appearance = ap.getKey("/N");
+        if (appearance.isDictionary()) {
+            QPDFObjectHandle state = annot.getKey("/AS");
+            if (!state.isName()) { continue; }
+            appearance = appearance.getKey(state.getName());
+        }
+        if (!appearance.isStream()) { continue; }
+        PaintEdge e;
+        e.parent = QPDFObjGen(-1, -1);
+        e.kind = "annot";
+        e.target = appearance.getObjGen();
+        e.hasMatrix = annotation_matrix(annot, dict_of(appearance), e.m);
+        g.edges.push_back(e);
+        descend_paint_edges(appearance, true, g);
+    }
+}
+
+PaintGraph paint_graph_of_page(QPDFObjectHandle const& page)
+{
+    PaintGraph g;
+    collect_paint_edges(resolve_inheritable(page, "/Resources"),
+                        QPDFObjGen(-1, -1), g);
+    collect_annotation_edges(page, g);
+    return g;
+}
+
+/// Bild-Zeilen hinter den Containern des Graphen, je Objekt eine.
+void append_off_page_images(PaintGraph const& g, int pageIdx,
+                            std::vector<ImagePlacement>& out)
+{
+    std::set<QPDFObjGen> seen;
+    for (auto const& root : g.offPageRoots) {
+        std::vector<ImagePlacement> found;
+        walk_resources(root, pageIdx, 0, found);
+        for (auto& p : found) {
+            if (!seen.insert(p.objGen).second) { continue; }
+            p.offPage = true;
+            out.push_back(p);
+        }
+    }
+}
+
 } // namespace
 
 // ============================================================================
@@ -1031,6 +1271,7 @@ static std::vector<std::string> const& ensure_list(pdfcore_document_t& doc, int 
         for (auto const& pg : pages) {
             walk_resources(
                 resolve_inheritable(pg, "/Resources"), pi, 0, placements);
+            append_off_page_images(paint_graph_of_page(pg), pi, placements);
             ++pi;
         }
         std::map<QPDFObjGen, std::set<int>> byObj;
@@ -1052,7 +1293,37 @@ static std::vector<std::string> const& ensure_list(pdfcore_document_t& doc, int 
                 std::to_string(pl.mask) + "|" +
                 (pl.imageMask ? "1" : "0") + "|" +
                 (pl.decodeArray.empty() ? "-" : pl.decodeArray) + "|" +
-                std::to_string(pl.rawLength));
+                std::to_string(pl.rawLength) + "|" +
+                (pl.offPage ? "1" : "0"));
+        }
+    } else if (list_id == PDFCORE_LIST_PAINT_EDGES) {
+        auto pages = doc.qpdf.getAllPages();
+        int pi = 0;
+        for (auto const& pg : pages) {
+            PaintGraph g = paint_graph_of_page(pg);
+            std::vector<ImagePlacement> offPage;
+            append_off_page_images(g, pi, offPage);
+            // Nur Seiten mit solchen Bildern: Der Swift-Scan kostet je Seite.
+            if (!offPage.empty()) {
+                for (auto const& e : g.edges) {
+                    std::string matrix = "-";
+                    if (e.hasMatrix) {
+                        char buf[192];
+                        std::snprintf(buf, sizeof(buf), "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g",
+                                      e.m[0], e.m[1], e.m[2], e.m[3], e.m[4], e.m[5]);
+                        matrix = buf;
+                    }
+                    list.push_back(std::to_string(pi) + "|" +
+                        std::to_string(e.parent.getObj()) + "|" +
+                        std::to_string(e.parent.getGen()) + "|" +
+                        e.kind + "|" +
+                        sanitize_list_field(strip_slash(e.name)) + "|" +
+                        std::to_string(e.target.getObj()) + "|" +
+                        std::to_string(e.target.getGen()) + "|" +
+                        matrix);
+                }
+            }
+            ++pi;
         }
     } else if (list_id == PDFCORE_LIST_FORM_RESOURCES) {
         auto pages = doc.qpdf.getAllPages();
@@ -8244,6 +8515,13 @@ int pdfcore_remove_unused_resources(pdfcore_document_t *doc,
                         } else if (appearance.isArray()) {
                             for (auto const& item :
                                  appearance.getArrayAsVector()) {
+                                if (item.isStream()) { streams.push_back(item); }
+                            }
+                        } else if (appearance.isDictionary()) {
+                            // Zustände (/Yes, /Off): Teilen sie sich /Resources
+                            // mit der Seite, darf ihre Nutzung nicht fehlen.
+                            for (auto const& state : appearance.getKeys()) {
+                                QPDFObjectHandle item = appearance.getKey(state);
                                 if (item.isStream()) { streams.push_back(item); }
                             }
                         }

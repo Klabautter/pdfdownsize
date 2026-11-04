@@ -132,6 +132,9 @@ final class PDFCoreDocument {
         /// Phase 23c – Form-XObject-Ressourcen (Platzierungsgeometrie in
         /// Formen). Format siehe PDFCORE_LIST_FORM_RESOURCES im C-Header.
         case formResources = 10
+        /// Zeichengraph der Seiten mit Bildern außerhalb ihres XObject-Baums.
+        /// Format siehe PDFCORE_LIST_PAINT_EDGES im C-Header.
+        case paintEdges = 11
     }
 
     func stringList(_ kind: StringListKind) throws -> [String] {
@@ -368,6 +371,9 @@ struct PDFCoreImageInfo: Equatable {
     let decodeArray: [Double]
     var hasDecodeArray: Bool { !decodeArray.isEmpty }
     let encodedByteCount: Int
+    /// Erreicht über Muster, Annotation oder Maskengruppe, nicht über den
+    /// XObject-Baum der Seite: Der Name gilt nicht im Seiten-Content.
+    var isOffPage: Bool = false
 
     /// Effective DPI gemäß Platzierung; 0 wenn unbekannt.
     var effectiveDPI: Double {
@@ -403,7 +409,8 @@ extension PDFCoreDocument {
                 isImageMask: f[14] == "1",
                 decodeArray: f[15] == "-" ? []
                     : f[15].split(separator: ",").compactMap { Double($0) },
-                encodedByteCount: Int(f[16]) ?? -1))
+                encodedByteCount: Int(f[16]) ?? -1,
+                isOffPage: f.count > 17 && f[17] == "1"))
         }
         return out
     }
@@ -429,7 +436,8 @@ extension PDFCoreDocument {
         var placedByPageAndName: [String: (Double, Double)] = [:]
         // Lage auf der Seite (CTM beim Do) – für die OCR eingebetteter Fotos.
         var transformByPageAndName: [String: [Double]] = [:]
-        for pageIndex in Set(placements.map(\.pageIndex)).sorted() where pageIndex < pageCount {
+        for pageIndex in Set(placements.filter { !$0.isOffPage }.map(\.pageIndex)).sorted()
+        where pageIndex < pageCount {
             guard let bytes = try? pageContentBytes(pageIndex: pageIndex) else { continue }
             var scanner = CMDoScanner(bytes: bytes)
             for placement in scanner.scan() where placement.placedW > 0 {
@@ -448,6 +456,9 @@ extension PDFCoreDocument {
         // je (Seite, Objektidentität) statt je Name: Form-Bilder können in
         // verschiedenen Formen unter demselben Namen stehen.
         let placedByPageAndObject = try formPlacementSizes()
+        // Bilder außerhalb des XObject-Baums: eigene Quelle, nie über den Namen.
+        let offPage = placements.contains(where: \.isOffPage)
+            ? try offPagePlacements() : OffPagePlacements()
 
         // Beide Quellen ergänzen sich; die GRÖSSTE bekannte Platzierung zählt
         // (bestehende Regel – sie limitiert das Verkleinern am stärksten,
@@ -455,6 +466,7 @@ extension PDFCoreDocument {
         func placedSize(of info: PDFCoreImageInfo) -> (Double, Double) {
             let key = "\(info.pageIndex)|\(Self.normalizedResourceName(info.name))"
             let formKey = "\(info.pageIndex)|\(info.objectID.objectNumber)|\(info.objectID.generation)"
+            if info.isOffPage { return offPage.sizes[formKey] ?? (0, 0) }
             var placed = (0.0, 0.0)
             for candidate in [placedByPageAndName[key],
                               placedByPageAndObject[formKey]].compactMap({ $0 })
@@ -466,7 +478,7 @@ extension PDFCoreDocument {
 
         // Übergroße Scan-Seiten: Die Korrektur gilt für die ganze Seite.
         var pageSizeDPIScales: [Int: Double] = [:]
-        for info in placements where pageSizeDPIScales[info.pageIndex] == nil {
+        for info in placements where pageSizeDPIScales[info.pageIndex] == nil && !info.isOffPage {
             let placed = placedSize(of: info)
             guard max(placed.0, placed.1) > OversizedScanPage.minimumLongEdgePoints * 0.9,
                   info.pageIndex < pageCount else { continue }
@@ -497,16 +509,31 @@ extension PDFCoreDocument {
                     unknown.append(raw)
                 }
             }
+            // Eine unbekannte Platzierung neben einer bekannten: Die bekannte
+            // darf das Bild nicht allein bestimmen, sonst verschwimmt es an
+            // der unbekannten Stelle. Es bleibt beim Kantenlimit.
+            let anyPlacementMissing = infos.contains { placedSize(of: $0).0 <= 1 }
             let placementModels = infos.map { info -> PDFImagePlacement in
                 let key = "\(info.pageIndex)|\(Self.normalizedResourceName(info.name))"
                 let placed = placedSize(of: info)
+                guard info.isOffPage else {
+                    return PDFImagePlacement(
+                        pageIndex: info.pageIndex,
+                        resourceName: info.name,
+                        placedWidthPoints: placed.0,
+                        placedHeightPoints: placed.1,
+                        transform: transformByPageAndName[key],
+                        pageSizeDPIScale: pageSizeDPIScales[info.pageIndex])
+                }
+                let objectKey = "\(info.pageIndex)|\(objectID.objectNumber)|\(objectID.generation)"
+                let unknown = anyPlacementMissing || offPage.unknown.contains(objectKey)
                 return PDFImagePlacement(
                     pageIndex: info.pageIndex,
                     resourceName: info.name,
-                    placedWidthPoints: placed.0,
-                    placedHeightPoints: placed.1,
-                    transform: transformByPageAndName[key],
-                    pageSizeDPIScale: pageSizeDPIScales[info.pageIndex])
+                    placedWidthPoints: unknown ? 0 : placed.0,
+                    placedHeightPoints: unknown ? 0 : placed.1,
+                    isOffPage: true,
+                    forbidsDPIPolicy: unknown ? true : nil)
             }
             return PDFImageResource(
                 objectID: objectID,
@@ -700,6 +727,176 @@ extension PDFCoreDocument {
             }
         }
         return placed
+    }
+
+    // MARK: Bilder außerhalb des XObject-Baums der Seite
+
+    /// Ergebnis von `offPagePlacements`, beides je „Seite|Objekt|Generation“.
+    struct OffPagePlacements {
+        /// Größte Platzierung in Punkten der Seite.
+        var sizes: [String: (Double, Double)] = [:]
+        /// Mindestens ein Weg zum Bild hat keine verlässliche Geometrie.
+        var unknown: Set<String> = []
+    }
+
+    /// Budget der Container-Besuche je Seite. Dieselbe Form darf mit mehreren
+    /// Skalen besucht werden, deshalb mehr als die 64 Formen des Sammel-Walks.
+    private static let maxPaintVisitsPerPage = 256
+
+    /// Eine Kante des Zeichengraphen (PDFCORE_LIST_PAINT_EDGES).
+    private struct PaintEdge {
+        let parent: PDFObjectID?
+        let kind: String
+        let name: String
+        let target: PDFObjectID
+        /// nil = Geometrie nicht verlässlich bestimmbar.
+        let matrix: [Double]?
+    }
+
+    /// `m` nach `n` in PDF-Zeilenvektor-Konvention (wie der `cm` im Scanner).
+    private static func concat(_ m: [Double], _ n: [Double]) -> [Double] {
+        [m[0] * n[0] + m[1] * n[2], m[0] * n[1] + m[1] * n[3],
+         m[2] * n[0] + m[3] * n[2], m[2] * n[1] + m[3] * n[3],
+         m[4] * n[0] + m[5] * n[2] + n[4], m[4] * n[1] + m[5] * n[3] + n[5]]
+    }
+
+    /// Platzierung über den Zeichengraphen mit vollen Matrizen.
+    ///
+    /// Die Koordinatensysteme (`base` bildet den Raum eines Containers auf die
+    /// Seite ab):
+    /// - Form: /Matrix × CTM beim `Do` × base.
+    /// - Tiling Pattern: /Matrix × base des ELTERN-Containers. Die CTM beim
+    ///   Füllen zählt NICHT (PDF 32000-1, 8.7.3.1), /XStep und /YStep
+    ///   wiederholen nur und skalieren nichts.
+    /// - Soft-Mask-Gruppe: /Matrix × CTM beim `gs` × base (11.6.5.3).
+    /// - Annotation: fertig aus dem C-Kern (Algorithmus 8.1).
+    ///
+    /// Ein Weg ohne verlässliche Geometrie macht das Bild unbekannt, statt zu
+    /// raten: Falsche DPI verschwimmen das Bild, das Kantenlimit nicht.
+    private func offPagePlacements() throws -> OffPagePlacements {
+        var edgesByPage: [Int: [PDFObjectID?: [PaintEdge]]] = [:]
+        for line in try stringList(.paintEdges) {
+            let f = line.split(separator: "|", omittingEmptySubsequences: false)
+                .map(String.init)
+            guard f.count == 8, let page = Int(f[0]),
+                  let parentObj = Int(f[1]), let parentGen = Int(f[2]),
+                  let targetObj = Int(f[5]), let targetGen = Int(f[6]) else { continue }
+            let numbers = f[7].split(separator: ",").compactMap { Double($0) }
+            let parent = parentObj < 0
+                ? nil : PDFObjectID(objectNumber: parentObj, generation: parentGen)
+            edgesByPage[page, default: [:]][parent, default: []].append(PaintEdge(
+                parent: parent, kind: f[3], name: f[4],
+                target: PDFObjectID(objectNumber: targetObj, generation: targetGen),
+                matrix: numbers.count == 6 ? numbers : nil))
+        }
+
+        var result = OffPagePlacements()
+        var scans: [PDFObjectID: CMDoScanner] = [:]
+
+        for (pageIndex, edges) in edgesByPage.sorted(by: { $0.key < $1.key }) {
+            func key(_ id: PDFObjectID) -> String {
+                "\(pageIndex)|\(id.objectNumber)|\(id.generation)"
+            }
+            var visits = 0
+            var exhausted = false
+
+            func scanner(of container: PDFObjectID?) throws -> CMDoScanner? {
+                guard let container else {
+                    var scan = CMDoScanner(bytes: try pageContentBytes(pageIndex: pageIndex))
+                    scan.placements = scan.scan()
+                    return scan
+                }
+                if let cached = scans[container] { return cached }
+                guard let raw = objectStreamBytes(objectID: container, decoded: false),
+                      raw.count <= Self.formContentByteLimit,
+                      let decoded = objectStreamBytes(objectID: container, decoded: true),
+                      decoded.count <= Self.formContentByteLimit else { return nil }
+                var scan = CMDoScanner(bytes: [UInt8](decoded))
+                scan.placements = scan.scan()
+                scans[container] = scan
+                return scan
+            }
+
+            func visit(_ container: PDFObjectID?, base: [Double]?,
+                       path: Set<PDFObjectID>, depth: Int) throws {
+                guard let children = edges[container] else { return }
+                visits += 1
+                guard depth < Self.maxFormDepth, visits <= Self.maxPaintVisitsPerPage else {
+                    exhausted = true
+                    return
+                }
+                let scan = base == nil ? nil : try scanner(of: container)
+
+                // Gleiche lineare Abbildung = gleiche Größe: Tausend Kacheln
+                // derselben Form besuchen sie nur einmal.
+                func distinct(_ transforms: [[Double]]) -> [[Double]] {
+                    var seen: Set<[Double]> = []
+                    return transforms.filter { seen.insert(Array($0.prefix(4))).inserted }
+                }
+
+                for edge in children {
+                    guard !path.contains(edge.target) else { continue }
+                    let nextPath = path.union([edge.target])
+                    func descend(_ next: [Double]?) throws {
+                        try visit(edge.target, base: next, path: nextPath, depth: depth + 1)
+                    }
+                    if base == nil || scan == nil {
+                        if edge.kind == "image" {
+                            result.unknown.insert(key(edge.target))
+                        } else {
+                            try descend(nil)
+                        }
+                        continue
+                    }
+                    let current = base!
+                    let drawn = distinct((scan!.placements ?? [])
+                        .filter { Self.normalizedResourceName($0.name) == edge.name }
+                        .map(\.transform))
+                    switch edge.kind {
+                    case "image":
+                        for transform in drawn {
+                            let m = Self.concat(transform, current)
+                            let size = ((m[0] * m[0] + m[1] * m[1]).squareRoot(),
+                                        (m[2] * m[2] + m[3] * m[3]).squareRoot())
+                            let k = key(edge.target)
+                            if (result.sizes[k]?.0 ?? 0) < size.0 { result.sizes[k] = size }
+                        }
+                    case "form":
+                        for transform in drawn {
+                            try descend(edge.matrix.map {
+                                Self.concat($0, Self.concat(transform, current))
+                            })
+                        }
+                    case "softmask":
+                        let states = distinct(scan!.graphicsStates
+                            .filter { Self.normalizedResourceName($0.name) == edge.name }
+                            .map(\.transform))
+                        for transform in states {
+                            try descend(edge.matrix.map {
+                                Self.concat($0, Self.concat(transform, current))
+                            })
+                        }
+                    case "pattern":
+                        try descend(edge.matrix.map { Self.concat($0, current) })
+                    case "annot":
+                        try descend(edge.matrix)
+                    default:
+                        break
+                    }
+                }
+            }
+
+            try visit(nil, base: [1, 0, 0, 1, 0, 0], path: [], depth: 0)
+            if exhausted {
+                // Budget erschöpft: Die fehlenden Wege könnten größer sein.
+                for targets in edges.values {
+                    for edge in targets where edge.kind == "image" {
+                        result.unknown.insert(key(edge.target))
+                    }
+                }
+            }
+        }
+        return result
     }
 }
 
@@ -2007,6 +2204,10 @@ struct CMDoScanner {
     var lastName: String = ""
     var inInlineImage = false
     var stack: [Double] = []
+    /// `gs` mit CTM: Eine Soft-Mask-Gruppe erbt die CTM beim Setzen des Zustands.
+    var graphicsStates: [(name: String, transform: [Double])] = []
+    /// Ablage für das Ergebnis von `scan()`, wenn der Scanner gecacht wird.
+    var placements: [(name: String, placedW: Double, placedH: Double, transform: [Double])]?
 
     mutating func scan() -> [(name: String, placedW: Double, placedH: Double, transform: [Double])] {
         var results: [(String, Double, Double, [Double])] = []
@@ -2061,6 +2262,11 @@ struct CMDoScanner {
                     let wp = (a*a+b*b).squareRoot()
                     let hp = (c*c+d*d).squareRoot()
                     results.append((lastName, wp, hp, [a, b, c, d, e, f]))
+                }
+                lastName = ""; stack.removeAll()
+            } else if matchKeyword("gs") {
+                if !lastName.isEmpty {
+                    graphicsStates.append((lastName, [a, b, c, d, e, f]))
                 }
                 lastName = ""; stack.removeAll()
             } else if isKnownOperator() {

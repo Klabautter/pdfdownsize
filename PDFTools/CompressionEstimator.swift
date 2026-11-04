@@ -392,7 +392,7 @@ enum CompressionEstimator {
               resource.bitsPerComponent == 8,
               resource.pixelColorSpace.allowsLossyReplacement,
               resource.placements.count == 1,
-              let placement = resource.placements.first,
+              let placement = resource.pageContentPlacements.first,
               min(placement.placedWidthPoints, placement.placedHeightPoints)
                 >= QuickModel.scanMinimumShortSidePoints,
               max(placement.placedWidthPoints, placement.placedHeightPoints)
