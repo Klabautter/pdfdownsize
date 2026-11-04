@@ -507,6 +507,11 @@ enum CandidateGenerator {
             }
         }
 
+        /// Raster, gegen das die Gates messen (siehe `CompressionPlanner`).
+        var referenceSize: PixelSize? {
+            CompressionPlanner.referenceSize(for: resource, pixels: pixels)
+        }
+
         // MARK: Ablage
 
         /// Nimmt einen Kandidaten auf, sofern Budget und Never-Grow es
@@ -548,8 +553,8 @@ enum CandidateGenerator {
 
         /// Measure against native pixels, including the loss from resizing/color conversion.
         private func sourceMeasurement(target: PixelSize, components: Int) -> QualityGateMeasurement? {
-            let native = PixelSize(width: resource.width, height: resource.height)
-            guard let decodedOriginal = decodedRaster(for: native),
+            guard let native = referenceSize,
+                  let decodedOriginal = decodedRaster(for: native),
                   let input = decodedRaster(for: target),
                   let transformed = ImageResampler.resize(input, to: target, components: components),
                   let original = options.forceGrayscale
@@ -714,7 +719,7 @@ enum CandidateGenerator {
                 return
             }
             guard resource.pixelCount
-                    <= CompressionPlanner.maximumDecodablePixels else {
+                    <= CompressionPlanner.maximumReducibleSourcePixels else {
                 finishStructural(.pixelBudgetExceeded(pixels: resource.pixelCount))
                 return
             }
@@ -746,6 +751,14 @@ enum CandidateGenerator {
             guard plannedTarget.width <= resource.width,
                   plannedTarget.height <= resource.height else {
                 finishStructural(.neverUpscale)
+                return
+            }
+            // Speichergrenze: Es zählen die Pixel, die für Ziel und Referenz
+            // der Gates wirklich dekodiert werden, nicht die der Quelle.
+            guard CompressionPlanner.canDecode(resource, target: plannedTarget,
+                                               pixels: pixels),
+                  referenceSize != nil else {
+                finishStructural(.pixelBudgetExceeded(pixels: resource.pixelCount))
                 return
             }
 
@@ -816,6 +829,7 @@ enum CandidateGenerator {
                   let target = CompressionPlanner.plannedSize(
                       for: resource, options: options,
                       dpi: ImageCompressionOptions.smartDocumentScanDPI),
+                  CompressionPlanner.canDecode(resource, target: target, pixels: pixels),
                   let raster = decodedRaster(for: target),
                   let features = StageTimer.run(stageTimer, .featureAnalysisMs, {
                       ContentFeatureExtractor.extract(from: raster)
@@ -981,8 +995,10 @@ enum CandidateGenerator {
                 let gateClass = classification.map {
                     QualityGateClass(contentClass: $0.contentClass)
                 } ?? .photo
+                // Die Nativ-Stufe eines Bilds über der Dekodiergrenze entfällt.
                 let ladder = CandidateGenerator.resolutionLadder(
                     resource: resource, target: resize, options: options)
+                    .filter { CompressionPlanner.canDecode(resource, target: $0, pixels: pixels) }
                 generateJPEGCandidates(
                     ladder: ladder,
                     target: target,
@@ -1002,7 +1018,10 @@ enum CandidateGenerator {
                    !hasSafeCandidate {
                     let safety = CandidateGenerator.smallSafetyLadder(
                         resource: resource, options: options)
-                    let rungs = safety.rungs.filter { !ladder.contains($0) }
+                    let rungs = safety.rungs.filter {
+                        !ladder.contains($0)
+                            && CompressionPlanner.canDecode(resource, target: $0, pixels: pixels)
+                    }
                     if let smartTarget = safety.smartTarget, !rungs.isEmpty {
                         // Gemessen am Raster der Politik, aus der die Stufen
                         // stammen (Smart-Ziel, P0.1-Regel): Auf dem gröberen
@@ -1273,11 +1292,12 @@ enum CandidateGenerator {
                 }
             }
 
-            let native = PixelSize(width: resource.width, height: resource.height)
-            let source = decodedRaster(for: native).flatMap { decoded in
-                options.forceGrayscale
-                    ? ImageResampler.resize(decoded, to: native, components: 1)
-                    : decoded
+            let source = referenceSize.flatMap { native in
+                decodedRaster(for: native).flatMap { decoded in
+                    options.forceGrayscale
+                        ? ImageResampler.resize(decoded, to: native, components: 1)
+                        : decoded
+                }
             }
             let sourceSample = source.flatMap {
                 CandidateGenerator.referenceSample(original: $0, target: target,
@@ -1661,8 +1681,8 @@ enum CandidateGenerator {
                     return
                 }
             }
-            guard let original = decodedRaster(for: PixelSize(width: resource.width,
-                                                               height: resource.height)),
+            guard let originalSize = referenceSize,
+                  let original = decodedRaster(for: originalSize),
                   let sourceSample = CandidateGenerator.referenceSample(
                       original: original, target: policyTarget,
                       fine: CandidateGenerator.measuresFine(options))

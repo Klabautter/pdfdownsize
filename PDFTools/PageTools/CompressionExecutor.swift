@@ -343,6 +343,10 @@ enum CompressionExecutor {
                                                 && resource.filters == [.dct] {
                 if let isCancelled, isCancelled() { throw CancellationError() }
                 if plan.action(for: resource.objectID)?.transformsImage == true { continue }
+                // Der Repack hält alle Koeffizienten im Speicher; eine absurde
+                // Quelle bliebe sonst nur für die Dekodierung gesperrt.
+                guard resource.pixelCount
+                        <= CompressionPlanner.maximumReducibleSourcePixels else { continue }
                 guard let original = document.imageStreamData(objectID: resource.objectID,
                                                               decoded: false) else { continue }
                 pending.append((resource, original))
@@ -966,7 +970,18 @@ struct LibQPDFPixelSource: ImagePixelSource {
     /// – sonst wäre der weitere Resize ein Upscale mit Qualitätsverlust.
     /// Planung und Ausführung rufen mit DEMSELBEN Ziel an, deshalb liefern
     /// beide dieselben Pixel (Determinismus des Plans, Finding 11).
+    ///
+    /// DCT dekodiert über dieselbe Ebene wie der Cache (`dctLevel`). Die Grenze
+    /// prüft hier den JPEG-Kopf und nicht das Dictionary; ein Bild, dessen Kopf
+    /// mehr Pixel nennt, bleibt unangetastet.
     func decodedImage(for resource: PDFImageResource, target: PixelSize) -> CGImage? {
+        if resource.terminalFilter == .dct, target.width > 0, target.height > 0 {
+            guard let data = document.imageStreamData(objectID: resource.objectID,
+                                                      decoded: false) else { return nil }
+            return ImageResampler.decodeJPEG(
+                data, level: Self.dctLevel(resource: resource, target: target),
+                maximumPixels: CompressionPlanner.maximumDecodablePixels)
+        }
         guard resource.terminalFilter == .jpx,
               target.width > 0, target.height > 0 else {
             return decodedImage(for: resource)
@@ -977,11 +992,57 @@ struct LibQPDFPixelSource: ImagePixelSource {
     }
 
     /// V2-Maps-Perf – die Ebene des Raster-Caches IST die cp_reduce-Stufe:
-    /// Sie bestimmt die Dekodierungsvariante vollständig (nicht-JPX immer 0).
+    /// Sie bestimmt die Dekodierungsvariante vollständig. DCT nennt seine
+    /// Skalierungsstufe (`dctLevel`), alle anderen Filter immer 0.
     func decodeLevel(for resource: PDFImageResource, target: PixelSize) -> Int {
-        guard resource.terminalFilter == .jpx,
-              target.width > 0, target.height > 0 else { return 0 }
-        return Self.reduceLevel(resource: resource, target: target)
+        guard target.width > 0, target.height > 0 else { return 0 }
+        switch resource.terminalFilter {
+        case .jpx: return Self.reduceLevel(resource: resource, target: target)
+        case .dct: return Self.dctLevel(resource: resource, target: target)
+        default: return 0
+        }
+    }
+
+    func decodedSize(for resource: PDFImageResource, target: PixelSize) -> PixelSize {
+        let level = decodeLevel(for: resource, target: target)
+        switch resource.terminalFilter {
+        case .jpx:
+            return PixelSize(width: Self.reducedEdge(resource.width, reduce: level),
+                             height: Self.reducedEdge(resource.height, reduce: level))
+        case .dct:
+            return Self.dctSize(resource: resource, level: level)
+        default:
+            return PixelSize(width: resource.width, height: resource.height)
+        }
+    }
+
+    /// Skalierungsstufe für DCT (1/2, 1/4, 1/8), nur über der Dekodiergrenze:
+    /// Bis dahin bleibt es beim vollen Raster, und bestehende Ergebnisse
+    /// ändern sich nicht. Das Raster soll das Ziel doppelt abdecken, denn
+    /// genau 1/8 ist ein reiner 8×8-Mittelwert und der folgende Resize hätte
+    /// nichts mehr zu filtern. Sprengt das die Grenze, reicht einfache
+    /// Abdeckung. Deckt nur das volle Raster das Ziel, bleibt Stufe 0, und die
+    /// Grenze lehnt das Bild ab. Nie unter das Ziel: das wäre ein Upscale.
+    static func dctLevel(resource: PDFImageResource, target: PixelSize) -> Int {
+        guard resource.pixelCount > CompressionPlanner.maximumDecodablePixels else { return 0 }
+        func covers(_ level: Int, factor: Int) -> Bool {
+            let size = dctSize(resource: resource, level: level)
+            return size.width >= target.width * factor && size.height >= target.height * factor
+        }
+        var level = 0
+        while level < 3, covers(level + 1, factor: 2) { level += 1 }
+        while level < 3,
+              dctSize(resource: resource, level: level).pixelCount
+                > CompressionPlanner.maximumDecodablePixels,
+              covers(level + 1, factor: 1) {
+            level += 1
+        }
+        return level
+    }
+
+    private static func dctSize(resource: PDFImageResource, level: Int) -> PixelSize {
+        PixelSize(width: max(1, resource.width >> level),
+                  height: max(1, resource.height >> level))
     }
 
     /// Reduktionsstufe zu einem Ziel – dieselbe Schleife wie in

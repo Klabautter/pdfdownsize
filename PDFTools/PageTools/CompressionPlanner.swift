@@ -53,6 +53,13 @@ protocol ImagePixelSource {
     /// wird dynamisch an die konkrete Quelle dispatcht; eine bloße
     /// Extension-Methode würde stillschweigend immer den Default liefern.
     func decodeLevel(for resource: PDFImageResource, target: PixelSize) -> Int
+
+    /// Raster, das `decodedImage(for:target:)` für dieses Ziel tatsächlich
+    /// liefert, ohne zu dekodieren. Daran misst der Generator die Speicher-
+    /// grenze: Eine Quelle mit Reduktionsweg nennt ihr reduziertes Raster, alle
+    /// anderen die volle Bildgröße. Requirement aus demselben Grund wie
+    /// `decodeLevel`.
+    func decodedSize(for resource: PDFImageResource, target: PixelSize) -> PixelSize
 }
 
 extension ImagePixelSource {
@@ -71,6 +78,10 @@ extension ImagePixelSource {
     /// Ebene liefern dasselbe Raster, unterschiedliche Ebenen unterschiedliche
     /// Raster. Der Cache dedupliziert darüber und bleibt damit byteidentisch.
     func decodeLevel(for resource: PDFImageResource, target: PixelSize) -> Int { 0 }
+
+    func decodedSize(for resource: PDFImageResource, target: PixelSize) -> PixelSize {
+        PixelSize(width: resource.width, height: resource.height)
+    }
 }
 
 enum CompressionPlanner {
@@ -79,8 +90,44 @@ enum CompressionPlanner {
     /// Darunter dominiert der Container-Overhead den Bildinhalt.
     static let minimumTransformableEdge = 96
 
-    /// Obergrenze gegen Speicherexplosion beim Dekodieren.
+    /// Obergrenze gegen Speicherexplosion beim Dekodieren. Sie zählt die
+    /// Pixel, die wirklich dekodiert werden: Quellen mit Reduktionsweg (DCT,
+    /// JPX) dürfen größer sein, wenn ihr reduziertes Raster hineinpasst.
     static let maximumDecodablePixels = 36_000_000
+
+    /// Absolute Obergrenze für reduziert dekodierte Quellen, gegen
+    /// Dekompressionsbomben: Ein JPEG-Kopf kann mit wenigen Bytes 4 Gigapixel
+    /// behaupten. Ein progressives JPEG mit 256 MP brauchte bei 1/8 rund
+    /// 100 MB, bei 1/4 rund 190 MB (ImageIO, gemessen 2026-11-03). Aktuelle
+    /// Kameras enden bei 200 MP.
+    static let maximumReducibleSourcePixels = 256_000_000
+
+    /// Darf die Quelle für dieses Ziel dekodiert werden?
+    static func canDecode(_ resource: PDFImageResource, target: PixelSize,
+                          pixels: ImagePixelSource) -> Bool {
+        resource.pixelCount <= maximumReducibleSourcePixels
+            && pixels.decodedSize(for: resource, target: target).pixelCount
+                <= maximumDecodablePixels
+    }
+
+    /// Referenzraster der Qualitätsprüfung: bis zur Grenze die volle Quelle,
+    /// darüber die feinste Reduktion, die hineinpasst. `nil`, wenn es keine
+    /// gibt. Gegen die Referenz misst das Gate den Verlust aus Dekodierung
+    /// und Verkleinerung; sie liegt nie unter einer dekodierbaren Stufe der
+    /// Leiter.
+    static func referenceSize(for resource: PDFImageResource,
+                              pixels: ImagePixelSource) -> PixelSize? {
+        let native = PixelSize(width: resource.width, height: resource.height)
+        if canDecode(resource, target: native, pixels: pixels) { return native }
+        guard resource.pixelCount <= maximumReducibleSourcePixels else { return nil }
+        for level in 1...5 {
+            let target = PixelSize(width: max(1, resource.width >> level),
+                                   height: max(1, resource.height >> level))
+            let decoded = pixels.decodedSize(for: resource, target: target)
+            if decoded.pixelCount <= maximumDecodablePixels { return decoded }
+        }
+        return nil
+    }
 
     struct Result {
         let plan: CompressionPlan
@@ -1154,6 +1201,23 @@ enum ImageResampler {
     /// SSIM 0,93, ein q-0,9-Kandidat 0,74, und die Qualitätsprüfung verwarf
     /// gute Kandidaten. Das Bitmap-Abbild hat dieselben Pixel ohne diese
     /// Abkürzung.
+    /// Reduziert dekodieren (1/2^`level`, ImageIO rundet die Kanten ab) mit
+    /// harter Grenze: Die Maße stammen aus dem JPEG-Kopf, bevor ein Pixel
+    /// dekodiert ist. So zählt nicht, was das Bilddictionary behauptet.
+    /// Ebene 0 liefert dieselben Pixel wie `decodeJPEG(_:)`.
+    static func decodeJPEG(_ data: Data, level: Int, maximumPixels: Int) -> CGImage? {
+        let scaling: [CFString: Any] = level > 0
+            ? [kCGImageSourceSubsampleFactor: 1 << level] : [:]
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(src) > 0,
+              let header = CGImageSourceCreateImageAtIndex(src, 0, scaling as CFDictionary),
+              header.width * header.height <= maximumPixels else { return nil }
+        let options = scaling.merging([kCGImageSourceShouldCacheImmediately: true]) { $1 }
+        guard let decoded = CGImageSourceCreateImageAtIndex(src, 0, options as CFDictionary)
+        else { return nil }
+        return materialized(decoded)
+    }
+
     static func decodeJPEG(_ data: Data) -> CGImage? {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil),
               CGImageSourceGetCount(src) > 0 else { return nil }

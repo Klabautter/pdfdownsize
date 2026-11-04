@@ -17,8 +17,9 @@ import CoreGraphics
 // POLITIK
 //
 //   Schlüssel   (Ressource, Ebene). Ebene 0 = volle Dekodierung (DCT, Flate,
-//               CCITT, JPX ohne Reduktion); JPX mit cp_reduce dekodierte je
-//               Stufe direkt auf 1/2^N – dessen Ebene IST die Reduktionsstufe
+//               CCITT, JPX ohne Reduktion); JPX mit cp_reduce und DCT über der
+//               Dekodiergrenze dekodieren je Stufe direkt auf 1/2^N – deren
+//               Ebene IST die Reduktionsstufe
 //               (`ImagePixelSource.decodeLevel`). Gleiche Ebene ⇒ dasselbe
 //               Raster, wie zwei getrennte Dekodierungen es geliefert hätten.
 //
