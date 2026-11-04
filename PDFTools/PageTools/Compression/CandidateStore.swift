@@ -228,6 +228,7 @@ struct CandidateRecipe: Equatable, Codable, Sendable {
         case .indexedFlate: return "indexedFlate"
         case .ccittG4: return "ccittG4"
         case .jbig2Lossless: return "jbig2Lossless"
+        case .bilevelResampled: return "bilevelResampled"
         case .cmykJPEG: return "cmykJPEG"
         case .jpegRepack: return "jpegRepack"
         case .fontKeep: return "fontKeep"

@@ -38,6 +38,7 @@ import Foundation
         case .cmykJpegReencode: return "cmyk"
         case .ccittG4: return "g4"
         case .jbig2: return "jbig2"
+        case .bilevelResampled: return "bilevel-resampled"
         case .mrc: return "mrc"
         }
     }

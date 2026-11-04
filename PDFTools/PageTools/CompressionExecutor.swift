@@ -271,6 +271,15 @@ enum CompressionExecutor {
                                                    globalsData: globals ?? Data(),
                                                    width: resource.width,
                                                    height: resource.height)
+                case .bilevelResampled(let objectID, let target, let codec, _, _):
+                    if codec == .ccittG4 {
+                        try document.replaceImageCCITT(objectID: objectID, g4Data: payload,
+                                                       width: target.width, height: target.height)
+                    } else {
+                        try document.replaceImageJBIG2(objectID: objectID, pageData: payload,
+                                                       globalsData: globals ?? Data(),
+                                                       width: target.width, height: target.height)
+                    }
                 case .mrc(_, let descriptor, _, _):
                     // Phase V2-7 (§13.7) – Seitenrekonstruktion über die
                     // Bridge: BG + Photos + FG-Maske ersetzen den Raster-Draw,
@@ -290,7 +299,7 @@ enum CompressionExecutor {
                     case .jpeg: savedJPEG += saved
                     case .losslessResize: savedLossless += saved
                     case .indexed: savedIndexed += saved
-                    case .ccittG4, .jbig2: savedBilevel += saved
+                    case .ccittG4, .jbig2, .bilevelResampled: savedBilevel += saved
                     case .cmykJpegReencode: savedCMYK += saved
                     case .mrc: savedMRC += saved
                     case .keep: break
@@ -722,6 +731,19 @@ enum CompressionExecutor {
                 throw ExecutionError.payloadUnavailable(action.objectID)
             }
             return (encoded.page, encoded.globals)
+        case .bilevelResampled(_, let target, let codec, _, _):
+            let factor = max(1, Int((Double(resource.width) / Double(target.width)).rounded()))
+            guard let buffer = BilevelSource.buffer(for: resource, pixels: pixels),
+                  let reduced = BilevelResampling.reduce(buffer, factor: factor)?.buffer else {
+                throw ExecutionError.payloadUnavailable(action.objectID)
+            }
+            if codec == .ccittG4, let data = BilevelCodec.encodeG4(reduced) {
+                return (data, nil)
+            }
+            guard codec == .jbig2, let encoded = BilevelCodec.encodeJBIG2(reduced) else {
+                throw ExecutionError.payloadUnavailable(action.objectID)
+            }
+            return (encoded.page, encoded.globals)
         case .mrc(_, let descriptor, _, _):
             // Phase V2-7 – Bundle deterministisch regenerieren (dieselbe
             // Segmentierung + Kodierung wie in der Planung), wenn die
@@ -812,7 +834,7 @@ enum CompressionExecutor {
                 throw ExecutionError.payloadUnavailable(action.objectID)
             }
             return (encoded.indexStream, nil)
-        case .keep, .ccittG4, .jbig2, .mrc:
+        case .keep, .ccittG4, .jbig2, .bilevelResampled, .mrc:
             // .mrc wurde im Bilevel-Zweig oben behandelt (Regeneration) und
             // ist nur hier gelistet, damit der switch vollständig bleibt.
             throw ExecutionError.payloadUnavailable(action.objectID)

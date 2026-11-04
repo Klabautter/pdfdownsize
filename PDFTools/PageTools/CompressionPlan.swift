@@ -130,6 +130,14 @@ enum ImageCompressionAction: Hashable, Codable, Sendable {
                originalEncodedBytes: Int,
                expectedEncodedBytes: Int)
 
+    /// Verkleinertes Bilevel: neue Maße, sonst wie die beiden oben. Steht nur
+    /// bei sehr hoher Auflösung im Plan (`BilevelResampling`).
+    case bilevelResampled(objectID: PDFObjectID,
+                          target: PixelSize,
+                          codec: MRCMaskCodec,
+                          originalEncodedBytes: Int,
+                          expectedEncodedBytes: Int)
+
     /// V2-3b (§9.6) – Exact Palette: verlustfreie Neukodierung als
     /// /Indexed-Farbraum mit Flate + PNG-Prädiktor. Steht nur im Plan, wenn
     /// der exakte Farbscan ≤ 256 Farben ergab UND die Rekonstruktion
@@ -168,6 +176,7 @@ enum ImageCompressionAction: Hashable, Codable, Sendable {
         case .cmykJpegReencode(let id, _, _, _, _): return id
         case .ccittG4(let id, _, _): return id
         case .jbig2(let id, _, _): return id
+        case .bilevelResampled(let id, _, _, _, _): return id
         case .indexed(let id, _, _, _, _, _, _, _, _): return id
         case .mrc(let id, _, _, _): return id
         }
@@ -187,6 +196,7 @@ enum ImageCompressionAction: Hashable, Codable, Sendable {
         case .cmykJpegReencode(_, _, _, let bytes, _): return bytes
         case .ccittG4(_, let bytes, _): return bytes
         case .jbig2(_, let bytes, _): return bytes
+        case .bilevelResampled(_, _, _, let bytes, _): return bytes
         case .indexed(_, _, _, _, _, let bytes, _, _, _): return bytes
         case .mrc(_, _, let bytes, _): return bytes
         }
@@ -202,6 +212,7 @@ enum ImageCompressionAction: Hashable, Codable, Sendable {
         case .cmykJpegReencode(_, _, _, _, let bytes): return bytes
         case .ccittG4(_, _, let bytes): return bytes
         case .jbig2(_, _, let bytes): return bytes
+        case .bilevelResampled(_, _, _, _, let bytes): return bytes
         case .indexed(_, _, _, _, _, _, let bytes, _, _): return bytes
         case .mrc(_, _, _, let bytes): return bytes
         }
@@ -219,6 +230,7 @@ enum ImageCompressionAction: Hashable, Codable, Sendable {
         case .jpeg(_, let target, _, _, _, _, _): return target
         case .cmykJpegReencode(_, let target, _, _, _): return target
         case .ccittG4, .jbig2: return nil
+        case .bilevelResampled(_, let target, _, _, _): return target
         case .indexed(_, let target, _, _, _, _, _, _, _): return target
         case .mrc: return nil
         }
@@ -230,7 +242,7 @@ enum ImageCompressionAction: Hashable, Codable, Sendable {
         case .losslessResize(_, _, let gray, _, _, _): return gray
         case .jpeg(_, _, _, let gray, _, _, _): return gray
         case .cmykJpegReencode: return false
-        case .ccittG4, .jbig2: return false
+        case .ccittG4, .jbig2, .bilevelResampled: return false
         case .indexed(_, _, _, let paletteComponents, _, _, _, _, _):
             return paletteComponents == 1
         case .mrc: return false
