@@ -9014,6 +9014,16 @@ struct MinParser {
                         break;
                     }
                 }
+                // Eine Zahl endet an Whitespace oder Delimiter. Fehlformen wie
+                // „0.00-62992127“ oder „1.2.3“ sind für die Grammatik EIN
+                // Token; sie hier in zwei Zahlen zu zerlegen ändert die
+                // Operanden (echte Google-Slides-Datei: ein cm schob damit
+                // einen Textblock aus der Seite). Was Leser daraus machen,
+                // ist uneinheitlich – der Stream bleibt also, wie er ist.
+                if (pos < in.size()
+                    && !minIsDelim(static_cast<unsigned char>(in[pos]))) {
+                    return false;
+                }
                 std::string raw = in.substr(start, pos - start);
                 if (!anyDigit) { return false; }
                 std::string norm;
@@ -9027,6 +9037,12 @@ struct MinParser {
                        && minIsOpChar(
                            static_cast<unsigned char>(in[pos]))) {
                     ++pos;
+                }
+                // Dieselbe Regel wie bei Zahlen: „q-1“ ist ein Token, nicht
+                // zwei; ein eingefügtes Space hätte Bedeutung.
+                if (pos < in.size()
+                    && !minIsDelim(static_cast<unsigned char>(in[pos]))) {
+                    return false;
                 }
                 std::string op = in.substr(start, pos - start);
                 if (op == "BI") {
