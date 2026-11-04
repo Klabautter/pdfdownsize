@@ -643,6 +643,14 @@ int pdfcore_replace_image_object_flate(pdfcore_document_t *doc,
                                        int components, int png_predictor,
                                        int decode_applied);
 
+/* Weiche Masken (ohne /Matte) der in diesem Dokument verkleinerten Bilder
+ * nachziehen: je Maske EINMAL und in-place auf das grösste Raster ihrer
+ * Benutzer (harte Masken: das Doppelte), Flate mit PNG-Prädiktor. Masken, die
+ * ein unverkleinertes Bild mitbenutzt oder die sich nicht sicher umrechnen
+ * lassen, bleiben. Nach allen Bildersetzungen aufrufen. `fitted` (optional):
+ * Zahl der umgerechneten Masken. Rückgabe PDFCORE_OK oder Fehler. */
+int pdfcore_fit_soft_masks(pdfcore_document_t *doc, int *fitted);
+
 /* OCR-Textebene (2026-10-01): hängt `content` als eigenen Content-Stream an
  * die Seite an. Der bestehende Inhalt wird in q … Q gekapselt, damit sein
  * Grafikzustand die Textebene nicht verschiebt; die Seite erhält die

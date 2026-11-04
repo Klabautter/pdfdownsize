@@ -97,6 +97,9 @@ QPDFObjectHandle lookup_named_dest(QPDF& qpdf, std::string const& name)
 struct pdfcore_document {
     QPDF qpdf;
     std::map<int, std::vector<std::string>> stringLists;
+    // Bilder mit weicher Maske, die in diesem Lauf verkleinert wurden: Objekt
+    // → neue Masse. pdfcore_fit_soft_masks richtet die Masken danach aus.
+    std::map<QPDFObjGen, std::pair<int, int>> shrunkenMaskedImages;
 };
 
 static pdfcore_status map_exception(const std::exception& e)
@@ -2558,6 +2561,29 @@ void area_resample_line(In const* src, int srcN, float* dst, int dstN,
     }
 }
 
+/// Flächenmittelnde Umrechnung eines 8-Bit-Graurasters: erst waagrecht
+/// (srcW → width je Quellzeile, direkt aus den Bytes), dann senkrecht.
+std::string area_resample_gray(unsigned char const* in, int srcW, int srcH,
+                               int width, int height)
+{
+    std::vector<float> mid(static_cast<size_t>(width) * srcH);
+    for (int y = 0; y < srcH; ++y) {
+        area_resample_line(in + static_cast<size_t>(y) * srcW, srcW,
+                           &mid[static_cast<size_t>(y) * width], width, 1);
+    }
+    std::vector<float> out(static_cast<size_t>(width) * height);
+    for (int x = 0; x < width; ++x) {
+        area_resample_line(&mid[x], srcH, &out[x], height,
+                           static_cast<size_t>(width));
+    }
+    std::string pixels(out.size(), '\0');
+    for (size_t i = 0; i < out.size(); ++i) {
+        pixels[i] = static_cast<char>(
+            std::lround(std::min(255.0f, std::max(0.0f, out[i]))));
+    }
+    return pixels;
+}
+
 /// Weiche Maske mit /Matte an die NEUEN Bildmasse anpassen.
 ///
 /// Die allgemeine Regel oben („eine SMask darf eigene Masse haben") hat
@@ -2604,23 +2630,7 @@ bool fit_matte_smask(QPDF& qpdf, QPDFObjectHandle newDict,
     if (!raw || raw->getSize() < srcCount) { return false; }
     unsigned char const* in = raw->getBuffer();
 
-    // Erst waagrecht (srcW → width je Quellzeile, direkt aus den Bytes),
-    // dann senkrecht.
-    std::vector<float> mid(static_cast<size_t>(width) * srcH);
-    for (int y = 0; y < srcH; ++y) {
-        area_resample_line(in + static_cast<size_t>(y) * srcW, srcW,
-                           &mid[static_cast<size_t>(y) * width], width, 1);
-    }
-    std::vector<float> out(static_cast<size_t>(width) * height);
-    for (int x = 0; x < width; ++x) {
-        area_resample_line(&mid[x], srcH, &out[x], height,
-                           static_cast<size_t>(width));
-    }
-    std::string pixels(out.size(), '\0');
-    for (size_t i = 0; i < out.size(); ++i) {
-        pixels[i] = static_cast<char>(
-            std::lround(std::min(255.0f, std::max(0.0f, out[i]))));
-    }
+    std::string pixels = area_resample_gray(in, srcW, srcH, width, height);
 
     uLong bound = compressBound(static_cast<uLong>(pixels.size()));
     std::string packed(static_cast<size_t>(bound), '\0');
@@ -2650,6 +2660,174 @@ bool fit_matte_smask(QPDF& qpdf, QPDFObjectHandle newDict,
     }
     fitted.setFilterOnWrite(false);
     newDict.replaceKey("/SMask", fitted);
+    return true;
+}
+
+/// Ersetzung verkleinert das Bild: /Matte-Masken sofort anpassen, alle übrigen
+/// weichen Masken für pdfcore_fit_soft_masks vormerken. Rückgabe wie
+/// fit_matte_smask – false heisst: Ersetzung verweigern.
+bool carry_smask_with_resize(pdfcore_document_t *doc, QPDFObjectHandle target,
+                             QPDFObjectHandle oldDict, QPDFObjectHandle newDict,
+                             int width, int height)
+{
+    if (!fit_matte_smask(doc->qpdf, newDict, width, height)) { return false; }
+    QPDFObjectHandle mask = newDict.getKey("/SMask");
+    QPDFObjectHandle oldW = oldDict.getKey("/Width");
+    QPDFObjectHandle oldH = oldDict.getKey("/Height");
+    if (mask.isStream() && !mask.getDict().hasKey("/Matte")
+        && oldW.isInteger() && oldH.isInteger()
+        && (width < oldW.getIntValue() || height < oldH.getIntValue())) {
+        doc->shrunkenMaskedImages[target.getObjGen()] = {width, height};
+    }
+    return true;
+}
+
+/// Bis zu dieser Vielfachen des Bildrasters bleibt eine harte Maske stehen.
+///
+/// Das Bildraster genügt einer weichen Maske: Ein Schatten oder Verlauf trägt
+/// keine feineren Details als die Farben darunter. Eine harte Kante dagegen
+/// ist selbst das Detail – ein freigestelltes Logo oder eine Textform
+/// verschwimmt sichtbar, wenn die Kante auf das Raster eines 110-DPI-Fotos
+/// fällt. Solche Masken packt Flate ohnehin sehr gut, die Reserve kostet wenig.
+int const kHardMaskRasterFactor = 2;
+
+/// Harte Maske: Die meisten Änderungen zwischen Nachbarpunkten sind Sprünge
+/// (auch eine geglättete Kante ist 1–2 Punkte breit), nicht sanfte Verläufe.
+bool mask_has_hard_edges(unsigned char const* in, int w, int h)
+{
+    size_t varying = 0, steep = 0;
+    auto count = [&](int a, int b) {
+        int const d = std::abs(a - b);
+        if (d >= 4) { ++varying; }
+        if (d >= 64) { ++steep; }
+    };
+    for (int y = 0; y < h; ++y) {
+        unsigned char const* row = in + static_cast<size_t>(y) * w;
+        for (int x = 0; x < w; ++x) {
+            if (x + 1 < w) { count(row[x], row[x + 1]); }
+            if (y + 1 < h) { count(row[x], row[x + w]); }
+        }
+    }
+    return varying > 0 && steep * 2 >= varying;
+}
+
+/// 8-Bit-Graustufen als Flate-Strom mit adaptivem PNG-Prädiktor (Predictor 15)
+/// – je Zeile der Filter mit der kleinsten Betragssumme.
+bool deflate_gray_png(std::string const& pixels, int w, int h, std::string& packed)
+{
+    size_t const width = static_cast<size_t>(w);
+    std::string rows;
+    rows.reserve((width + 1) * h);
+    std::vector<unsigned char> none(width, 0);
+    std::vector<unsigned char> candidate[3];
+    for (auto& c : candidate) { c.resize(width); }
+    auto const* data = reinterpret_cast<unsigned char const*>(pixels.data());
+    for (int y = 0; y < h; ++y) {
+        unsigned char const* cur = data + static_cast<size_t>(y) * width;
+        unsigned char const* up = y > 0 ? cur - width : none.data();
+        for (size_t x = 0; x < width; ++x) {
+            int const a = x > 0 ? cur[x - 1] : 0;
+            int const b = up[x];
+            int const c = x > 0 ? up[x - 1] : 0;
+            int const pa = std::abs(b - c), pb = std::abs(a - c),
+                      pc = std::abs(a + b - 2 * c);
+            int const paeth = (pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c);
+            candidate[0][x] = static_cast<unsigned char>(cur[x] - a);
+            candidate[1][x] = static_cast<unsigned char>(cur[x] - b);
+            candidate[2][x] = static_cast<unsigned char>(cur[x] - paeth);
+        }
+        auto cost = [&](unsigned char const* line) {
+            size_t sum = 0;
+            for (size_t x = 0; x < width; ++x) {
+                sum += static_cast<size_t>(
+                    std::abs(static_cast<signed char>(line[x])));
+            }
+            return sum;
+        };
+        unsigned char const* best = cur;
+        char type = 0;
+        size_t bestCost = cost(cur);
+        char const types[3] = {1, 2, 4};
+        for (int i = 0; i < 3; ++i) {
+            size_t const value = cost(candidate[i].data());
+            if (value < bestCost) {
+                bestCost = value;
+                best = candidate[i].data();
+                type = types[i];
+            }
+        }
+        rows.push_back(type);
+        rows.append(reinterpret_cast<char const*>(best), width);
+    }
+    uLong destLen = compressBound(static_cast<uLong>(rows.size()));
+    packed.resize(static_cast<size_t>(destLen));
+    if (compress2(reinterpret_cast<Bytef*>(&packed[0]), &destLen,
+                  reinterpret_cast<Bytef const*>(rows.data()),
+                  static_cast<uLong>(rows.size()),
+                  Z_BEST_COMPRESSION) != Z_OK) {
+        return false;
+    }
+    packed.resize(static_cast<size_t>(destLen));
+    return true;
+}
+
+/// Eine weiche Maske auf höchstens needW×needH bringen – in-place im eigenen
+/// Objekt, damit alle Bilder, die sie teilen, dieselbe Maske behalten. Alles,
+/// was nicht sicher geht (kein 8 Bit, kein qpdf-Decoder, kein Gewinn), lässt
+/// die Maske unverändert; das ist immer korrekt, nur grösser.
+bool reduce_soft_mask(QPDFObjectHandle mask, int needW, int needH)
+{
+    QPDFObjectHandle md = mask.getDict();
+    QPDFObjectHandle mw = md.getKey("/Width");
+    QPDFObjectHandle mh = md.getKey("/Height");
+    QPDFObjectHandle bpc = md.getKey("/BitsPerComponent");
+    if (!mw.isInteger() || !mh.isInteger() || !bpc.isInteger()
+        || bpc.getIntValue() != 8) {
+        return false;
+    }
+    int const srcW = static_cast<int>(mw.getIntValue());
+    int const srcH = static_cast<int>(mh.getIntValue());
+    if (srcW <= 0 || srcH <= 0 || needW <= 0 || needH <= 0) { return false; }
+    // Liegt die Maske nirgends über dem Bildraster, gibt es nichts zu tun.
+    if (srcW <= needW && srcH <= needH) { return false; }
+
+    Pl_Buffer collector("soft-mask");
+    bool decoded = false;
+    if (!mask.pipeStreamData(&collector, &decoded, 0, qpdf_dl_all,
+                             /*suppress_warnings=*/true, false)
+        || !decoded) {
+        return false;
+    }
+    std::unique_ptr<Buffer> raw(collector.getBuffer());
+    size_t const srcCount = static_cast<size_t>(srcW) * srcH;
+    if (!raw || raw->getSize() < srcCount) { return false; }
+    unsigned char const* in = raw->getBuffer();
+
+    int const factor = mask_has_hard_edges(in, srcW, srcH)
+        ? kHardMaskRasterFactor : 1;
+    int const width = std::min(srcW, needW * factor);
+    int const height = std::min(srcH, needH * factor);
+    if (width == srcW && height == srcH) { return false; }
+
+    std::string packed;
+    if (!deflate_gray_png(area_resample_gray(in, srcW, srcH, width, height),
+                          width, height, packed)) {
+        return false;
+    }
+    if (packed.size() >= mask.getRawStreamData()->getSize()) { return false; }
+
+    QPDFObjectHandle parms = QPDFObjectHandle::newDictionary();
+    parms.replaceKey("/Predictor", QPDFObjectHandle::newInteger(15));
+    parms.replaceKey("/Colors", QPDFObjectHandle::newInteger(1));
+    parms.replaceKey("/BitsPerComponent", QPDFObjectHandle::newInteger(8));
+    parms.replaceKey("/Columns", QPDFObjectHandle::newInteger(width));
+    mask.replaceStreamData(packed, QPDFObjectHandle::newName("/FlateDecode"), parms);
+    // /Decode wirkt linear auf die Abtastwerte und bleibt gültig (siehe oben).
+    md.replaceKey("/Width", QPDFObjectHandle::newInteger(width));
+    md.replaceKey("/Height", QPDFObjectHandle::newInteger(height));
+    md.replaceKey("/ColorSpace", QPDFObjectHandle::newName("/DeviceGray"));
+    // Wie beim Bildersatz: Der finale Writer soll den Prädiktor nicht verwerfen.
+    mask.setFilterOnWrite(false);
     return true;
 }
 
@@ -2752,9 +2930,9 @@ int replace_image_stream(pdfcore_document_t *doc,
         if (!v.isNull()) { newDict.replaceKey(key, v); }
     }
     // Ausnahme /Matte: Die Maske muss die neuen Masse mitgehen.
-    if (!fit_matte_smask(doc->qpdf, newDict,
-                         newDict.getKey("/Width").getIntValueAsInt(),
-                         newDict.getKey("/Height").getIntValueAsInt())) {
+    if (!carry_smask_with_resize(doc, target, oldDict, newDict,
+                                 newDict.getKey("/Width").getIntValueAsInt(),
+                                 newDict.getKey("/Height").getIntValueAsInt())) {
         return PDFCORE_ERR_CHECK_FAILED;
     }
 
@@ -2802,6 +2980,73 @@ int replace_image_stream(pdfcore_document_t *doc,
 }
 
 } // namespace
+
+int pdfcore_fit_soft_masks(pdfcore_document_t *doc, int *fitted)
+{
+    if (!doc) { return PDFCORE_ERR_OPEN; }
+    if (fitted) { *fitted = 0; }
+    if (doc->shrunkenMaskedImages.empty()) { return PDFCORE_OK; }
+    try {
+        // Die Masse einer Maske folgen aus ALLEN Bildern, die sie benutzen:
+        // Jedes Bild ist schon nach seiner grössten Platzierung bemessen, die
+        // Maske nimmt das grösste dieser Raster je Achse. Ein Bild, das nicht
+        // verkleinert wurde, braucht die Maske, wie sie ist.
+        //
+        // Nur Erreichbares zählt: Der Duplikat-Abgleich hinterlässt verwaiste
+        // Bildobjekte, die der Writer verwirft – sie dürfen nichts sperren.
+        // Eine Maske, die auch selbst als /XObject gezeichnet wird, bleibt.
+        struct Use { QPDFObjectHandle mask; int w = 0, h = 0; bool keep = false; };
+        std::map<QPDFObjGen, Use> uses;
+        std::set<QPDFObjGen> drawn;
+        std::set<QPDFObjGen> seen;
+        std::vector<QPDFObjectHandle> todo{doc->qpdf.getTrailer()};
+        while (!todo.empty()) {
+            QPDFObjectHandle o = todo.back();
+            todo.pop_back();
+            if (o.isIndirect() && !seen.insert(o.getObjGen()).second) { continue; }
+            if (o.isArray()) {
+                for (auto const& item : o.getArrayAsVector()) { todo.push_back(item); }
+                continue;
+            }
+            if (!o.isDictionary() && !o.isStream()) { continue; }
+            QPDFObjectHandle d = o.isStream() ? o.getDict() : o;
+            for (auto const& key : d.getKeys()) { todo.push_back(d.getKey(key)); }
+            QPDFObjectHandle xobjects = d.getKey("/XObject");
+            if (xobjects.isDictionary()) {
+                for (auto const& key : xobjects.getKeys()) {
+                    QPDFObjectHandle x = xobjects.getKey(key);
+                    if (x.isIndirect()) { drawn.insert(x.getObjGen()); }
+                }
+            }
+            if (!o.isStream()) { continue; }
+            QPDFObjectHandle mask = d.getKey("/SMask");
+            if (!mask.isStream()) { continue; }
+            Use& use = uses[mask.getObjGen()];
+            use.mask = mask;
+            auto shrunk = doc->shrunkenMaskedImages.find(o.getObjGen());
+            if (shrunk == doc->shrunkenMaskedImages.end()) {
+                use.keep = true;
+            } else {
+                use.w = std::max(use.w, shrunk->second.first);
+                use.h = std::max(use.h, shrunk->second.second);
+            }
+        }
+        for (auto& entry : uses) {
+            Use const& use = entry.second;
+            if (use.keep || drawn.count(entry.first)
+                || use.mask.getDict().hasKey("/Matte")) {
+                continue;
+            }
+            if (reduce_soft_mask(use.mask, use.w, use.h) && fitted) { ++*fitted; }
+        }
+        doc->shrunkenMaskedImages.clear();
+        return PDFCORE_OK;
+    } catch (const QPDFExc&) {
+        return PDFCORE_ERR_CHECK_FAILED;
+    } catch (...) {
+        return PDFCORE_ERR_INTERNAL;
+    }
+}
 
 int pdfcore_deduplicate_images(pdfcore_document_t *doc, int *merged)
 {
@@ -4051,7 +4296,7 @@ int replace_image_bilevel(pdfcore_document_t *doc,
         QPDFObjectHandle v = oldDict.getKey(key);
         if (!v.isNull()) { newDict.replaceKey(key, v); }
     }
-    if (!fit_matte_smask(doc->qpdf, newDict, width, height)) {
+    if (!carry_smask_with_resize(doc, target, oldDict, newDict, width, height)) {
         return PDFCORE_ERR_CHECK_FAILED;
     }
     for (char const* key : {"/Intent", "/Interpolate", "/Metadata",
@@ -8777,7 +9022,7 @@ int pdfcore_replace_image_object_indexed(pdfcore_document_t *doc,
             QPDFObjectHandle v = oldDict.getKey(key);
             if (!v.isNull()) { newDict.replaceKey(key, v); }
         }
-        if (!fit_matte_smask(doc->qpdf, newDict, width, height)) {
+        if (!carry_smask_with_resize(doc, target, oldDict, newDict, width, height)) {
             return PDFCORE_ERR_CHECK_FAILED;
         }
         for (char const* key : {"/Intent", "/Interpolate", "/Metadata",
