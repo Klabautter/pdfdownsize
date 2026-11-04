@@ -209,6 +209,37 @@ static long long color_space_components(QPDFObjectHandle cs)
     return 0;
 }
 
+/// Wie `color_space_components`, zählt aber auch Separation und DeviceN.
+///
+/// Getrennt gehalten: `pdfcore_check` soll ihre Streamlängen weiterhin nicht
+/// prüfen – sonst würde ein bislang geduldetes Dokument als beschädigt gelten.
+static long long replacement_components(QPDFObjectHandle cs)
+{
+    if (cs.isArray() && cs.getArrayNItems() > 1 && cs.getArrayItem(0).isName()) {
+        std::string n = cs.getArrayItem(0).getName();
+        if (n == "/Separation") { return 1; }
+        if (n == "/DeviceN" && cs.getArrayItem(1).isArray()) {
+            return cs.getArrayItem(1).getArrayNItems();
+        }
+    }
+    return color_space_components(cs);
+}
+
+/// Name plus Komponentenzahl für die Bilderliste, etwa „ICCBased:3".
+static std::string describe_color_space(QPDFObjectHandle cs)
+{
+    if (cs.isName()) {
+        std::string n = cs.getName();
+        return n.empty() ? n : n.substr(1);
+    }
+    if (!cs.isArray() || cs.getArrayNItems() == 0 || !cs.getArrayItem(0).isName()) {
+        return "";
+    }
+    std::string family = cs.getArrayItem(0).getName().substr(1);
+    long long n = replacement_components(cs);
+    return n > 0 ? family + ":" + std::to_string(n) : family;
+}
+
 int pdfcore_check(pdfcore_document_t *doc)
 {
     if (!doc) { return PDFCORE_ERR_OPEN; }
@@ -761,13 +792,23 @@ void walk_resources(QPDFObjectHandle res, int pageIdx, int depth,
             } else if (cso.isArray()) {
                 auto av = cso.getArrayAsVector();
                 if (!av.empty() && av[0].isName()) {
-                    p.cs = strip_slash(av[0].getName());
                     // Bei ICCBased die Komponentenzahl anhängen: Sie steht im
                     // Profil (/N) und entscheidet, ob sich das Bild überhaupt
                     // aufbauen lässt. Ohne sie war ICCBased pauschal
                     // ausgeschlossen – 11,5 MB im Korpus.
-                    long long n = color_space_components(cso);
-                    if (n > 0) { p.cs += ":" + std::to_string(n); }
+                    p.cs = describe_color_space(cso);
+                    // Indexed trägt zusätzlich seinen Basisfarbraum: Er sagt,
+                    // was beim Auflösen der Palette herauskommt. Eine /Matte
+                    // der Maske nennt Werte im Farbraum des Basisbildes und
+                    // passte danach nicht mehr – dann fehlt die Basis, und das
+                    // Bild bleibt unangetastet.
+                    QPDFObjectHandle maskOfImage = dict_of(xo).getKey("/SMask");
+                    bool matted = maskOfImage.isStream()
+                        && maskOfImage.getDict().hasKey("/Matte");
+                    if (av[0].getName() == "/Indexed" && av.size() >= 4) {
+                        p.cs = matted ? "Indexed"
+                                      : "Indexed>" + describe_color_space(av[1]);
+                    }
                 }
             }
             QPDFObjectHandle f = dict_of(xo).getKey("/Filter");
@@ -2890,7 +2931,15 @@ int replace_image_stream(pdfcore_document_t *doc,
     // zwischen Flate, RGB-JPEG und CMYK-JPEG.
     if ((lossless || preserveSourceColorSpace)
         && !oldSpace.isNull() && !oldSpace.isName()) {
-        if (color_space_components(oldSpace) == components) {
+        // Eine aufgelöste Palette liegt in ihrem BASISfarbraum vor; /Indexed
+        // beschriebe die Bytes nicht mehr, auch wenn ein Kanal übrig bliebe.
+        if (oldSpace.isArray() && oldSpace.getArrayNItems() > 1
+            && oldSpace.getArrayItem(0).isName()
+            && oldSpace.getArrayItem(0).getName() == "/Indexed") {
+            oldSpace = oldSpace.getArrayItem(1);
+        }
+        if (!oldSpace.isName()
+            && replacement_components(oldSpace) == components) {
             newDict.replaceKey("/ColorSpace", oldSpace);
             keptOriginalSpace = true;
         }
@@ -4015,6 +4064,51 @@ int pdfcore_flate_stream_list(pdfcore_document_t *doc, size_t min_raw_bytes,
         }
         *out = array;
         *count = static_cast<int>(entries.size());
+        return PDFCORE_OK;
+    } catch (...) {
+        return PDFCORE_ERR_INTERNAL;
+    }
+}
+
+int pdfcore_get_image_indexed_lookup(pdfcore_document_t *doc,
+                                     int obj_number, int generation,
+                                     int *hival,
+                                     unsigned char **out, size_t *len)
+{
+    if (!doc || !hival || !out || !len) { return PDFCORE_ERR_OPEN; }
+    *out = nullptr; *len = 0; *hival = 0;
+    try {
+        QPDFObjectHandle target = find_image_object(doc->qpdf, obj_number, generation);
+        if (target.isNull()) { return PDFCORE_ERR_CHECK_FAILED; }
+        QPDFObjectHandle cs = dict_of(target).getKey("/ColorSpace");
+        if (!cs.isArray() || cs.getArrayNItems() < 4
+            || !cs.getArrayItem(0).isName()
+            || cs.getArrayItem(0).getName() != "/Indexed"
+            || !cs.getArrayItem(2).isInteger()) {
+            return PDFCORE_ERR_CHECK_FAILED;
+        }
+        long long high = cs.getArrayItem(2).getIntValue();
+        if (high < 0 || high > 255) { return PDFCORE_ERR_CHECK_FAILED; }
+
+        // Die Tabelle steht als String ODER als Stream im Dokument.
+        QPDFObjectHandle lookup = cs.getArrayItem(3);
+        std::string bytes;
+        if (lookup.isString()) {
+            bytes = lookup.getStringValue();
+        } else if (lookup.isStream()) {
+            std::shared_ptr<Buffer> data = lookup.getStreamData(qpdf_dl_all);
+            bytes.assign(reinterpret_cast<const char *>(data->getBuffer()),
+                         data->getSize());
+        } else {
+            return PDFCORE_ERR_CHECK_FAILED;
+        }
+        if (bytes.empty()) { return PDFCORE_ERR_CHECK_FAILED; }
+        char *copy = malloc_copy(
+            reinterpret_cast<const unsigned char *>(bytes.data()), bytes.size());
+        if (!copy) { return PDFCORE_ERR_INTERNAL; }
+        *out = reinterpret_cast<unsigned char *>(copy);
+        *len = bytes.size();
+        *hival = static_cast<int>(high);
         return PDFCORE_OK;
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
@@ -8987,8 +9081,22 @@ int pdfcore_replace_image_object_indexed(pdfcore_document_t *doc,
             std::string(reinterpret_cast<const char *>(palette), palette_len));
         QPDFObjectHandle indexed = QPDFObjectHandle::newArray();
         indexed.appendItem(QPDFObjectHandle::newName("/Indexed"));
-        indexed.appendItem(QPDFObjectHandle::newName(
-            palette_components == 1 ? "/DeviceGray" : "/DeviceRGB"));
+        // War die Quelle schon indiziert, bleibt ihre Basis (etwa ein
+        // ICC-Profil): Die Palette trägt die Werte dieses Farbraums.
+        QPDFObjectHandle oldSpace = oldDict.getKey("/ColorSpace");
+        QPDFObjectHandle sourceBase;
+        if (oldSpace.isArray() && oldSpace.getArrayNItems() > 1
+            && oldSpace.getArrayItem(0).isName()
+            && oldSpace.getArrayItem(0).getName() == "/Indexed") {
+            sourceBase = oldSpace.getArrayItem(1);
+        }
+        if (sourceBase.isArray()
+            && replacement_components(sourceBase) == palette_components) {
+            indexed.appendItem(sourceBase);
+        } else {
+            indexed.appendItem(QPDFObjectHandle::newName(
+                palette_components == 1 ? "/DeviceGray" : "/DeviceRGB"));
+        }
         indexed.appendItem(QPDFObjectHandle::newInteger(
             static_cast<long long>(entries) - 1));
         indexed.appendItem(lookup);

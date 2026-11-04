@@ -387,6 +387,15 @@ enum BilevelDetection {
 
     /// Dictionary-Ebene, ohne Dekodierung.
     static func classify(resource: PDFImageResource) -> Kind {
+        // Eine Palette aus genau Schwarz und Weiß ist ein Scan in anderer
+        // Verpackung – ob sie es ist, zeigt erst das Dekodieren (4.5 der
+        // Planung). Ein ausgeschriebenes /Decode ließe die Bridge den
+        // S/W-Ersatz nicht durch, dort geht es den regulären Weg.
+        if case .indexed = resource.colorSpace {
+            let components = resource.pixelColorSpace.componentCount
+            return (components == 1 || components == 3) && !resource.hasDecodeArray
+                ? .nearBilevel : .none
+        }
         switch resource.bitsPerComponent {
         case 1:
             switch resource.colorSpace {
@@ -412,7 +421,7 @@ enum BilevelDetection {
     }
 
     static func isRGB(_ resource: PDFImageResource) -> Bool {
-        resource.colorSpace.componentCount == 3
+        resource.pixelColorSpace.componentCount == 3
     }
 
     struct ExactScan {

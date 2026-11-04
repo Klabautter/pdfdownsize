@@ -432,7 +432,7 @@ enum MRCPageRewriter {
         guard resource.transformCapability.isSafe else { return false }
         // CMYK-Scans bleiben in der Druckfarbe (V1-Grenze); 1-bit-Raster
         // gehören dem Bilevel-Race (verlustfrei, §9.7).
-        guard resource.colorSpace.allowsLossyReplacement,
+        guard resource.pixelColorSpace.allowsLossyReplacement,
               resource.bitsPerComponent == 8 else { return false }
         guard resource.maxEdge >= CompressionPlanner.minimumTransformableEdge,
               resource.pixelCount <= CompressionPlanner.maximumDecodablePixels

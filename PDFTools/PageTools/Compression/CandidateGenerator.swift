@@ -584,7 +584,7 @@ enum CandidateGenerator {
                 } else {
                     racedKind = kind
                 }
-                let components = grayscale ? 1 : (resource.colorSpace.componentCount ?? 3)
+                let components = grayscale ? 1 : (resource.pixelColorSpace.componentCount ?? 3)
                 guard let measurement = sourceMeasurement(target: target, components: components)
                 else { return }
                 add(kind: racedKind, isLossless: false, data: payload, measurement: measurement,
@@ -742,7 +742,7 @@ enum CandidateGenerator {
             guard resize != nil || needsColorChange
                     || (allowsNativeReencode
                         && resource.terminalFilter != .dct
-                        && resource.colorSpace.allowsLossyReplacement) else {
+                        && resource.pixelColorSpace.allowsLossyReplacement) else {
                 finishStructural(.withinBudget)
                 return
             }
@@ -796,6 +796,24 @@ enum CandidateGenerator {
                             target: plannedTarget,
                             targetImage: targetImage,
                             resize: resize)
+            addSixteenBitNativeCandidate(target: plannedTarget)
+        }
+
+        /// 16 Bit auf 8 Bit bei unveränderter Größe: Betrachter rendern in
+        /// 8 Bit, sichtbar ändert sich nichts. Nötig, wo das Verkleinern nicht
+        /// lohnt: Auf hartkantigem Inhalt wird Flate durch die neuen Kantentöne
+        /// grösser, und ohne diesen Kandidaten gewänne ein JPEG über dem, was
+        /// Qualität mit dem behaltenen Original erreicht (Stufenfolge verletzt).
+        private mutating func addSixteenBitNativeCandidate(target: PixelSize) {
+            let native = PixelSize(width: resource.width, height: resource.height)
+            guard resource.bitsPerComponent == 16, target != native,
+                  let image = decodedRaster(for: native) else { return }
+            let outcome = CompressionPlanner.planLosslessResize(
+                resource: resource, image: image, target: native, grayscale: false)
+            record(action: outcome.0, payload: outcome.1,
+                   kind: .flate(target: native, grayscale: false, predictor: true),
+                   workingBytes: CandidateGenerator.workingBytes(
+                       for: native, components: resource.pixelColorSpace.componentCount ?? 3))
         }
 
         /// §8.4/§8.3 – Verknüpfung von Seitenanalyse und Bildklassifikation
@@ -819,7 +837,7 @@ enum CandidateGenerator {
             guard QualityGatePreset(ssimThreshold: options.ssimThreshold) == .smart,
                   case .adaptive = options.qualityPolicy,
                   resource.terminalFilter == .dct,
-                  resource.colorSpace.allowsLossyReplacement,
+                  resource.pixelColorSpace.allowsLossyReplacement,
                   !resource.placements.isEmpty,
                   resource.placements.allSatisfy({ placement in
                       guard let page = pageContext[placement.pageIndex] else { return false }
@@ -884,7 +902,10 @@ enum CandidateGenerator {
             // bleibt (derselbe Pfad wie Legacy, als Kandidat). Ist Graustufen
             // angefordert, wird auch hier nach Grau gewandelt – vorher
             // überging die Einstellung ICC-Bilder still (Befund B3).
-            if case .iccBased = resource.colorSpace,
+            //
+            // CalRGB/CalGray gehören dazu: Auch ihre Kalibrierung steht im
+            // /ColorSpace und überlebt nur den Flate-Ersatz.
+            if resource.pixelColorSpace.requiresLosslessToKeepCalibration,
                resource.terminalFilter != .dct {
                 let outcome = CompressionPlanner.planLosslessResize(
                     resource: resource, image: targetImage, target: target,
@@ -894,12 +915,23 @@ enum CandidateGenerator {
                                     predictor: true),
                        workingBytes: CandidateGenerator.workingBytes(
                            for: target, components: 3))
+                // Eine Palette über einem Profil bleibt eine: Ohne diesen
+                // Kandidaten träte ein Byte je Bildpunkt gegen drei an und
+                // verlöre fast immer. Die Bridge behält die Basis.
+                if case .indexed = resource.colorSpace,
+                   imageClass == .graphics,
+                   resource.pixelColorSpace.componentCount != 4 {
+                    addIndexedCandidate(target: target, targetImage: targetImage,
+                                        grayscale: grayscale)
+                }
                 return
             }
 
             // CMYK bleibt CMYK (§9.8): kontrollierter YCCK-Kandidat hinter
             // der 6b-Barriere, sonst verlustfreier Resize.
-            if !resource.colorSpace.allowsLossyReplacement {
+            // Lab, Separation und DeviceN nehmen denselben Weg: verlustfrei
+            // verkleinert im eigenen Farbraum, der /ColorSpace bleibt.
+            if !resource.pixelColorSpace.allowsLossyReplacement {
                 runCMYKPath(target: target, targetImage: targetImage)
                 return
             }
@@ -1168,8 +1200,14 @@ enum CandidateGenerator {
             // 486 Bildern (5,7 KB von 8 MB) – alle ≤ 66 × 66 px am Ziel. Auf
             // großen Kartenkacheln kostete sie ~40 % der Klein-Kandidatensuche
             // und verlor gegen JPEG; vier Karten liefen dadurch ins Zeitlimit.
+            //
+            // Eine Palettenquelle ist davon ausgenommen: Sie hatte schon nur
+            // wenige Farben, verkleinert entstehen bloss Kantentöne, und ein
+            // Byte je Bildpunkt ist ihr natürliches Format. Sie ist zudem selten
+            // genug, dass die Laufzeit nicht zählt.
             if allowsQuantizedPalette, !grayscale,
-               target.pixelCount <= CandidateGenerator.maximumQuantizedPalettePixels {
+               target.pixelCount <= CandidateGenerator.maximumQuantizedPalettePixels
+                || resource.colorSpace == .indexed {
                 addQuantizedCandidates(target: target, resized: resized)
             }
         }

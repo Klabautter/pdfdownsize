@@ -932,7 +932,7 @@ enum CompressionPlanner {
         }
         // Die Komponentenzahl folgt dem Farbraum der QUELLE – so bleibt ein
         // CMYK-Bild vierkanalig.
-        let components = grayscale ? 1 : (resource.colorSpace.componentCount ?? 3)
+        let components = grayscale ? 1 : (resource.pixelColorSpace.componentCount ?? 3)
         guard let resized = ImageResampler.resize(image, to: target,
                                                   components: components),
               let best = ImageResampler.encodeLosslessBest(resized,

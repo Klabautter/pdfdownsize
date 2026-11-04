@@ -137,6 +137,49 @@ import UniformTypeIdentifiers
                 dict: Self.imageDict(w, h, "/ColorSpace[/Indexed/DeviceRGB 255<\(lookup)>]/BitsPerComponent 8/Filter/FlateDecode"),
                 data: try Self.flate(gray)))
         }
+        // Hartkantige Palettengrafik: Kleinteil aus Flächen, kein Verlauf.
+        func paletteArt(bits: Int, entries: Int) -> Data {
+            var seed: UInt64 = 7
+            var map = [UInt8](repeating: 0, count: w * h)
+            for _ in 0..<9000 {
+                seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                let (x, y) = (Int((seed >> 20) % UInt64(w - 30)), Int((seed >> 40) % UInt64(h - 30)))
+                let (rw, rh) = (Int((seed >> 8) % 26) + 3, Int((seed >> 14) % 26) + 3)
+                for yy in y..<(y + rh) { for xx in x..<(x + rw) { map[yy * w + xx] = UInt8(seed >> 58) % UInt8(entries) } }
+            }
+            let row = (w * bits + 7) / 8
+            var out = [UInt8](repeating: 0, count: row * h)
+            for y in 0..<h { for x in 0..<w {
+                let bit = x * bits
+                out[y * row + bit / 8] |= map[y * w + x] << UInt8(8 - bits - bit % 8)
+            } }
+            return Data(out)
+        }
+        let artTable = "FFFFFFC81E1E1EA03C1E3CC8F0A01400000078787 8FAF028".replacingOccurrences(of: " ", with: "")
+        for (bits, entries) in [(8, 8), (4, 8), (2, 4), (1, 2)] {
+            add("indexed-grafik-\(bits)bit-400dpi") { try Self.document("art\(bits)", image: Stream(
+                dict: Self.imageDict(w, h, "/ColorSpace[/Indexed/DeviceRGB \(entries - 1)<\(artTable)>]/BitsPerComponent \(bits)/Filter/FlateDecode"),
+                data: try Self.flate(paletteArt(bits: bits, entries: entries)))) }
+        }
+        add("indexed-diagramm-400dpi") {
+            var map = [UInt8](repeating: 0, count: w * h)
+            for row in 0..<20 { for column in 0..<15 {
+                let (x, y) = (24 + column * 108, 24 + row * 108)
+                for yy in y..<(y + 86) { for xx in x..<(x + 88) { map[yy * w + xx] = UInt8((row * 3 + column) % 7 + 1) } }
+            } }
+            return try Self.document("diagramm", image: Stream(
+                dict: Self.imageDict(w, h, "/ColorSpace[/Indexed/DeviceRGB 7<\(artTable)>]/BitsPerComponent 8/Filter/FlateDecode"),
+                data: try Self.flate(Data(map))))
+        }
+        add("grau-4bit-400dpi") { try Self.document("gray4", image: Stream(
+            dict: Self.imageDict(w, h, "/ColorSpace/DeviceGray/BitsPerComponent 4/Filter/FlateDecode"),
+            data: try Self.flate(paletteArt(bits: 4, entries: 16)))) }
+        add("lab-400dpi") { try Self.document("lab", image: Stream(
+            dict: Self.imageDict(w, h, "/ColorSpace[/Lab<</WhitePoint[0.9642 1 0.8249]/Range[-128 127 -128 127]>>]/BitsPerComponent 8/Filter/FlateDecode"),
+            data: flateRGB)) }
+        add("separation-400dpi") { try Self.document("sep", image: Stream(
+            dict: Self.imageDict(w, h, "/ColorSpace[/Separation/Spot/DeviceCMYK<</FunctionType 2/Domain[0 1]/C0[0 0 0 0]/C1[0 0.9 1 0.1]/N 1>>]/BitsPerComponent 8/Filter/FlateDecode"),
+            data: try Self.flate(Self.raw(w, h, components: 1)))) }
         add("flate-rgb-16bit-400dpi") {
             var deep = Data(capacity: w * h * 6)
             for byte in Self.raw(w, h, components: 3) { deep.append(byte); deep.append(byte) }
