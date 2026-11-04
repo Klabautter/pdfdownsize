@@ -4,14 +4,14 @@
     <title>PDFdownsize</title>
     <link>https://github.com/Klabautter/pdfdownsize</link>
     <item>
-      <title>Version 1.0.4</title>
-      <pubDate>Thu, 22 Oct 2026 14:44:19 +0000</pubDate>
-      <sparkle:version>5</sparkle:version>
-      <sparkle:shortVersionString>1.0.4</sparkle:shortVersionString>
+      <title>Version 1.0.5</title>
+      <pubDate>Wed, 04 Nov 2026 17:43:53 +0000</pubDate>
+      <sparkle:version>6</sparkle:version>
+      <sparkle:shortVersionString>1.0.5</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[New app icon, about 9 % faster compression, a more precise quality check in Small, and a fix for images with pre-blended transparency.]]></description>
-      <enclosure url="https://github.com/Klabautter/pdfdownsize/releases/download/v1.0.4/PDFdownsize-1.0.4.zip"
-                 sparkle:edSignature="m+qHcpufiyUbal55FRon2gZJqvMPJE/QavducBvG8AEUrxNv7ETDoyALI8Pnor0qjHTKtkuKM1DO099D1cQFAw==" length="9630839" type="application/octet-stream"/>
+      <description><![CDATA[Much better compression for scans and unusual PDF formats, and clearer differences between Small, Smart and Quality.]]></description>
+      <enclosure url="https://github.com/Klabautter/pdfdownsize/releases/download/v1.0.5/PDFdownsize-1.0.5.zip"
+                 sparkle:edSignature="3TvADKlqxS2u5XFCavsCYe8AfLwzQM7G80TWVy5dVK3/fv730jp+DWZI1ZV+K0WhRJiTaHRz6QqcnWbqTtP5Aw==" length="9713051" type="application/octet-stream"/>
     </item>
   </channel>
 </rss>
