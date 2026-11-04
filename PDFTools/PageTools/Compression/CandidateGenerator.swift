@@ -1073,13 +1073,21 @@ enum CandidateGenerator {
                             for: cmykTarget, components: 4),
                         reason: "YCCK-Kandidat hielt ΔE-Gate und Größen-Race (§9.8)",
                         action: outcome.0)
+                    return
                 } else if case .keep(_, let reason, _) = outcome.0 {
                     keepReason = reason
                 }
+                guard CMYKReencode.fallsBackToLosslessResize(options: options) else {
+                    return
+                }
+            }
+            guard let display = CMYKReencode.displaySamples(targetImage,
+                                                            resource: resource) else {
+                keepReason = .decodeFailed
                 return
             }
             let outcome = CompressionPlanner.planLosslessResize(
-                resource: resource, image: targetImage, target: target,
+                resource: resource, image: display, target: target,
                 grayscale: false)
             record(action: outcome.0, payload: outcome.1,
                    kind: .flate(target: target, grayscale: false, predictor: true),

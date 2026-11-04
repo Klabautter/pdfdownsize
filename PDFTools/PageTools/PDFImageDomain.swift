@@ -275,6 +275,16 @@ struct PDFImageResource: Hashable, Codable, Sendable {
         }
         return false
     }
+    /// Die Adobe-Umkehrung auf einem reinen CMYK-JPEG: [1 0 1 0 1 0 1 0].
+    /// Der einzige /Decode auf JPEG-Quellen, den die Kompression exakt
+    /// übersetzt (CMYKReencode, Polarität).
+    var hasInvertingCMYKDecodeArray: Bool {
+        guard filters == [.dct], colorSpace.componentCount == 4,
+              decodeArray.count == 8 else { return false }
+        return decodeArray.enumerated().allSatisfy { index, value in
+            abs(value - (index.isMultiple(of: 2) ? 1 : 0)) <= 1e-6
+        }
+    }
     /// Länge des kodierten Streams in Bytes; -1 wenn unbekannt.
     let encodedByteCount: Int
     let placements: [PDFImagePlacement]
@@ -380,8 +390,10 @@ extension PDFImageResource {
         // ausgeschriebenes Vorgabe-Array bildet jeden Wert auf sich selbst
         // ab – es zu berücksichtigen heisst, nichts zu tun. Diese
         // Unterscheidung fehlte, und sie kostete allein im IPCC-Bericht
-        // 36 510 Bilder mit 38,7 MB.
-        if hasEffectiveDecodeArray, terminalFilter == .dct {
+        // 36 510 Bilder mit 38,7 MB. Die Adobe-Umkehrung auf CMYK-JPEGs lässt
+        // sich dagegen exakt übersetzen.
+        if hasEffectiveDecodeArray, terminalFilter == .dct,
+           !hasInvertingCMYKDecodeArray {
             return .decodeArrayUnsupported
         }
         if let unknown = unknownFilters.first {

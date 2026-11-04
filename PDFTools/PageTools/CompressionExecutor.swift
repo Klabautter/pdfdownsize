@@ -772,7 +772,8 @@ enum CompressionExecutor {
             // CMYK-Resample (oben), 4-Kanal-Pixelbuffer, YCCK-Kodierer des
             // Shims. Das ΔE-Gate ist Planner-Sache; hier entstehen dieselben
             // Bytes.
-            guard let cmykPixels = ImageResampler.rawBitmap(resized, components: 4),
+            guard let encoderInput = CMYKReencode.encoderSamples(resized, resource: resource),
+                  let cmykPixels = ImageResampler.rawBitmap(encoderInput, components: 4),
                   let data = JPEGEncoder.encodeCMYK(pixels: cmykPixels,
                                                     width: resized.width,
                                                     height: resized.height,
@@ -784,14 +785,18 @@ enum CompressionExecutor {
             // Deterministische Rekodierung wie beim Planen: derselbe Race –
             // Predictor-Entscheidung steht in der Aktion, Bytes sind damit
             // identisch zur Planung (Finding 11).
+            guard let display = components == 4
+                    ? CMYKReencode.displaySamples(resized, resource: resource) : resized else {
+                throw ExecutionError.payloadUnavailable(action.objectID)
+            }
             if predictor {
                 guard let data = ImageResampler.encodeLossless(
-                    resized, components: components) else {
+                    display, components: components) else {
                     throw ExecutionError.payloadUnavailable(action.objectID)
                 }
                 return (data, nil)
             }
-            guard let raw = ImageResampler.rawBitmap(resized, components: components),
+            guard let raw = ImageResampler.rawBitmap(display, components: components),
                   let data = ImageProcessor.flateBest(raw) else {
                 throw ExecutionError.payloadUnavailable(action.objectID)
             }
