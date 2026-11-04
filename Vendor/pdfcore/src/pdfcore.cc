@@ -3545,9 +3545,13 @@ int pdfcore_structure_profile(pdfcore_document_t *doc)
         }
         if (doc->qpdf.isLinearized()) { flags |= 2; }
 
-        // Ein unkomprimierter Content-Stream ist der stärkste Hinweis
-        // darauf, dass der Struktur-Pass noch viel holen kann.
+        // Unkomprimierte Content-Streams sind der stärkste Hinweis darauf,
+        // dass der Struktur-Pass noch viel holen kann. Es zählt ihr Byte-
+        // Anteil an der Stichprobe: Ein 31-Byte-Deckblatt ohne Filter machte
+        // das Statistik-Jahrbuch sonst zum Fall „65 % Ersparnis" (echt: 7 %).
         int inspected = 0;
+        long long unfiltered_bytes = 0;
+        long long filtered_bytes = 0;
         for (auto const& page : doc->qpdf.getAllPages()) {
             if (inspected++ >= 8) { break; }   // Stichprobe genügt
             QPDFObjectHandle contents = page.getKey("/Contents");
@@ -3556,13 +3560,13 @@ int pdfcore_structure_profile(pdfcore_document_t *doc)
             else if (contents.isArray()) { streams = contents.getArrayAsVector(); }
             for (auto const& stream : streams) {
                 if (!stream.isStream()) { continue; }
-                if (!stream.getDict().hasKey("/Filter")) {
-                    flags |= 4;
-                    break;
-                }
+                QPDFObjectHandle dict = stream.getDict();
+                QPDFObjectHandle length = dict.getKey("/Length");
+                long long bytes = length.isInteger() ? length.getIntValue() : 0;
+                (dict.hasKey("/Filter") ? filtered_bytes : unfiltered_bytes) += bytes;
             }
-            if (flags & 4) { break; }
         }
+        if (unfiltered_bytes > 0 && unfiltered_bytes >= filtered_bytes) { flags |= 4; }
         return flags;
     } catch (...) {
         return -1;

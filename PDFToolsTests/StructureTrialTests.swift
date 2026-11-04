@@ -68,6 +68,54 @@ import Testing
         #expect(measured > 0 && measured <= 1)
     }
 
+    /// Ein winziges Deckblatt ohne Filter macht kein unkomprimiertes Dokument:
+    /// Das Statistik-Jahrbuch versprach deshalb 65 % und lieferte 7 %.
+    @Test func kleinerUngefilterterStreamZaehltNichtAlsUnkomprimiert() throws {
+        func document(coverBytes: Int, bodyFiltered: Bool, name: String) throws -> PDFCoreDocument {
+            var b = RawPDFBuilder()
+            let pagesRef = b.reserveNumber()
+            let cover = b.addStream(dictionary: "", data: Data(repeating: 0x20, count: coverBytes))
+            let body = b.addStream(dictionary: bodyFiltered ? "/Filter/FlateDecode" : "",
+                                   data: Data(repeating: 0x20, count: 8000))
+            let pages = [cover, body].map {
+                b.addObject("<</Type/Page/Parent \(pagesRef) 0 R/MediaBox[0 0 200 200]/Contents \($0) 0 R>>")
+            }
+            let kids = pages.map { "\($0) 0 R" }.joined(separator: " ")
+            b.fill(pagesRef, "<</Type/Pages/Kids[\(kids)]/Count 2>>")
+            let root = b.addObject("<</Type/Catalog/Pages \(pagesRef) 0 R>>")
+            let url = PDFFixtures.fixtureURL(prefix: name)
+            try b.build(rootObject: root).write(to: url)
+            return try PDFCoreDocument(path: url.path)
+        }
+        #expect(try !document(coverBytes: 31, bodyFiltered: true, name: "cover-small")
+            .structureProfile.hasUncompressedContent)
+        #expect(try document(coverBytes: 31, bodyFiltered: false, name: "cover-plain")
+            .structureProfile.hasUncompressedContent)
+    }
+
+    /// Die Vorschau rechnet das Font-Subsetting ein, aber nur, wenn es läuft.
+    @Test(.hangGuard) func schriftErsparnisFolgtDerPolitik() throws {
+        let url = try #require(try PDFFixtures.subsetFontPDF())
+        defer { try? FileManager.default.removeItem(at: url) }
+        let size = Compressor.fileSize(of: url)
+        let document = try PDFCoreDocument(path: url.path)
+        var options = CompressionOptions.make(mode: .smart, customConfig: nil,
+                                              stripMetadata: true, linearize: false)
+        options.featureFlags.candidateEngine = true
+        options.featureFlags.selectiveFontSubset = true
+        func savings(original: Int64, imageBytes: Int64 = 0) -> Int64 {
+            StructureTrial.fontSavings(url: url, document: document, original: original,
+                                       imageBytes: imageBytes, options: options)
+        }
+        let saved = savings(original: size)
+        #expect(saved > 0)
+        #expect(saved <= (try document.spaceInventory(documentBytes: size).fontProgramBytes))
+        #expect(savings(original: size, imageBytes: size) == 0, "bildlastig: nicht gemessen")
+        #expect(savings(original: StructureTrial.maximumFileBytes + 1) == 0, "zu groß")
+        options.fontPolicy = .off
+        #expect(savings(original: size) == 0, "Font-Pass aus")
+    }
+
     /// „Eigene" muss wirken (Sorge aus der Nutzung, 2026-10-13):
     /// (5) Auflösung/Qualität ändern die Ausgabegröße eines Foto-PDFs nicht.
     /// (6) Kompatibilität „Maximal" lässt den Struktur-Schritt aus – ein

@@ -316,7 +316,11 @@ enum CompressionEstimator {
             url: url, original: original, imageBytes: imageBytes + fixed,
             compatibility: options.compatibilityPolicy)
         if let isCancelled, isCancelled() { return nil }
-        let structural = Double(max(original - imageBytes - fixed, 0))
+        let fontSavings = StructureTrial.fontSavings(
+            url: url, document: document, original: original,
+            imageBytes: imageBytes + fixed, options: options)
+        if let isCancelled, isCancelled() { return nil }
+        let structural = Double(max(original - imageBytes - fixed - fontSavings, 0))
             * (measuredStructure ?? min(document.structureProfile.structureRetention, 1.0))
 
         var imagesOut = 0.0

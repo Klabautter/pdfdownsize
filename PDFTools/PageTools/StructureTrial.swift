@@ -58,6 +58,26 @@ enum StructureTrial {
         return measured
     }
 
+    /// Bytes, die das Font-Subsetting des Laufs voraussichtlich spart: dieselbe
+    /// Trockenplanung und Aktivierungspolitik, nur für textlastige, nicht zu
+    /// große Dateien. Der qpdf-Probelauf sieht das nicht – eine voll eingebettete
+    /// Symbol-Schrift ließ 1 % schätzen, wo der Lauf 64 % holte.
+    static func fontSavings(url: URL, document: PDFCoreDocument, original: Int64,
+                            imageBytes: Int64, options: CompressionOptions) -> Int64 {
+        guard original > 0, original <= maximumFileBytes,
+              Double(max(original - imageBytes, 0)) / Double(original) >= minimumNonImageShare,
+              let provisions = try? FontOptimizer.provision(document: document, options: options),
+              let inventory = try? document.spaceInventory(documentBytes: original)
+        else { return 0 }
+        // Die Trockenplanung rechnet in dekodierten Bytes, die Datei trägt die
+        // Schriften komprimiert: Es zählt der Anteil, nicht die Summe.
+        let decoded = provisions.reduce(0) { $0 + max($1.originalProgramBytes, 0) }
+        guard decoded > 0 else { return 0 }
+        let saved = provisions.filter(\.activationPassed)
+            .reduce(0) { $0 + max($1.estimatedSaving, 0) }
+        return Int64(Double(inventory.fontProgramBytes) * min(Double(saved) / Double(decoded), 1))
+    }
+
     private static func measure(url: URL, original: Int64,
                                 compatibility: CompatibilityPolicy) -> Double? {
         guard let qpdfPath = Compressor.findQPDF() else { return nil }
