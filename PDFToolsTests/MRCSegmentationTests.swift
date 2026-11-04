@@ -197,6 +197,121 @@ import CoreGraphics
         #expect(MRCSegmenter.segment(image) == nil,
                 "Vollfarb-Seite ist außerhalb des V1-Scope (§13.4)")
     }
+
+    // MARK: Hintergrund-Rekonstruktion
+
+    /// Die Ausgabe ist Teil der Dateibytes: Der Hintergrund muss exakt dem
+    /// bisherigen Verfahren entsprechen (Dilatation über alle Pixel, Inseln
+    /// mit Mittelwert, Glättung nur des Gefüllten). Breite ≠ Vielfaches von
+    /// 8, Maskenpixel am Rand und ein Block, den 8 Pässe nicht erreichen.
+    @Test(arguments: [1, 3]) func hintergrundBleibtBytegleich(channels: Int) throws {
+        let width = 97, height = 61
+        var generator = SeededGenerator(state: 42)
+        var pixels = [UInt8](repeating: 0, count: width * height * channels)
+        for i in pixels.indices { pixels[i] = UInt8.random(in: 150...255, using: &generator) }
+
+        let rowBytes = BilevelBuffer.rowBytes(width: width)
+        var bits = [UInt8](repeating: 0, count: rowBytes * height)
+        func setInk(_ x: Int, _ y: Int) { bits[y * rowBytes + (x >> 3)] |= UInt8(0x80 >> (x & 7)) }
+        for _ in 0..<300 {
+            setInk(Int.random(in: 0..<width, using: &generator),
+                   Int.random(in: 0..<height, using: &generator))
+        }
+        for x in 0..<width { setInk(x, 0) }
+        for y in 20..<50 { for x in 30..<70 { setInk(x, y) } }
+        let mask = try #require(BilevelBuffer(width: width, height: height, data: Data(bits)))
+
+        let image = try #require(MRCSegmenter.reconstructBackground(
+            pixels: Data(pixels), width: width, height: height,
+            components: channels, mask: mask, effectivelyGray: channels == 1))
+        let actual = try #require(image.dataProvider?.data as Data?)
+
+        let reference = Self.referenceBackground(pixels: pixels, width: width, height: height,
+                                                 channels: channels, maskBits: bits)
+        var expected = reference
+        if channels == 3 {
+            expected = [UInt8](repeating: 255, count: width * height * 4)
+            for i in 0..<(width * height) {
+                for c in 0..<3 { expected[i * 4 + c] = reference[i * 3 + c] }
+            }
+        }
+        #expect(Data(expected) == actual)
+    }
+
+    /// Das Verfahren als direkte Pixelschleife – Vergleichsmaßstab.
+    private static func referenceBackground(pixels: [UInt8], width: Int, height: Int,
+                                            channels: Int, maskBits: [UInt8]) -> [UInt8] {
+        let count = width * height
+        let rowBytes = BilevelBuffer.rowBytes(width: width)
+        func isInk(_ i: Int) -> Bool {
+            let x = i % width, y = i / width
+            return (maskBits[y * rowBytes + (x >> 3)] >> UInt8(7 - (x & 7))) & 1 == 1
+        }
+        var buffer = pixels
+        var unknown = (0..<count).map(isInk)
+        for _ in 0..<MRCSegmenter.inpaintDilatePasses {
+            var filled: [(Int, [UInt8])] = []
+            for i in 0..<count where unknown[i] {
+                let x = i % width, y = i / width
+                var sum = [Int](repeating: 0, count: channels)
+                var known = 0
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let nx = x + dx, ny = y + dy
+                    guard nx >= 0, nx < width, ny >= 0, ny < height else { continue }
+                    let n = ny * width + nx
+                    guard !unknown[n] else { continue }
+                    for c in 0..<channels { sum[c] += Int(buffer[n * channels + c]) }
+                    known += 1
+                }
+                guard known > 0 else { continue }
+                filled.append((i, sum.map { UInt8(clamping: $0 / known) }))
+            }
+            for (index, values) in filled {
+                for c in 0..<channels { buffer[index * channels + c] = values[c] }
+                unknown[index] = false
+            }
+        }
+        if unknown.contains(true) {
+            var sums = [Int](repeating: 0, count: channels)
+            var known = 0
+            for i in 0..<count where !unknown[i] {
+                for c in 0..<channels { sums[c] += Int(buffer[i * channels + c]) }
+                known += 1
+            }
+            for i in 0..<count where unknown[i] {
+                for c in 0..<channels { buffer[i * channels + c] = UInt8(clamping: sums[c] / known) }
+            }
+        }
+        for _ in 0..<MRCSegmenter.inpaintSmoothPasses {
+            var smoothed = buffer
+            for i in 0..<count where !unknown[i] && isInk(i) {
+                let x = i % width, y = i / width
+                for c in 0..<channels {
+                    var sum = 0
+                    for ny in max(0, y - 1)...min(height - 1, y + 1) {
+                        for nx in max(0, x - 1)...min(width - 1, x + 1) {
+                            sum += Int(buffer[(ny * width + nx) * channels + c])
+                        }
+                    }
+                    smoothed[i * channels + c] = UInt8(clamping: sum / 9)
+                }
+            }
+            buffer = smoothed
+        }
+        return buffer
+    }
+}
+
+/// Reproduzierbare Zufallsfolge (SplitMix64) für Testmuster.
+private struct SeededGenerator: RandomNumberGenerator {
+    var state: UInt64
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
 }
 
 private extension CGRect {

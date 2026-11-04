@@ -341,6 +341,7 @@ enum CompressionEstimator {
             // (Custom fährt kein MRC, `CompressionOptions.make`) – vorher
             // schätzte es modusblind (Befund B5, Review 2026-10-09).
             let scanRetention = !isFixedQualityPolicy
+                && !CompressionPlanner.dpiRuleExcludesMRC(resource: resource, options: options)
                 ? quickScanRetention(resource: resource, qualityFloor: floor,
                                      pageHasVisibleText: pageHasVisibleText,
                                      contentIsNeutral: contentIsNeutral)

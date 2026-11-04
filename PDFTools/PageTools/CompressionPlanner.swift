@@ -307,6 +307,10 @@ enum CompressionPlanner {
                                                       pageAnalyses: pageAnalyses) {
                 let resourceID = CandidateSet.resourceID(for: page.resource.objectID)
                 guard let index = indexByResource[resourceID] else { continue }
+                // DPI-Regel (Entscheidung Linus 2026-11-04): Ein JPEG im Budget
+                // wird nur verlustfrei umgepackt, MRC würde seine Pixel ersetzen.
+                if Self.dpiRuleExcludesMRC(resource: page.resource,
+                                           options: effectiveOptions) { continue }
                 var best = entries[index].generated.set.candidates
                     .map(\.metrics.encodedBytes).min() ?? Int.max
                 // Ein Scan im DPI-Budget hat nur KEEP – dessen Bytes sind
@@ -1012,6 +1016,18 @@ enum CompressionPlanner {
         // Kein Kandidat hielt Race oder Gate – das Bild bleibt, der 6b-Repack
         // des Originals übernimmt im Executor.
         return keep(.cmykGateFailed)
+    }
+
+    /// Darf MRC dieses Raster nicht ersetzen, weil es ein JPEG im DPI-Budget
+    /// ist? Dieselbe Bedingung wie `finishStructural(.withinBudget)` im
+    /// Generator. Ein Zielgrößen-Ziel nimmt die Regel aus: Dort hat der Nutzer
+    /// die Größe ausdrücklich verlangt, MRC ist der einzige Weg dorthin.
+    static func dpiRuleExcludesMRC(resource: PDFImageResource,
+                                   options: CompressionOptions) -> Bool {
+        if case .targetBytes = options.goal { return false }
+        return resource.terminalFilter == .dct
+            && !options.image.forceGrayscale
+            && plannedSize(for: resource, options: options.image) == nil
     }
 
     /// Was ein BEHALTENES Bild im fertigen Dokument kostet (min(Original,

@@ -524,52 +524,67 @@ enum MRCSegmenter {
         let maskBits = [UInt8](mask.data)
         var buffer = [UInt8](pixels)
 
+        // Nur die Maskenpixel werden durchlaufen: Handschrift deckt rund 2 %
+        // der Seite. Vorher lief jeder Pass über alle Pixel und legte je
+        // Maskenpixel eigene Arrays an (Debug: 24 s je Seite).
+        let rowBytes = BilevelBuffer.rowBytes(width: width)
         var unknown = [Bool](repeating: false, count: count)
-        var ink = 0
-        for i in 0..<count {
-            // Zeilengepackte Bilevel-Pixelfolge (wie classifyComponents).
-            let y = i / width, x = i % width
-            let bit = (maskBits[y * BilevelBuffer.rowBytes(width: width)
-                                + (x >> 3)] >> UInt8(7 - (x & 7))) & 1
-            if bit == 1 {
-                unknown[i] = true
-                ink += 1
+        var inkIndices: [Int] = []
+        for y in 0..<height {
+            for x in 0..<width {
+                // Zeilengepackte Bilevel-Pixelfolge (wie classifyComponents).
+                let bit = (maskBits[y * rowBytes + (x >> 3)] >> UInt8(7 - (x & 7))) & 1
+                if bit == 1 {
+                    unknown[y * width + x] = true
+                    inkIndices.append(y * width + x)
+                }
             }
         }
-        guard ink > 0 else { return nil }
+        guard !inkIndices.isEmpty else { return nil }
 
         // Pass 1: Dilatation – Unbekanntes füllt sich aus bekannten Nachbarn.
         // Gefüllte Werte stehen ab dem NÄCHSTEN Pass als Quelle bereit
         // (progressive Wellenausbreitung vom Rand ins Wortformular).
-        var remaining = ink
+        var pending = inkIndices
+        var sum = [Int](repeating: 0, count: channels)
         for _ in 0..<inpaintDilatePasses {
-            guard remaining > 0 else { break }
-            var filled: [(index: Int, values: [UInt8])] = []
-            for i in 0..<count where unknown[i] {
+            guard !pending.isEmpty else { break }
+            var filledIndices: [Int] = []
+            var filledValues: [UInt8] = []
+            var stillPending: [Int] = []
+            for i in pending {
                 let x = i % width, y = i / width
-                var sum = [Int](repeating: 0, count: channels)
+                for c in 0..<channels { sum[c] = 0 }
                 var known = 0
-                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    let nx = x + dx, ny = y + dy
-                    guard nx >= 0, nx < width, ny >= 0, ny < height else { continue }
-                    let n = ny * width + nx
-                    guard !unknown[n] else { continue }
+                func addNeighbor(_ n: Int) {
+                    guard !unknown[n] else { return }
                     for c in 0..<channels {
                         sum[c] += Int(buffer[n * channels + c])
                     }
                     known += 1
                 }
-                guard known > 0 else { continue }
-                filled.append((i, sum.map { UInt8(clamping: $0 / known) }))
-            }
-            for (index, values) in filled {
+                if x + 1 < width { addNeighbor(i + 1) }
+                if x > 0 { addNeighbor(i - 1) }
+                if y + 1 < height { addNeighbor(i + width) }
+                if y > 0 { addNeighbor(i - width) }
+                guard known > 0 else {
+                    stillPending.append(i)
+                    continue
+                }
+                filledIndices.append(i)
                 for c in 0..<channels {
-                    buffer[index * channels + c] = values[c]
+                    filledValues.append(UInt8(clamping: sum[c] / known))
+                }
+            }
+            for (position, index) in filledIndices.enumerated() {
+                for c in 0..<channels {
+                    buffer[index * channels + c] = filledValues[position * channels + c]
                 }
                 unknown[index] = false
-                remaining -= 1
             }
+            pending = stillPending
         }
+        let remaining = pending.count
         // Ungefüllte Inseln (geschlossene Maske): Mittelwert des Bekannten.
         if remaining > 0 {
             var sums = [Int](repeating: 0, count: channels)
@@ -587,18 +602,12 @@ enum MRCSegmenter {
 
         // Glättung NUR über die gefüllte Region (3×3-Mittelwert, 2 Pässe) –
         // das Papier dort bleibt weich, der Rest unverändert.
-        var filledRegion = [Bool](repeating: false, count: count)
-        for i in 0..<count where !unknown[i] {
-            // Nach der Dilatation ist `unknown` für Gefülltes bereits false;
-            // die Region merken wir über das Ursprungs-Bit der Maske.
-            let y = i / width, x = i % width
-            let bit = (maskBits[y * BilevelBuffer.rowBytes(width: width)
-                                + (x >> 3)] >> UInt8(7 - (x & 7))) & 1
-            if bit == 1 { filledRegion[i] = true }
-        }
+        // Nach der Dilatation ist `unknown` für Gefülltes bereits false;
+        // Inseln, die den Mittelwert bekamen, bleiben ungeglättet.
+        let filledRegion = inkIndices.filter { !unknown[$0] }
         for _ in 0..<inpaintSmoothPasses {
             var smoothed = buffer
-            for i in 0..<count where filledRegion[i] {
+            for i in filledRegion {
                 let x = i % width, y = i / width
                 for c in 0..<channels {
                     var sum = 0

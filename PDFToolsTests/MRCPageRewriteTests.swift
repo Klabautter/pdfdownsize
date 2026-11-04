@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import PDFKit
+import CoreGraphics
 @testable import PDFTools
 
 /// Phase V2-7 (Masterplan §13.7) – Seitenrekonstruktion und Erhalt der
@@ -24,6 +25,49 @@ import PDFKit
     static func tempURL(_ label: String) -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("mrc-\(label)-\(UUID().uuidString).pdf")
+    }
+
+    /// Die Vorprüfung in der Provision muss dieselbe Grenze ziehen wie die
+    /// Rekonstruktion: Sonst fiele ein lieferbarer Kandidat weg.
+    @Test func ebenenGrenzeStimmtMitRekonstruktionUeberein() throws {
+        #expect(MRCPageRewriter.fitsLayerLimit(photoRegionCount: 62))
+        #expect(!MRCPageRewriter.fitsLayerLimit(photoRegionCount: 63))
+
+        let input = try PDFFixtures.mrcScanPagePDF(withOCR: false, withLink: false)
+        defer { try? FileManager.default.removeItem(at: input) }
+        let document = try PDFCoreDocument(path: input.path)
+        let resources = try document.imageResources()
+        let resource = try #require(resources.first)
+        let placement = try #require(resource.placements.first)
+        let name = placement.resourceName.hasPrefix("/")
+            ? String(placement.resourceName.dropFirst()) : placement.resourceName
+
+        let context = try #require(CGContext(
+            data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 8,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue))
+        let black = try #require(context.makeImage())
+        let jpeg = try #require(ImageResampler.encodeJPEG(black, quality: 0.8))
+        let maskBits = try #require(BilevelBuffer(
+            width: 8, height: 8, data: Data(repeating: 0, count: 8)))
+        let maskData = try #require(BilevelCodec.encodeG4(maskBits))
+        func layers(photos: Int) -> [PDFCoreDocument.MRCLayer] {
+            let photo = PDFCoreDocument.MRCLayer(
+                kind: .jpeg(components: 1), width: 8, height: 8, data: jpeg,
+                rect: CGRect(x: 0, y: 0, width: 8, height: 8))
+            let background = PDFCoreDocument.MRCLayer(
+                kind: .jpeg(components: 1), width: 8, height: 8, data: jpeg, rect: nil)
+            let mask = PDFCoreDocument.MRCLayer(
+                kind: .ccittG4Mask, width: 8, height: 8, data: maskData, rect: nil)
+            return [background] + Array(repeating: photo, count: photos) + [mask]
+        }
+        func replace(photos: Int) throws {
+            try document.replacePageImageDrawWithLayers(
+                pageIndex: placement.pageIndex, imageObjectID: resource.objectID,
+                resourceName: name, layers: layers(photos: photos))
+        }
+        #expect(throws: (any Error).self) { try replace(photos: 63) }
+        try replace(photos: 62)
     }
 
     @Test func rekonstruktionErhaeltOCRTextAnnotationUndBoxen() throws {
