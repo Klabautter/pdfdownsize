@@ -162,6 +162,31 @@ import UniformTypeIdentifiers
         try Self.expectStableSecondRun(smart, .smart)
     }
 
+    /// Die Vorschau kennt das Neukodieren im Budget, Qualität bleibt beim Repack.
+    @Test(.hangGuard) func estimateSeesNativeReencode() throws {
+        let (w, h) = (1000, 1300)
+        let data = try Self.jpeg(w, h, quality: 0.95)
+        let input = try Self.document("jpeg-est", width: w, height: h,
+                                      dict: "/ColorSpace/DeviceRGB/BitsPerComponent 8/Filter/DCTDecode",
+                                      data: data, dpi: 100)
+        defer { try? FileManager.default.removeItem(at: input) }
+        let share = { (image: ImageCompressionOptions) throws -> Double in
+            let e = try #require(CompressionEstimator.quickEstimate(url: input, options: Self.options(image)))
+            return Double(e.pointBytes) / Double(e.originalBytes)
+        }
+        #expect(try share(.small) < share(.smart))
+        #expect(try share(.smart) <= CandidateGenerator.nativeReencodeMaximumRatio)
+        #expect(try share(.quality) > 0.7)
+    }
+
+    /// Schwarzweiß-Scans gehen vor der Capability-Prüfung durchs Race.
+    @Test func estimateCountsCCITTBilevel() throws {
+        let url = try PDFFixtures.ccittG4ExternalPDF()
+        let resource = try #require(try PDFCoreDocument(path: url.path).imageResources().first)
+        let retention = CompressionEstimator.quickBilevelRetention(resource: resource, options: .quality)
+        #expect(retention == CompressionEstimator.QuickModel.bilevelCCITTRetention)
+    }
+
     /// Dasselbe Motiv bei niedriger Qualität liegt unter beiden Schwellen.
     @Test(.hangGuard) func wellEncodedJPEGStaysUntouched() throws {
         let (w, h) = (1000, 1300)

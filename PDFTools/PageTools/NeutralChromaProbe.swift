@@ -42,3 +42,26 @@ enum NeutralChromaProbe {
         return Double(total) / Double(width * height) <= maximumMeanChroma
     }
 }
+
+/// Hat ein JPEG die schmale Helligkeitsverteilung von Papier? Die Schätzung
+/// stellt damit vor dem Lauf dieselbe Frage wie `isDocumentScanForSmart`, ohne
+/// das ganze Bild zu dekodieren.
+enum PaperScanProbe {
+    /// Etwa so groß wie das Raster, das der Lauf misst: Auf kleineren
+    /// Vorschauen mitteln sich körnige Fotos zu einer Fläche und sähen wie
+    /// Papier aus.
+    static let thumbnailEdge = 1024
+
+    static func isPaper(jpeg: Data) -> Bool? {
+        guard !jpeg.isEmpty,
+              let source = CGImageSourceCreateWithData(jpeg as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceThumbnailMaxPixelSize: thumbnailEdge,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        guard let thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+              let features = ContentFeatureExtractor.extract(from: thumb) else { return nil }
+        return features.entropy <= CandidateGenerator.maximumPaperEntropy
+    }
+}

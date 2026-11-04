@@ -142,6 +142,30 @@ import Foundation
         #expect(try Self.imageWidth(Self.compressed(url, .smart)) == 1898)
     }
 
+    /// Die Vorschau kennt das Scan-Ziel: Homework_2 zeigte 15 % statt 90 %.
+    @Test(.hangGuard) func estimateFollowsSmartPaperScan() throws {
+        let url = try Self.scanPDF(.paper, pixels: (1898, 2645), page: (1898, 2645), name: "est-paper")
+        let smart = try #require(CompressionEstimator.quickEstimate(url: url, options: .smart))
+        let actual = try FileManager.default.attributesOfItem(
+            atPath: Self.compressed(url, .smart).path)[.size] as? Int64 ?? 0
+        #expect(smart.pointBytes < smart.originalBytes / 2, "Schätzung \(smart.pointBytes)")
+        #expect(Double(smart.pointBytes) <= Double(actual) * 3,
+                "Schätzung \(smart.pointBytes), tatsächlich \(actual)")
+    }
+
+    /// Die Vorprobe trennt wie der Lauf: Papier ja, vollseitiges Foto nein.
+    @Test(.hangGuard) func paperProbeSeparatesPaperFromPhoto() throws {
+        func verdict(_ content: Content, _ name: String) throws -> Bool? {
+            let url = try Self.scanPDF(content, pixels: (1898, 2645), page: (595, 829), name: name)
+            let document = try PDFCoreDocument(path: url.path)
+            let resource = try #require(try document.imageResources().first)
+            let jpeg = try #require(LibQPDFPixelSource(document: document).rawImageData(for: resource))
+            return PaperScanProbe.isPaper(jpeg: jpeg)
+        }
+        #expect(try verdict(.paper, "probe-paper") == true)
+        #expect(try verdict(.photo, "probe-photo") == false)
+    }
+
     /// Echte Großformate werden nicht umgedeutet: 150 DPI auf A1 bleiben 150.
     @Test(.hangGuard) func largeFormatScanIsNotRescaled() throws {
         let url = try Self.scanPDF(.paper, pixels: (3508, 4961), page: (1684, 2381), name: "a1-plan")

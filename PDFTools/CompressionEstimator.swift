@@ -271,6 +271,28 @@ enum CompressionEstimator {
         static let scanGrayRetention: [(floor: Double, retention: Double)] =
             [(0.50, 0.08), (0.60, 0.28), (0.85, 0.50)]
         static let neutralChromaSamples = 3
+        /// Verhalten seit 1.0.5, nachkalibriert am 4.11.2026 auf 45 Dokumenten
+        /// (Smoke-30, FormatGaps, Homework_2). Die Größen schätzt ein Bit-
+        /// budget je ZIELpixel: Der Lauf kodiert neu, die Quelldichte zählt nicht.
+        ///
+        /// JPEG im Budget, Repack: Dichte Quellen geben dabei kaum etwas her.
+        static let dctKeptDenseBitsPerPixel = 0.9
+        static let dctKeptDenseRetention = 0.93
+        static let dctKeptSparseRetention = 0.75
+        /// Verschwenderisches JPEG im Budget auf Originalgröße neu kodiert.
+        static let dctReencodeBitsSmall = 0.8
+        static let dctReencodeBitsSmart = 1.05
+        /// Papier-Scan (Vollseite, kein Text, schmale Helligkeit).
+        static let paperScanBitsSmall = 0.35
+        static let paperScanBitsSmart = 0.5
+        /// Obergrenze für verkleinerte JPEGs auf Bezugsstufe Smart: Sehr große
+        /// Fotos schrumpfen stärker, als die Pixelkurve sagt (74 MP: Qualität
+        /// geschätzt 33 %, tatsächlich 6 %).
+        static let dctResizedMaximumBits = 1.4
+        /// Bilevel-Quellen, die schon G4/JBIG2 sind: Das Race holt wenig, die
+        /// Bytes folgen beim Verkleinern etwa der Kantenlänge.
+        static let bilevelCCITTRetention = 0.75
+        static let bilevelJBIG2Retention = 0.95
         static let lowerBand = 0.6
         static let upperBand = 1.5
     }
@@ -312,6 +334,7 @@ enum CompressionEstimator {
         // Dokument (je ein 64-px-Vorschaubild); weitere Kandidaten erben das
         // Mehrheitsurteil – ein 300-Seiten-Scan bleibt schnell.
         var neutralVotes: [Bool] = []
+        var paperVotes: [Bool] = []
         lazy var pixels = LibQPDFPixelSource(document: document)
         func contentIsNeutral(_ resource: PDFImageResource) -> Bool {
             if resource.pixelColorSpace.componentCount == 1 { return true }
@@ -330,6 +353,17 @@ enum CompressionEstimator {
             return false
         }()
         let floor = CompressionPlanner.qualityFloor(for: options.image)
+        // Dieselbe Frage wie `isDocumentScanForSmart` im Lauf, nur auf einem
+        // Vorschaubild und höchstens dreimal je Dokument.
+        func looksLikePaper(_ resource: PDFImageResource) -> Bool {
+            if paperVotes.count >= QuickModel.neutralChromaSamples {
+                return paperVotes.filter { $0 }.count * 2 > paperVotes.count
+            }
+            let verdict = pixels.rawImageData(for: resource)
+                .flatMap(PaperScanProbe.isPaper(jpeg:)) ?? false
+            paperVotes.append(verdict)
+            return verdict
+        }
         for resource in resources {
             let bytes = Double(max(resource.encodedByteCount, 0))
             let target = CompressionPlanner.plannedSize(for: resource, options: options.image)
@@ -337,6 +371,12 @@ enum CompressionEstimator {
                 Double($0.width * $0.height) / Double(max(resource.pixelCount, 1))
             } ?? 1.0
             if ratio < 0.999, resource.transformCapability.isSafe { oversized += 1 }
+            if let retention = quickBehaviorRetention(
+                resource: resource, options: options.image, target: target,
+                pageHasVisibleText: pageHasVisibleText, looksLikePaper: looksLikePaper) {
+                imagesOut += bytes * retention
+                continue
+            }
             // Das MRC-Scan-Modell gilt nicht für feste Nutzerparameter
             // (Custom fährt kein MRC, `CompressionOptions.make`) – vorher
             // schätzte es modusblind (Befund B5, Review 2026-10-09).
@@ -379,6 +419,78 @@ enum CompressionEstimator {
             highBytes: min(highBytes, original),
             originalBytes: original,
             potential: CompressionEstimate.classifyPotential(savings: savings))
+    }
+
+    /// Was der Lauf seit 1.0.5 anders entscheidet als die allgemeinen Kurven:
+    /// Bilevel-Race, Papier-Scans, JPEGs im Budget. nil = die Kurven gelten.
+    static func quickBehaviorRetention(resource: PDFImageResource,
+                                       options: ImageCompressionOptions,
+                                       target: PixelSize?,
+                                       pageHasVisibleText: (Int) -> Bool,
+                                       looksLikePaper: (PDFImageResource) -> Bool) -> Double? {
+        guard let preset = CompressionPlanner.adaptivePreset(for: options) else { return nil }
+        if CompressionPlanner.planBilevelKind(resource: resource) == .trueBilevel {
+            return options.bilevelPolicy == .auto
+                ? quickBilevelRetention(resource: resource, options: options) : nil
+        }
+        guard resource.terminalFilter == .dct, resource.transformCapability.isSafe,
+              !resource.isImageMask, resource.pixelCount > 0 else { return nil }
+        let bitsPerPixel = Double(max(resource.encodedByteCount, 0)) * 8 / Double(resource.pixelCount)
+        guard bitsPerPixel > 0 else { return nil }
+
+        if preset == .small || preset == .smart,
+           isFullPageScanRaster(resource, pageHasVisibleText: pageHasVisibleText),
+           looksLikePaper(resource) {
+            let scaled = CompressionPlanner.paperScanSize(for: resource, options: options)
+            let ratio = scaled.map {
+                Double($0.width * $0.height) / Double(resource.pixelCount)
+            } ?? 1
+            let bits = preset == .smart ? QuickModel.paperScanBitsSmart : QuickModel.paperScanBitsSmall
+            // Schon sehr kompakte Quellen unterbieten das Bitbudget: Dort gilt
+            // weiter die Kurve, ein Papier-Scan wird nie schlechter geschätzt.
+            let curve = quickRetention(
+                resource: resource,
+                ratio: target.map { Double($0.width * $0.height) / Double(resource.pixelCount) } ?? 1,
+                qualityFloor: CompressionPlanner.qualityFloor(for: options))
+            return min(curve, ratio * bits / bitsPerPixel)
+        }
+        guard target == nil else { return nil }
+        if CandidateGenerator.isWastefullyEncodedJPEG(resource, options: options) {
+            let bits = preset == .small ? QuickModel.dctReencodeBitsSmall : QuickModel.dctReencodeBitsSmart
+            if bits / bitsPerPixel <= CandidateGenerator.nativeReencodeMaximumRatio {
+                return bits / bitsPerPixel
+            }
+        }
+        return bitsPerPixel >= QuickModel.dctKeptDenseBitsPerPixel
+            ? QuickModel.dctKeptDenseRetention : QuickModel.dctKeptSparseRetention
+    }
+
+    /// Bilevel läuft vor der Capability-Prüfung durch das Race; ein Schwarzweiß-
+    /// Scan galt hier vorher als unveränderbar (97 % geschätzt, 51 % geliefert).
+    static func quickBilevelRetention(resource: PDFImageResource,
+                                      options: ImageCompressionOptions) -> Double {
+        let edge = BilevelResampling.ratio(for: resource, options: options)
+            .map { Double($0.target) / Double($0.source) } ?? 1
+        switch resource.terminalFilter {
+        case .ccitt: return QuickModel.bilevelCCITTRetention * edge
+        case .jbig2: return QuickModel.bilevelJBIG2Retention * edge
+        default: return QuickModel.bilevelRetention
+        }
+    }
+
+    /// Ein Raster füllt die Seite, und die Seite zeichnet keinen sichtbaren Text.
+    static func isFullPageScanRaster(_ resource: PDFImageResource,
+                                     pageHasVisibleText: (Int) -> Bool) -> Bool {
+        guard resource.bitsPerComponent == 8,
+              resource.pixelColorSpace.allowsLossyReplacement,
+              resource.placements.count == 1,
+              let placement = resource.pageContentPlacements.first,
+              min(placement.placedWidthPoints, placement.placedHeightPoints)
+                >= QuickModel.scanMinimumShortSidePoints,
+              max(placement.placedWidthPoints, placement.placedHeightPoints)
+                >= QuickModel.scanMinimumLongSidePoints,
+              (resource.effectiveDPI ?? 0) >= QuickModel.scanMinimumDPI else { return false }
+        return !pageHasVisibleText(placement.pageIndex)
     }
 
     /// Erwarteter Anteil einer Scan-Seite nach MRC; nil = kein Scan-Raster.
@@ -446,8 +558,13 @@ enum CompressionEstimator {
             guard resized else { return kept }
             if bitsPerSample >= QuickModel.dctPhotoBitsPerSample
                 || resource.pixelCount >= QuickModel.dctPhotoMinimumPixels {
-                return min(kept, QuickModel.dctPhotoFactor * pow(ratio, QuickModel.dctPhotoExponent)
-                                * pow(level, QuickModel.dctPhotoFloorExponent))
+                let curve = QuickModel.dctPhotoFactor * pow(ratio, QuickModel.dctPhotoExponent)
+                    * pow(level, QuickModel.dctPhotoFloorExponent)
+                let bitsPerPixel = Double(max(resource.encodedByteCount, 0)) * 8
+                    / Double(max(resource.pixelCount, 1))
+                let budget = fixedQuality || bitsPerPixel <= 0 ? curve
+                    : ratio * QuickModel.dctResizedMaximumBits * level / bitsPerPixel
+                return min(kept, curve, budget)
             }
             return min(kept, QuickModel.dctGraphicsRetention * pow(level, QuickModel.dctGraphicsFloorExponent))
         case .flate, .lzw, .runLength, nil:

@@ -419,6 +419,10 @@ enum CandidateGenerator {
     /// schwelle liegen.
     static let nativeReencodeMaximumRatio = 0.70
 
+    /// Papier hat wenige Helligkeitsstufen: Sechs Handschrift-Seiten lagen
+    /// bei 1,9–2,9 bit, zwölf Folienfotos bei 5,1–5,7 bit (2026-11-03).
+    static let maximumPaperEntropy = 4.0
+
     static func generate(resource: PDFImageResource,
                          options: ImageCompressionOptions,
                          classifierPolicy: ClassifierPolicy,
@@ -534,9 +538,6 @@ enum CandidateGenerator {
         let allowsQuantizedPalette: Bool
 
         /// Budget der Kandidatensuche (§9.2, KEEP eingerechnet).
-        /// Papier hat wenige Helligkeitsstufen: Sechs Handschrift-Seiten lagen
-        /// bei 1,9–2,9 bit, zwölf Folienfotos bei 5,1–5,7 bit (2026-11-03).
-        static let maximumPaperEntropy = 4.0
 
         var hasSearchBudget: Bool {
             transforms.count + 1 < CandidateGenerator.maximumCandidatesPerImage
@@ -975,7 +976,7 @@ enum CandidateGenerator {
                   let features = StageTimer.run(stageTimer, .featureAnalysisMs, {
                       ContentFeatureExtractor.extract(from: raster)
                   }) else { return false }
-            return features.entropy <= Self.maximumPaperEntropy
+            return features.entropy <= CandidateGenerator.maximumPaperEntropy
         }
 
         /// Ab der Klassifikation – Inhalt nach Legacy-Route verteilt.

@@ -1018,6 +1018,22 @@ enum CompressionPlanner {
         return keep(.cmykGateFailed)
     }
 
+    /// Die Stufe, wenn der Lauf adaptiv entscheidet; nil bei fester Qualität
+    /// oder Graustufen-Wandlung. Für die Schnellschätzung.
+    static func adaptivePreset(for options: ImageCompressionOptions) -> QualityGatePreset? {
+        guard case .adaptive = options.qualityPolicy, !options.forceGrayscale else { return nil }
+        return QualityGatePreset(ssimThreshold: options.ssimThreshold)
+    }
+
+    /// Zielgröße eines Papier-Scans: Smart geht auf das Scan-Ziel, wie
+    /// `isDocumentScanForSmart` im Generator.
+    static func paperScanSize(for resource: PDFImageResource,
+                              options: ImageCompressionOptions) -> PixelSize? {
+        let dpi = adaptivePreset(for: options) == .smart
+            ? ImageCompressionOptions.smartDocumentScanDPI : options.targetDPI
+        return plannedSize(for: resource, options: options, dpi: dpi)
+    }
+
     /// Darf MRC dieses Raster nicht ersetzen, weil es ein JPEG im DPI-Budget
     /// ist? Dieselbe Bedingung wie `finishStructural(.withinBudget)` im
     /// Generator. Ein Zielgrößen-Ziel nimmt die Regel aus: Dort hat der Nutzer
