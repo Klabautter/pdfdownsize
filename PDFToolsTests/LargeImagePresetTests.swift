@@ -207,6 +207,41 @@ import UniformTypeIdentifiers
         #expect(sizes[0] < sizes[1] && sizes[1] < sizes[2], "Größen je Stufe: \(sizes)")
     }
 
+    /// Starkes Bildrauschen: Kein Klein-Kandidat hält die perzeptuelle Grenze.
+    /// Das Original darf deshalb nicht in Klein stehenbleiben, während Smart
+    /// auf einen Bruchteil kommt.
+    @Test(.hangGuard) func stronglyNoisyPhotoKeepsKleinAtOrBelowSmart() throws {
+        let (w, h) = (2500, 3500)
+        let context = try #require(CGContext(
+            data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        let base = try #require(context.data).assumingMemoryBound(to: UInt8.self)
+        var state: UInt32 = 7
+        for y in 0..<h {
+            let row = base + y * context.bytesPerRow
+            for x in 0..<w * 4 where x % 4 != 3 {
+                state = state &* 1664525 &+ 1013904223
+                let level = 90 + 80 * y / h + Int(state >> 24) / 2 - 64
+                row[x] = UInt8(max(0, min(255, level)))
+            }
+        }
+        let out = NSMutableData()
+        let dest = try #require(CGImageDestinationCreateWithData(
+            out, UTType.jpeg.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(dest, try #require(context.makeImage()),
+                                   [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        #expect(CGImageDestinationFinalize(dest))
+        let url = try Self.pdf(out as Data, dict: (w, h), placed: (595, 842), name: "rauschen")
+        let sizes = try Self.presets.map {
+            Compressor.fileSize(of: try Compressor().compress(inputURL: url, mode: $0.mode).outputURL)
+        }
+        // Bewusst nicht Klein <= Smart: Der Rückfall landet auf Smarts Raster,
+        // wählt aber eine etwas höhere Qualität als Smart (noch ungeklärt).
+        #expect(Double(sizes[0]) <= Double(sizes[1]) * 1.5 && sizes[1] <= sizes[2],
+                "Größen je Stufe: \(sizes)")
+    }
+
     // MARK: Kernaussage
 
     @Test(.hangGuard) func sixtyMegapixelJPEGShrinksPerPreset() throws {

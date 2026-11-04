@@ -1231,6 +1231,28 @@ enum CandidateGenerator {
                             gateClass: gateClass,
                             rungIndexOffset: ladder.count)
                     }
+                    // Starkes Rauschen: Auch die Sicherheitsstufen scheitern mit
+                    // Kleins Qualitäten an der Grenze. Das Original blieb dann in
+                    // voller Größe, während Smart auf einen Bruchteil kam. Als
+                    // letzter Rückfall tritt deshalb Smarts Ziel mit Smarts
+                    // Qualitäten und Messung an; der Optimierer wählt.
+                    if !hasSafeCandidate, let smartTarget = safety.smartTarget,
+                       CompressionPlanner.canDecode(resource, target: smartTarget, pixels: pixels),
+                       let smartImage = decodedRaster(for: smartTarget) {
+                        var smartLike = ImageCompressionOptions.smart
+                        smartLike.jpegBackend = options.jpegBackend
+                        let smartRungs = CandidateGenerator.resolutionLadder(
+                            resource: resource, target: smartTarget, options: smartLike)
+                            .filter { CompressionPlanner.canDecode(resource, target: $0, pixels: pixels) }
+                        generateJPEGCandidates(
+                            ladder: smartRungs,
+                            target: smartTarget,
+                            targetImage: smartImage,
+                            grayscale: grayscale,
+                            jpegOptions: smartLike,
+                            gateClass: gateClass,
+                            rungIndexOffset: ladder.count + rungs.count)
+                    }
                 }
             }
         }
