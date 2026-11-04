@@ -230,6 +230,8 @@ enum OCREngine {
         let pageArea = max(media.width * media.height, 1)
         var found: [Line] = []
         for resource in resources where resource.bitsPerComponent == 8 && !resource.isImageMask {
+            // Tintenanteile und L*a*b* sind kein Bild, das sich lesen lässt.
+            if case .ownSamples = resource.pixelColorSpace { continue }
             for placement in resource.placements where placement.pageIndex == pageIndex {
                 guard let t = placement.transform, t.count == 6 else { continue }
                 let (a, b, c, d, e, f) = (t[0], t[1], t[2], t[3], t[4], t[5])

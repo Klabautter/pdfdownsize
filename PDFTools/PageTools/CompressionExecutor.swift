@@ -232,7 +232,7 @@ enum CompressionExecutor {
                     // Die Komponentenzahl folgt dem Farbraum der Quelle, damit
                     // ein CMYK-Bild vierkanalig bleibt.
                     let components = grayscale
-                        ? 1 : (resource.colorSpace.componentCount ?? 3)
+                        ? 1 : (resource.pixelColorSpace.componentCount ?? 3)
                     try document.replaceImageLossless(objectID: objectID,
                                                       flateData: payload,
                                                       width: target.width,
@@ -740,7 +740,7 @@ enum CompressionExecutor {
         // sonst schreibt der Executor RGB-Bytes in ein Objekt, das als CMYK
         // deklariert wird, und das Bild wäre unbrauchbar.
         let components = action.grayscale
-            ? 1 : (resource.colorSpace.componentCount ?? 3)
+            ? 1 : (resource.pixelColorSpace.componentCount ?? 3)
 
         guard let target = action.targetSize,
               let image = pixels.decodedImage(for: resource, target: target),
@@ -846,7 +846,13 @@ struct LibQPDFPixelSource: ImagePixelSource {
         case .flate, .lzw, .runLength, nil:
             guard let data = document.imageStreamData(objectID: resource.objectID,
                                                       decoded: true) else { return nil }
-            return Self.bitmap(from: data, resource: resource)
+            var palette: ImageSamples.Palette?
+            if case .indexed = resource.colorSpace {
+                palette = document.indexedPalette(objectID: resource.objectID)
+            }
+            guard let samples = ImageSamples.normalized(data, resource: resource,
+                                                        palette: palette) else { return nil }
+            return Self.bitmap(from: samples, resource: resource)
 
         case .jpx:
             return jpxImage(resource: resource, reduce: 0)
@@ -890,19 +896,30 @@ struct LibQPDFPixelSource: ImagePixelSource {
     /// interpretiert wird.
     private func jpxImage(resource: PDFImageResource, reduce: Int) -> CGImage? {
         guard resource.filters == [.jpx],
-              resource.colorSpace.isDirectlyRenderable,
-              let expectedComponents = resource.colorSpace.componentCount,
+              resource.pixelColorSpace.isDirectlyRenderable,
+              let expectedComponents = resource.pixelColorSpace.componentCount,
               let data = document.imageStreamData(objectID: resource.objectID,
                                                   decoded: false) else { return nil }
         guard let decoded = JPXDecoder.decode(data, reduce: reduce) else { return nil }
+        // Der Shim übernimmt Präzisionen unter 8 Bit ungestreckt; solche
+        // Werte als 8 Bit zu lesen ergäbe ein fast schwarzes Bild.
         guard decoded.components == expectedComponents,
+              decoded.componentGeometries.allSatisfy({ $0.precision >= 8 }),
               decoded.width == Self.reducedEdge(resource.width, reduce: reduce),
               decoded.height == Self.reducedEdge(resource.height, reduce: reduce)
         else { return nil }
+        // Ohne /ColorSpace gilt, was das JP2 selbst sagt. Sein ICC-Profil wird
+        // beim Zeichnen ins Zielraster angewendet und fällt danach weg – wie
+        // bei JPEG-Quellen. Mit /ColorSpace zählt das Wörterbuch.
+        var embedded: CGColorSpace?
+        if resource.colorSpace == .none, let info = JPXDecoder.colorInfo(of: data) {
+            embedded = info.iccSpace
+        }
         return Self.bitmap(from: decoded.pixels,
                            width: decoded.width,
                            height: decoded.height,
-                           resource: resource)
+                           resource: resource,
+                           embeddedSpace: embedded)
     }
 
     /// ceil(edge / 2^reduce) – die Rastergröße, die cp_reduce erwartet.
@@ -1014,10 +1031,11 @@ struct LibQPDFPixelSource: ImagePixelSource {
     /// cp_reduce auf verkleinerte Masse, die nicht still dem Bilddictionary
     /// zugeordnet werden dürfen.
     static func bitmap(from data: Data, width: Int, height: Int,
-                       resource: PDFImageResource) -> CGImage? {
-        guard resource.bitsPerComponent == 8,
-              let components = resource.colorSpace.componentCount,
-              resource.colorSpace.isDirectlyRenderable else { return nil }
+                       resource: PDFImageResource,
+                       embeddedSpace: CGColorSpace? = nil) -> CGImage? {
+        guard ImageSamples.canNormalize(resource) || resource.terminalFilter == .jpx,
+              let components = resource.pixelColorSpace.componentCount,
+              resource.pixelColorSpace.isDirectlyRenderable else { return nil }
 
         let bytesPerRow = width * components
         let expected = bytesPerRow * height
@@ -1030,6 +1048,7 @@ struct LibQPDFPixelSource: ImagePixelSource {
         // 42,4 MB CMYK im Korpus blieben unangetastet.
         let colorSpace: CGColorSpace
         switch components {
+        case _ where embeddedSpace != nil: colorSpace = embeddedSpace!
         case 1: colorSpace = CGColorSpaceCreateDeviceGray()
         case 4: colorSpace = CGColorSpaceCreateDeviceCMYK()
         default: colorSpace = CGColorSpaceCreateDeviceRGB()

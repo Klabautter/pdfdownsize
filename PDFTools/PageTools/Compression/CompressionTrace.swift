@@ -271,6 +271,7 @@ enum CompressionTraceWriter {
         case .lab: return "Lab"
         case .iccBased(let n): return "ICCBased:\(n)"
         case .indexed: return "Indexed"
+        case .ownSamples: return "OwnSamples"
         case .separation: return "Separation"
         case .deviceN: return "DeviceN"
         case .pattern: return "Pattern"

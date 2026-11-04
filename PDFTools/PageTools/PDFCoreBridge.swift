@@ -521,9 +521,47 @@ extension PDFCoreDocument {
                 hasColorKeyMask: first.hasColorKeyMask,
                 isImageMask: first.isImageMask,
                 decodeArray: first.decodeArray,
+                decodedColorSpace: decodedColorSpace(of: first),
                 encodedByteCount: first.encodedByteCount,
                 placements: placementModels)
         }
+    }
+
+    /// Farbraum der Pixel, wo das Wörterbuch ihn nicht unmittelbar nennt –
+    /// siehe `PDFImageResource.decodedColorSpace`.
+    private func decodedColorSpace(of info: PDFCoreImageInfo) -> PDFColorSpaceDescriptor? {
+        let name = info.colorspace
+        if name.hasPrefix("Indexed>") {
+            return PDFColorSpaceDescriptor(rawName: String(name.dropFirst("Indexed>".count)))
+        }
+        if name.hasPrefix("DeviceN:"), let n = Int(name.dropFirst("DeviceN:".count)) {
+            return .ownSamples(components: n)
+        }
+        // Ein JPX darf /ColorSpace weglassen; dann gilt sein JP2-Kopf. Nur
+        // für diese Bilder wird der Stream schon hier gelesen.
+        if name == "None", info.filters == [PDFImageFilter.jpx.rawValue],
+           let data = imageStreamData(objectID: info.objectID, decoded: false) {
+            return JPXDecoder.colorInfo(of: data)?.space
+        }
+        return nil
+    }
+
+    /// Palette eines /Indexed-Bildes; nil, wenn es keine lesbare hat.
+    func indexedPalette(objectID: PDFObjectID) -> ImageSamples.Palette? {
+        gate.lock(); defer { gate.unlock() }
+        var hival: Int32 = 0
+        var ptr: UnsafeMutablePointer<UInt8>?
+        var len = 0
+        let rc = pdfcore_get_image_indexed_lookup(
+            handle, Int32(objectID.objectNumber), Int32(objectID.generation),
+            &hival, &ptr, &len)
+        guard rc == PDFCORE_OK.rawValue, let base = ptr else {
+            if let base = ptr { free(base) }
+            return nil
+        }
+        defer { free(base) }
+        return ImageSamples.Palette(highestIndex: Int(hival),
+                                    table: Data(bytes: base, count: len))
     }
 
     /// Der Scanner liefert Namen ohne, die Inspektion mit führendem Slash.
@@ -1692,6 +1730,90 @@ enum JPXDecoder {
         /// vorzeichenbehaftete Werte um 2^(prec-1) versetzt.
         let pixels: Data
     }
+
+    /// Was der JP2-Kopf über die Farbe sagt. Nur für JPX ohne /ColorSpace.
+    struct ColorInfo {
+        let space: PDFColorSpaceDescriptor
+        /// Eingebettetes Profil; nil bei einem aufgezählten Farbraum.
+        let iccSpace: CGColorSpace?
+    }
+
+    /// Liest die Boxen `ihdr`, `colr`, `pclr` und `cdef` aus `jp2h`.
+    ///
+    /// nil heißt: Die Farbe lässt sich nicht sicher benennen, das Bild bleibt
+    /// unangetastet. Das gilt für Palette und Alpha im JP2 (der Shim liefert
+    /// dann andere Kanäle, als ein Farbraum beschreibt), für sYCC und Lab
+    /// (keine Umrechnung vorhanden) und für einen nackten Codestream ohne
+    /// Boxen. CMYK mit ICC-Profil bleibt ebenfalls: Das Profil anzuwenden
+    /// wäre eine Farbumrechnung, es wegzulassen eine Farbänderung.
+    static func colorInfo(of stream: Data) -> ColorInfo? {
+        let bytes = [UInt8](stream.prefix(jp2HeaderScanLimit))
+        func u32(_ at: Int) -> Int? {
+            guard at >= 0, at + 4 <= bytes.count else { return nil }
+            return Int(bytes[at]) << 24 | Int(bytes[at + 1]) << 16
+                | Int(bytes[at + 2]) << 8 | Int(bytes[at + 3])
+        }
+        func u16(_ at: Int) -> Int? {
+            guard at >= 0, at + 2 <= bytes.count else { return nil }
+            return Int(bytes[at]) << 8 | Int(bytes[at + 1])
+        }
+        /// Laufrichtung über Boxen: (Typ, Nutzdaten-Start, Box-Ende).
+        func boxes(_ start: Int, _ end: Int) -> [(String, Int, Int)]? {
+            var out: [(String, Int, Int)] = []
+            var at = start
+            while at + 8 <= end {
+                guard var length = u32(at) else { return nil }
+                var body = at + 8
+                if length == 1 {
+                    guard u32(at + 8) == 0, let low = u32(at + 12) else { return nil }
+                    length = low
+                    body = at + 16
+                } else if length == 0 {
+                    length = end - at
+                }
+                guard length >= body - at else { return nil }
+                out.append((String(decoding: bytes[(at + 4)..<(at + 8)], as: UTF8.self),
+                            body, min(at + length, end)))
+                at += length
+            }
+            return out
+        }
+        guard bytes.count >= 12, bytes[4...7].elementsEqual("jP  ".utf8),
+              let top = boxes(0, bytes.count),
+              let header = top.first(where: { $0.0 == "jp2h" }),
+              header.2 > header.1,
+              let inner = boxes(header.1, header.2),
+              let ihdr = inner.first(where: { $0.0 == "ihdr" }),
+              let components = u16(ihdr.1 + 8),
+              let colr = inner.first(where: { $0.0 == "colr" }),
+              colr.1 < colr.2,
+              !inner.contains(where: { $0.0 == "pclr" }) else { return nil }
+        if let cdef = inner.first(where: { $0.0 == "cdef" }) {
+            guard let count = u16(cdef.1) else { return nil }
+            for i in 0..<count {
+                guard let type = u16(cdef.1 + 2 + i * 6 + 2), type == 0 else { return nil }
+            }
+        }
+        let method = bytes[colr.1]
+        if method == 1 {
+            guard let enumerated = u32(colr.1 + 3) else { return nil }
+            switch (enumerated, components) {
+            case (16, 3): return ColorInfo(space: .deviceRGB, iccSpace: nil)
+            case (17, 1): return ColorInfo(space: .deviceGray, iccSpace: nil)
+            case (12, 4): return ColorInfo(space: .deviceCMYK, iccSpace: nil)
+            default: return nil
+            }
+        }
+        guard method == 2 || method == 3, components == 1 || components == 3,
+              colr.1 + 3 < colr.2,
+              let profile = CGColorSpace(iccData: Data(bytes[(colr.1 + 3)..<colr.2]) as CFData),
+              profile.numberOfComponents == components else { return nil }
+        return ColorInfo(space: components == 1 ? .deviceGray : .deviceRGB, iccSpace: profile)
+    }
+
+    /// Der Kopf steht vor dem Codestream; ein Profil ist selten größer als
+    /// einige hundert KB.
+    private static let jp2HeaderScanLimit = 8 * 1024 * 1024
 
     /// `reduce` entspricht opj cp_reduce: N dekodiert direkt auf 1/2^N.
     /// `nil` heißt: nicht dekodierbar (kein gültiger Codestream, prec > 16,

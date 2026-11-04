@@ -89,9 +89,17 @@ enum PDFColorSpaceDescriptor: Hashable, Codable, Sendable {
     case pattern
     case none
     case unknown(String)
+    /// Abtastwerte eines Farbraums, den wir nicht auswerten (Lab, Separation,
+    /// DeviceN). Nur als `pixelColorSpace`: Sie werden kanalweise verkleinert
+    /// und behalten ihren /ColorSpace – nie JPEG, nie eine andere Farbwelt.
+    case ownSamples(components: Int)
 
     init(rawName: String) {
-        switch rawName {
+        // Die Bilderliste hängt die Komponentenzahl an („CalRGB:3") und bei
+        // Indexed die Basis („Indexed>DeviceRGB"). Für die Familie zählen
+        // beide nicht – ICCBased liest seine Zahl unten selbst.
+        let family = rawName.prefix { $0 != ":" && $0 != ">" }
+        switch family {
         case "DeviceGray", "G": self = .deviceGray
         case "CalGray": self = .calGray
         case "DeviceRGB", "RGB": self = .deviceRGB
@@ -101,11 +109,10 @@ enum PDFColorSpaceDescriptor: Hashable, Codable, Sendable {
         // „ICCBased:3" – die Zahl kommt aus dem Profil (/N). Ohne sie
         // liesse sich das Bild nicht aufbauen, deshalb war ICCBased früher
         // pauschal ausgeschlossen.
-        case let s where s.hasPrefix("ICCBased"):
-            let parts = s.split(separator: ":")
+        case "ICCBased":
+            let parts = rawName.split(separator: ":")
             self = .iccBased(components: parts.count > 1
                              ? Int(parts[1]) ?? 0 : 0)
-        case "ICCBased": self = .iccBased(components: 0)
         case "Indexed", "I": self = .indexed
         case "Separation": self = .separation
         case "DeviceN": self = .deviceN
@@ -123,6 +130,7 @@ enum PDFColorSpaceDescriptor: Hashable, Codable, Sendable {
         case .deviceCMYK: return 4
         // ICCBased: die Komponentenzahl steht im Profil.
         case .iccBased(let n): return n > 0 ? n : nil
+        case .ownSamples(let n): return n
         case .deviceN, .pattern, .none, .unknown: return nil
         }
     }
@@ -141,6 +149,17 @@ enum PDFColorSpaceDescriptor: Hashable, Codable, Sendable {
         // Das Profil bleibt beim Ersetzen erhalten – die Bridge übernimmt
         // den ursprünglichen /ColorSpace-Eintrag unverändert.
         case .iccBased(let n): return n == 1 || n == 3 || n == 4
+        case .ownSamples(let n): return n == 1 || n == 3 || n == 4
+        default: return false
+        }
+    }
+
+    /// Nennt der Farbraum eine Kalibrierung, die im Bitmap nicht angewendet
+    /// wird? Dann tragen die Bytes weiter seine Werte: Flate behält ihn, JPEG
+    /// schriebe sie als DeviceRGB und verschöbe die Farben.
+    var requiresLosslessToKeepCalibration: Bool {
+        switch self {
+        case .iccBased, .calGray, .calRGB: return true
         default: return false
         }
     }
@@ -179,6 +198,9 @@ enum PDFColorSpaceDescriptor: Hashable, Codable, Sendable {
         switch self {
         case .deviceCMYK: return false
         case .iccBased(let n): return n != 4
+        // Ihre Werte sind Tintenanteile oder L*a*b*, keine Helligkeiten; als
+        // JPEG mit DeviceGray/DeviceRGB ergäben sie eine andere Farbe.
+        case .lab, .separation, .deviceN, .ownSamples: return false
         default: return true
         }
     }
@@ -232,6 +254,21 @@ struct PDFImageResource: Hashable, Codable, Sendable {
     /// weggelassen, ist es kein Hindernis mehr.
     var decodeArray: [Double] = []
     var hasDecodeArray: Bool { !decodeArray.isEmpty }
+    /// Farbraum der Pixel, wenn das Wörterbuch ihn nicht unmittelbar nennt:
+    /// die Basis einer Palette, das Innere eines JPX ohne /ColorSpace, die
+    /// Kanalzahl von DeviceN. Nur über `pixelColorSpace` lesen.
+    var decodedColorSpace: PDFColorSpaceDescriptor? = nil
+
+    /// Der Farbraum, in dem das dekodierte Bild vorliegt. Alles, was mit
+    /// PIXELN arbeitet, fragt diesen; `colorSpace` beschreibt das Wörterbuch.
+    var pixelColorSpace: PDFColorSpaceDescriptor {
+        if let decodedColorSpace { return decodedColorSpace }
+        switch colorSpace {
+        case .lab: return .ownSamples(components: 3)
+        case .separation: return .ownSamples(components: 1)
+        default: return colorSpace
+        }
+    }
 
     /// Die VORGABE für dieses Bild nach ISO 32000-1, Tabelle 89.
     ///
@@ -248,7 +285,7 @@ struct PDFImageResource: Hashable, Codable, Sendable {
             guard bitsPerComponent > 0, bitsPerComponent <= 16 else { return nil }
             return [0, Double((1 << bitsPerComponent) - 1)]
         }
-        guard let n = colorSpace.componentCount, n > 0 else { return nil }
+        guard let n = pixelColorSpace.componentCount, n > 0 else { return nil }
         return (0..<n).flatMap { _ in [0.0, 1.0] }
     }
 
@@ -382,6 +419,18 @@ extension PDFImageResource {
         if hasEffectiveDecodeArray, terminalFilter == .dct {
             return .decodeArrayUnsupported
         }
+        // Eine Palette bildet über den Index ab, 16 Bit und 2/4 Bit werden auf
+        // 8 Bit gebracht, bevor CoreGraphics das Array anwendet: Erst
+        // gerundet, dann gestreckt, zerfiele der Tonwertumfang. Bei Lab ist
+        // schon die Vorgabe nicht [0 1], `hasEffectiveDecodeArray` taugt dort
+        // nicht – jedes Array sperrt.
+        if hasEffectiveDecodeArray, terminalFilter != .jpx,
+           bitsPerComponent != 8 || colorSpace == .indexed {
+            return .decodeArrayUnsupported
+        }
+        if hasDecodeArray, colorSpace == .lab {
+            return .decodeArrayUnsupported
+        }
         if let unknown = unknownFilters.first {
             return .unsupportedFilter(unknown)
         }
@@ -391,8 +440,16 @@ extension PDFImageResource {
         }
         switch terminal {
         case .dct:
-            // JPEG-Passthrough: ImageIO liefert das Bild verlässlich.
-            return .safe
+            // JPEG-Passthrough: ImageIO liefert das Bild verlässlich. Aber
+            // nur für Farbräume, deren Werte es als Helligkeit oder Farbe
+            // liefert: Eine Separation käme als Grau zurück und mit
+            // umgekehrten Tönen in die Ausgabe.
+            switch colorSpace {
+            case .lab, .separation, .deviceN, .indexed:
+                return .unsupportedColorSpace("\(colorSpace)")
+            default:
+                return .safe
+            }
         case .flate, .lzw, .runLength:
             return baselineCapability
         case .jpx:
@@ -405,12 +462,23 @@ extension PDFImageResource {
             // geschrieben, unsere eigenen Outputs können JPX also nicht
             // enthalten und im Zweitlauf nicht re-transformieren.
             //
-            // Bittiefe/Bittiefe-Fehler: /BitsPerComponent ist laut Norm 8;
-            // eine höhere Codestream-Präzision schiebt der Shim auf 8-bit
-            // herunter. Scheitert die Dekodierung (etwa verpackte
-            // Vorfilter, prec > 16, korrupte Bytes), meldet die Quelle nil
-            // und das Bild bleibt per KeepReason.decodeFailed.
-            return baselineCapability
+            // Bittiefe: /BitsPerComponent zählt bei JPX nicht, die Präzision
+            // steht im Codestream, und der Shim schiebt 9–16 Bit auf 8. Es
+            // darf fehlen (ISO 32000-1, Tabelle 89), ebenso /ColorSpace –
+            // dann liest die Bridge den Farbraum aus dem JP2-Kopf. Scheitert
+            // die Dekodierung (etwa verpackte Vorfilter, prec < 8 oder > 16,
+            // korrupte Bytes), meldet die Quelle nil und das Bild bleibt per
+            // KeepReason.decodeFailed.
+            //
+            // Die Abtastwerte eines indizierten JPX wären Palettenplätze;
+            // dafür gibt es keinen Pfad.
+            if colorSpace == .indexed {
+                return .unsupportedColorSpace("\(colorSpace)")
+            }
+            guard pixelColorSpace.isDirectlyRenderable else {
+                return .unsupportedColorSpace("\(colorSpace)")
+            }
+            return .safe
         case .ccitt:
             // V2-3c (§9.10): CCITT-EINGÄNGE sind als trueBilevel dekodierbar
             // und nehmen am Bilevel-Race teil (KEEP / G4 / JBIG2 lossless).
@@ -433,13 +501,140 @@ extension PDFImageResource {
     }
 
     /// Prüfungen, die für alle selbst zu dekodierenden Formate gelten.
+    ///
+    /// Andere Bittiefen als 8 sind kein Hindernis mehr: `ImageSamples` bringt
+    /// sie beim Dekodieren auf 8 Bit, danach laufen sie wie jedes andere Bild.
+    /// 1 Bit bleibt außerhalb von Palette und Separation gesperrt: Zweiwertiges
+    /// Grau gehört in die Bilevel-Politik und wird nie resampelt.
     private var baselineCapability: ImageTransformCapability {
-        guard bitsPerComponent == 8 else {
+        guard ImageSamples.canNormalize(self) else {
             return .unsupportedBitDepth(bitsPerComponent)
         }
-        guard colorSpace.isDirectlyRenderable else {
+        guard pixelColorSpace.isDirectlyRenderable else {
             return .unsupportedColorSpace("\(colorSpace)")
         }
         return .safe
+    }
+}
+
+// MARK: - Abtastwerte
+
+/// Bringt dekodierte Stream-Bytes auf das Format der Pipeline: je Kanal ein
+/// Byte, Zeilen ohne Füllbits, Paletten aufgelöst.
+///
+/// 16 Bit → 8 Bit ist Rundung auf das, was Betrachter ohnehin anzeigen: Sie
+/// rendern in 8 Bit je Kanal, das Ergebnis weicht um höchstens einen Tonwert
+/// von dem ab, was sie aus dem Original errechnen. Deshalb gilt es in jeder
+/// Stufe; die Gates messen dahinter wie bei jedem anderen Bild.
+enum ImageSamples {
+
+    /// Palette eines /Indexed-Bildes, wie sie im Dokument steht.
+    struct Palette: Equatable, Sendable {
+        let highestIndex: Int
+        let table: Data
+    }
+
+    static func canNormalize(_ resource: PDFImageResource) -> Bool {
+        switch resource.bitsPerComponent {
+        case 8: return true
+        case 16: return resource.colorSpace != .indexed
+        case 2, 4: return true
+        case 1:
+            switch resource.colorSpace {
+            case .indexed, .separation: return true
+            default: return false
+            }
+        default: return false
+        }
+    }
+
+    /// nil, wenn Länge oder Palette nicht passen: Ein falsch gedeutetes Bild
+    /// wäre schlimmer als ein übersprungenes.
+    static func normalized(_ data: Data, resource: PDFImageResource,
+                           palette: Palette?) -> Data? {
+        let bits = resource.bitsPerComponent
+        let (width, height) = (resource.width, resource.height)
+        guard width > 0, height > 0, canNormalize(resource) else { return nil }
+        if case .indexed = resource.colorSpace {
+            guard let palette,
+                  let components = resource.pixelColorSpace.componentCount else { return nil }
+            return expandPalette(data, palette: palette, components: components,
+                                 bits: bits, width: width, height: height)
+        }
+        guard bits != 8 else { return data }
+        guard let components = resource.pixelColorSpace.componentCount else { return nil }
+        return bits == 16
+            ? reduce16Bit(data, samples: width * components * height)
+            : widen(data, bits: bits, samplesPerRow: width * components, height: height)
+    }
+
+    private static func expandPalette(_ data: Data, palette: Palette, components: Int,
+                                      bits: Int, width: Int, height: Int) -> Data? {
+        let entries = palette.highestIndex + 1
+        let rowBytes = (width * bits + 7) / 8
+        guard components > 0, palette.table.count >= entries * components,
+              data.count >= rowBytes * height else { return nil }
+        // Plätze jenseits von hival begrenzt die Norm auf hival.
+        let table = [UInt8](palette.table)
+        var output = Data(count: width * height * components)
+        let mask = (1 << bits) - 1
+        output.withUnsafeMutableBytes { (out: UnsafeMutableRawBufferPointer) in
+            data.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
+                table.withUnsafeBufferPointer { lookup in
+                    var o = 0
+                    for y in 0..<height {
+                        let row = y * rowBytes
+                        for x in 0..<width {
+                            let bit = x * bits
+                            let shift = 8 - bits - (bit & 7)
+                            let raw = (Int(source[row + bit >> 3]) >> shift) & mask
+                            let entry = min(raw, entries - 1) * components
+                            for c in 0..<components {
+                                out[o] = lookup[entry + c]
+                                o += 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return output
+    }
+
+    private static func reduce16Bit(_ data: Data, samples: Int) -> Data? {
+        guard data.count >= samples * 2 else { return nil }
+        var output = Data(count: samples)
+        output.withUnsafeMutableBytes { (out: UnsafeMutableRawBufferPointer) in
+            data.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
+                for i in 0..<samples {
+                    // Big Endian (ISO 32000-1, 8.9.5.2); runden statt
+                    // abschneiden, damit 0xFFFF Weiß bleibt und Mitten
+                    // nicht nach unten wandern.
+                    let value = UInt32(source[2 * i]) << 8 | UInt32(source[2 * i + 1])
+                    out[i] = UInt8((value * 255 + 32_767) / 65_535)
+                }
+            }
+        }
+        return output
+    }
+
+    private static func widen(_ data: Data, bits: Int, samplesPerRow: Int, height: Int) -> Data? {
+        let rowBytes = (samplesPerRow * bits + 7) / 8
+        guard data.count >= rowBytes * height else { return nil }
+        let mask = (1 << bits) - 1
+        var output = Data(count: samplesPerRow * height)
+        output.withUnsafeMutableBytes { (out: UnsafeMutableRawBufferPointer) in
+            data.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
+                for y in 0..<height {
+                    for x in 0..<samplesPerRow {
+                        let bit = x * bits
+                        let shift = 8 - bits - (bit & 7)
+                        let raw = (Int(source[y * rowBytes + bit >> 3]) >> shift) & mask
+                        out[y * samplesPerRow + x] = UInt8(raw * 255 / mask)
+                    }
+                }
+            }
+        }
+        return output
     }
 }

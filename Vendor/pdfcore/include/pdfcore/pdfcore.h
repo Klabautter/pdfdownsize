@@ -1021,6 +1021,14 @@ int pdfcore_zopfli_compress(const unsigned char *data, size_t data_len,
 int pdfcore_flate_stream_list(pdfcore_document_t *doc, size_t min_raw_bytes,
                               char ***out, int *count);
 
+/* Palette eines /Indexed-Bildes: hival und die Rohbytes der Tabelle, aus
+ * String oder Stream. Anderer Farbraum → PDFCORE_ERR_CHECK_FAILED.
+ * *out malloc'd, free(). */
+int pdfcore_get_image_indexed_lookup(pdfcore_document_t *doc,
+                                     int obj_number, int generation,
+                                     int *hival,
+                                     unsigned char **out, size_t *len);
+
 /* Rohe (kodierte) Stream-Bytes eines BELIEBIGEN Stream-Objekts –
  * Gegenstück zu pdfcore_get_image_object_data(decoded: false).
  * *out malloc'd, free(). */

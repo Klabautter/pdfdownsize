@@ -314,8 +314,8 @@ enum CompressionEstimator {
         var neutralVotes: [Bool] = []
         lazy var pixels = LibQPDFPixelSource(document: document)
         func contentIsNeutral(_ resource: PDFImageResource) -> Bool {
-            if resource.colorSpace.componentCount == 1 { return true }
-            guard resource.colorSpace.componentCount == 3,
+            if resource.pixelColorSpace.componentCount == 1 { return true }
+            guard resource.pixelColorSpace.componentCount == 3,
                   resource.terminalFilter == .dct else { return false }
             if neutralVotes.count >= QuickModel.neutralChromaSamples {
                 return neutralVotes.filter { $0 }.count * 2 > neutralVotes.count
@@ -390,7 +390,7 @@ enum CompressionEstimator {
                                    contentIsNeutral: (PDFImageResource) -> Bool) -> Double? {
         guard resource.transformCapability.isSafe, !resource.isImageMask,
               resource.bitsPerComponent == 8,
-              resource.colorSpace.allowsLossyReplacement,
+              resource.pixelColorSpace.allowsLossyReplacement,
               resource.placements.count == 1,
               let placement = resource.placements.first,
               min(placement.placedWidthPoints, placement.placedHeightPoints)
@@ -434,7 +434,7 @@ enum CompressionEstimator {
         guard resource.transformCapability.isSafe, !resource.isImageMask else { return 1 }
         if resource.bitsPerComponent == 1 { return QuickModel.bilevelRetention }
         let resized = ratio < 0.999
-        let samples = Double(max(resource.pixelCount * max(resource.colorSpace.componentCount ?? 1, 1), 1))
+        let samples = Double(max(resource.pixelCount * max(resource.pixelColorSpace.componentCount ?? 1, 1), 1))
         let bitsPerSample = Double(max(resource.encodedByteCount, 0)) * 8 / samples
         let level = qualityFloor / QuickModel.referenceFloor
         switch resource.terminalFilter {
