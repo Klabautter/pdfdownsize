@@ -46,7 +46,7 @@ enum PageScanAnalyzer {
         var placementsByPage: [Int: [(resource: PDFImageResource,
                                       placement: PDFImagePlacement)]] = [:]
         for resource in resources {
-            for placement in resource.placements {
+            for placement in resource.pageContentPlacements {
                 placementsByPage[placement.pageIndex, default: []]
                     .append((resource, placement))
             }

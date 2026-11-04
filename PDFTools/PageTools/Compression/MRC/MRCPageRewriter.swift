@@ -398,6 +398,7 @@ enum MRCPageRewriter {
         for resource in resources {
             guard resource.placements.count == 1,
                   let placement = resource.placements.first,
+                  placement.isOffPage != true,
                   placement.pageIndex == pageIndex,
                   placement.placedWidthPoints > 0,
                   placement.placedHeightPoints > 0 else { continue }
@@ -415,7 +416,7 @@ enum MRCPageRewriter {
         var secondarySum = 0.0
         for resource in resources {
             if resource.objectID == dominant.objectID { continue }
-            for placement in resource.placements where placement.pageIndex == pageIndex {
+            for placement in resource.pageContentPlacements where placement.pageIndex == pageIndex {
                 guard placement.placedWidthPoints > 0,
                       placement.placedHeightPoints > 0 else { return nil }
                 secondarySum += min(1.0,

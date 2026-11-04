@@ -792,7 +792,7 @@ enum CandidateGenerator {
         /// überspringen sich dann selbst (Konservativität unverändert).
         private func classificationContext() -> ContentClassifier.ClassificationContext {
             PageScanAnalyzer.classificationContext(
-                for: resource.placements.first.flatMap { pageContext[$0.pageIndex] },
+                for: resource.pageContentPlacements.first.flatMap { pageContext[$0.pageIndex] },
                 resource: resource)
         }
 
@@ -809,7 +809,8 @@ enum CandidateGenerator {
                   resource.colorSpace.allowsLossyReplacement,
                   !resource.placements.isEmpty,
                   resource.placements.allSatisfy({ placement in
-                      guard let page = pageContext[placement.pageIndex] else { return false }
+                      guard placement.isOffPage != true,
+                            let page = pageContext[placement.pageIndex] else { return false }
                       return page.classification == .rasterScan
                           || page.classification == .rasterScanWithOCR
                   }),
@@ -915,7 +916,7 @@ enum CandidateGenerator {
                 // zwei Papers und eine USGS-Karte je bis zu 3 % weniger).
                 // Abbildungen gesetzter Seiten laufen überall unverändert.
                 let onScanPage: Bool = {
-                    guard let page = resource.placements.first
+                    guard let page = resource.pageContentPlacements.first
                             .flatMap({ pageContext[$0.pageIndex] }) else { return false }
                     return page.classification == .rasterScan
                         || page.classification == .rasterScanWithOCR

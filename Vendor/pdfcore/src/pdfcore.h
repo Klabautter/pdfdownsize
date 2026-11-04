@@ -57,8 +57,10 @@ int pdfcore_page_annotation_counts(pdfcore_document_t *doc, int page_index,
  * Teil der Zeile – ein Bild wird NIE über seinen Resource-Namen adressiert.
  * Format:
  *   "page|name|width|height|bitsPerComponent|colorspace|filters|smask|shared|
- *    placedW|placedH|objNum|gen|mask|imageMask|decode|rawLength"
- * mask: 0 = keine, 1 = Schablone (Stream), 2 = Farbschlüssel (Array). */
+ *    placedW|placedH|objNum|gen|mask|imageMask|decode|rawLength|offPage"
+ * mask: 0 = keine, 1 = Schablone (Stream), 2 = Farbschlüssel (Array).
+ * offPage: 1 = erreicht über tiling Pattern, gezeichnete Annotations-Appearance
+ * oder Soft-Mask-Gruppe, dann gilt der Name nicht im Seiten-Content. */
 #define PDFCORE_LIST_IMAGES          3
 /* Masterplan Finding 6 – vollständiger semantischer Snapshot.
  * Alle Listen sind deterministisch sortiert bzw. in Dokumentreihenfolge. */
@@ -94,6 +96,13 @@ int pdfcore_page_annotation_counts(pdfcore_document_t *doc, int page_index,
  * Form (isImage=0). Formen ohne Bild im Teilbaum sind ausgefiltert;
  * Zykeln und Doppelbesuche sind abgeschnitten (Erster Fund gewinnt). */
 #define PDFCORE_LIST_FORM_RESOURCES  10
+/* Zeichengraph der Seiten, die Bilder außerhalb ihres XObject-Baums tragen
+ * (tiling Patterns, Annotations-Appearances, Soft-Mask-Gruppen):
+ * page|parentObj|parentGen|kind|name|targetObj|targetGen|a,b,c,d,e,f
+ * parent -1|-1 = die Seite; kind = image, form, pattern, softmask, annot;
+ * Matrix "-" = Geometrie nicht verlässlich bestimmbar. Bei annot ist sie die
+ * fertige Abbildung Appearance → Seite (PDF 32000-1, Algorithmus 8.1). */
+#define PDFCORE_LIST_PAINT_EDGES     11
 
 /// list_id gemäß Konstanten oben.
 int pdfcore_string_list_count(pdfcore_document_t *doc, int list_id, int *count);

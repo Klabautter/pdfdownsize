@@ -142,7 +142,7 @@ enum OCREngine {
                                                    resources: [PDFImageResource]) -> [Int: Double] {
         var coverage: [Int: Double] = [:]
         for resource in resources {
-            for placement in resource.placements {
+            for placement in resource.pageContentPlacements {
                 guard let page = doc.page(at: placement.pageIndex) else { continue }
                 let media = page.bounds(for: .mediaBox)
                 let share = placement.placedWidthPoints * placement.placedHeightPoints
