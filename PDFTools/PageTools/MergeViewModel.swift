@@ -12,7 +12,19 @@ final class MergeViewModel: ObservableObject {
 
     @Published var project = PageProject()
     @Published var selectedPageIDs: Set<UUID> = []
-    @Published var isProcessing = false
+
+    /// Läuft gerade Zusammenführen, Extrahieren, Aufteilen oder Bildexport?
+    /// Ein Wert statt `isProcessing` + `isCancelling` (das nach einem
+    /// abgebrochenen „Mit Smart komprimieren" auf true stehen blieb).
+    enum Activity: Equatable {
+        case idle
+        case processing(cancelling: Bool)
+    }
+    @Published private(set) var activity: Activity = .idle
+    var isProcessing: Bool { activity != .idle }
+    /// Sichtbarer Abbruch-Zustand für Leiste, Menü und Tests (S3, Review 2026-10-09).
+    var isCancelling: Bool { activity == .processing(cancelling: true) }
+
     @Published var processingLabel = ""
     @Published var progress: Double = 0
     @Published var errorMessage: String?
@@ -60,10 +72,45 @@ final class MergeViewModel: ObservableObject {
         let kind: OutcomeKind
     }
 
-    @Published var outcome: MergeOutcome?
+    /// Ergebnis von Zusammenführen/Extrahieren. Früher zwei Optionals
+    /// (`outcome`, `savedURL`); ob das Temp beim Verlassen gelöscht werden
+    /// darf, entschied jede Aufrufstelle selbst.
+    enum OutcomeState {
+        case none
+        /// Liegt als Temp-Datei vor.
+        case unsaved(MergeOutcome)
+        /// Gesichert – das Temp wurde nach `to` verschoben.
+        case saved(MergeOutcome, to: URL)
+    }
+    @Published private(set) var outcomeState: OutcomeState = .none
+
+    var outcome: MergeOutcome? {
+        switch outcomeState {
+        case .none: return nil
+        case .unsaved(let o), .saved(let o, _): return o
+        }
+    }
 
     /// Gespeicherte Zieldatei des letzten Merges (auch für Menü-Befehle erreichbar, §33).
-    @Published var savedURL: URL?
+    var savedURL: URL? {
+        if case .saved(_, let url) = outcomeState { return url }
+        return nil
+    }
+
+    /// unsaved/saved → none; ein ungesichertes Temp wird gelöscht (kein Leak).
+    func discardOutcome() {
+        if case .unsaved(let o) = outcomeState {
+            try? FileManager.default.removeItem(at: o.url)
+        }
+        outcomeState = .none
+    }
+
+    /// „Zurück zu den Seiten" bzw. Schließen der Ergebnisansicht.
+    func leaveOutcome() {
+        guard outcome != nil else { return }
+        discardOutcome()
+        errorMessage = nil
+    }
 
     /// View soll den Datei-Importer öffnen (aus Menü-Befehl „PDFs hinzufügen …“).
     @Published var wantsImport = false
@@ -384,16 +431,12 @@ final class MergeViewModel: ObservableObject {
     func resetChanges() {
         guard hasChanges else { return }
         // Verworfenes Merge-Ergebnis aufräumen (nicht gespeichert → Temp löschen).
-        if let previous = outcome, savedURL == nil {
-            try? FileManager.default.removeItem(at: previous.url)
-        }
+        discardOutcome()
         let before = project
         let base = baselineProject
 
         project = base
         selectedPageIDs.removeAll()
-        outcome = nil
-        savedURL = nil
         errorMessage = nil
 
         registerPair(String(localized: "Änderungen zurücksetzen"),
@@ -430,23 +473,18 @@ final class MergeViewModel: ObservableObject {
                               combinedInputBytes: Int64? = nil) {
         guard !pages.isEmpty else { return }
         // Alte Temp-Ausgabe aufräumen, bevor ein neuer Lauf startet (kein Leak).
-        if let previous = outcome, savedURL == nil {
-            try? FileManager.default.removeItem(at: previous.url)
-        }
-        isProcessing = true
-        isCancelling = false
+        discardOutcome()
+        activity = .processing(cancelling: false)
         progress = 0
         processingLabel = "Vorbereiten …"
         errorMessage = nil
-        outcome = nil
-        savedURL = nil
 
         let inputBytes = combinedInputBytes ?? project.totalSourceBytes
         let runID = UUID()
         activeRunID = runID
 
         workTask = Task { @MainActor in
-            defer { isProcessing = false; isCancelling = false }
+            defer { activity = .idle }
             do {
                 let tempURL = FileManager.default.temporaryDirectory
                     .appendingPathComponent(UUID().uuidString)
@@ -487,11 +525,11 @@ final class MergeViewModel: ObservableObject {
                 }
 
                 progress = 1
-                outcome = MergeOutcome(url: tempURL,
-                                       pageCount: pages.count,
-                                       outputBytes: Self.fileSize(tempURL),
-                                       combinedInputBytes: inputBytes,
-                                       kind: kind)
+                outcomeState = .unsaved(MergeOutcome(url: tempURL,
+                                                     pageCount: pages.count,
+                                                     outputBytes: Self.fileSize(tempURL),
+                                                     combinedInputBytes: inputBytes,
+                                                     kind: kind))
             } catch is CancellationError {
                 errorMessage = nil
             } catch {
@@ -500,12 +538,9 @@ final class MergeViewModel: ObservableObject {
         }
     }
 
-    /// Sichtbarer Abbruch-Zustand für Leiste, Menü und Tests (S3, Review 2026-10-09).
-    @Published private(set) var isCancelling = false
-
     func cancelProcessing() {
         guard isProcessing else { return }
-        isCancelling = true
+        activity = .processing(cancelling: true)
         workTask?.cancel()
         engineTask?.cancel()
     }
@@ -522,12 +557,11 @@ final class MergeViewModel: ObservableObject {
                      to folder: URL,
                      baseName: String) async throws -> [URL] {
         guard !chunks.isEmpty else { return [] }
-        isProcessing = true
-        isCancelling = false
+        activity = .processing(cancelling: false)
         progress = 0
         processingLabel = "Vorbereiten …"
         errorMessage = nil
-        defer { isProcessing = false; isCancelling = false }
+        defer { activity = .idle }
 
         let fm = FileManager.default
         var written: [URL] = []
@@ -595,12 +629,11 @@ final class MergeViewModel: ObservableObject {
                       options: PageImageExporter.Options,
                       to folder: URL) async throws -> [URL] {
         guard !pages.isEmpty else { return [] }
-        isProcessing = true
-        isCancelling = false
+        activity = .processing(cancelling: false)
         progress = 0
         processingLabel = "Vorbereiten …"
         errorMessage = nil
-        defer { isProcessing = false; isCancelling = false }
+        defer { activity = .idle }
 
         let total = pages.count
         return try await PageImageExporter.export(pages: pages,
@@ -637,9 +670,10 @@ final class MergeViewModel: ObservableObject {
     }
 
     func compressOutcomeWithSmart() {
-        guard let current = outcome, !isProcessing else { return }
-        isProcessing = true
-        isCancelling = false
+        // Nur ein ungesichertes Ergebnis: Nach dem Sichern liegt das Temp
+        // nicht mehr unter `current.url`.
+        guard case .unsaved(let current) = outcomeState, !isProcessing else { return }
+        activity = .processing(cancelling: false)
         processingLabel = "Smart komprimieren …"
         progress = 0
         errorMessage = nil
@@ -662,7 +696,7 @@ final class MergeViewModel: ObservableObject {
 
         workTask = Task { @MainActor in
             defer {
-                isProcessing = false
+                activity = .idle
                 engineTask = nil
             }
             do {
@@ -684,11 +718,11 @@ final class MergeViewModel: ObservableObject {
                     try? FileManager.default.removeItem(at: url)
                 }
                 progress = 1
-                outcome = MergeOutcome(url: result.outputURL,
-                                       pageCount: current.pageCount,
-                                       outputBytes: result.outputBytes,
-                                       combinedInputBytes: current.combinedInputBytes,
-                                       kind: kind)
+                outcomeState = .unsaved(MergeOutcome(url: result.outputURL,
+                                                     pageCount: current.pageCount,
+                                                     outputBytes: result.outputBytes,
+                                                     combinedInputBytes: current.combinedInputBytes,
+                                                     kind: kind))
             } catch is CancellationError {
                 errorMessage = nil
             } catch {
@@ -731,7 +765,7 @@ final class MergeViewModel: ObservableObject {
             } else {
                 try FileManager.default.moveItem(at: outcome.url, to: dest)
             }
-            savedURL = dest
+            outcomeState = .saved(outcome, to: dest)
             return dest
         } catch {
             errorMessage = error.localizedDescription

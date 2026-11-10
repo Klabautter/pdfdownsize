@@ -783,13 +783,7 @@ struct OrganizeView: View {
     }
 
     private func leaveOutcome() {
-        guard let o = vm.outcome else { return }
-        if vm.savedURL == nil {
-            try? FileManager.default.removeItem(at: o.url)
-        }
-        vm.outcome = nil
-        vm.savedURL = nil
-        vm.errorMessage = nil
+        vm.leaveOutcome()
     }
 }
 

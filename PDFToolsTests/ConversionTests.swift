@@ -11,7 +11,7 @@ struct ConversionTests {
         let vm = ConversionViewModel()
         let original = URL(fileURLWithPath: "/tmp/source-a.pdf")
         vm.accept([original])
-        vm.isWorking = true
+        vm.stage = .working(cancelling: false)
         vm.progress = 0.5
         vm.accept([URL(fileURLWithPath: "/tmp/source-b.pdf")])
         vm.reset()

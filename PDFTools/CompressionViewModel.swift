@@ -59,25 +59,25 @@ final class CompressionViewModel: ObservableObject {
     @Published var mode: CompressionMode = .smart {
         didSet {
             guard mode != oldValue else { return }
-            result = nil
-            errorMessage = nil
             // Ein ungesichertes Ergebnis gehört zum alten Modus – stehen
             // lassen hieße, eine Smart-Datei unter „Klein" anzubieten.
-            discardPending()
+            clearSingleOutcome()
+            errorMessage = nil
             inspectorPinned = (mode == .custom)
             refreshEstimate()
             refreshBulkEstimates()
         }
     }
-    @Published var result: CompressionResult?
-    @Published var pendingResult: CompressionResult?
-    @Published var isWorking = false
+    /// Läuft gerade ein Einzel- oder Stapellauf? Siehe `Activity`.
+    @Published private(set) var activity: Activity = .idle
+    /// Ergebnis des Einzelpfads: keins, ungesichert oder gesichert.
+    @Published private(set) var singleOutcome: SingleOutcome = .none
     @Published var errorMessage: String?
     @Published var hasSignature = false
+    /// Fortschritt des laufenden Laufs; nach einem Stapellauf trägt
+    /// `progressLabel` die Zusammenfassung („3 von 4 komprimiert").
     @Published var progressValue: Double = 0
     @Published var progressLabel = ""
-    @Published private(set) var workStartedAt: Date?
-    @Published private(set) var isCancelling = false
     @Published var estimate: CompressionEstimate?
     @Published var estimateRefreshing = false
     /// Phase V2-10 (§16.3) – Zielgrößen-Assessment des Estimators, nur
@@ -182,6 +182,73 @@ final class CompressionViewModel: ObservableObject {
             }
         }
         return best
+    }
+
+    // MARK: - Lauf- und Ergebniszustand
+
+    /// Ein laufender Einzel- oder Stapellauf. Das Abbruch-Flag gehört zum
+    /// Lauf: Rückmeldungen eines Laufs, der nicht mehr der aktuelle ist
+    /// (beendet oder abgelöst), schreiben nichts mehr.
+    struct Run {
+        let startedAt: Date
+        let flag: CancelFlag
+        var isCancelling = false
+    }
+
+    /// EIN Wert statt der früheren losen Felder `isWorking`, `workStartedAt`,
+    /// `isCancelling` und `cancelFlag`: „bricht ab" ohne Lauf oder ein Lauf
+    /// ohne Startzeit sind nicht mehr darstellbar.
+    enum Activity {
+        case idle
+        case running(Run)
+    }
+
+    /// Ergebnis des Einzelpfads. Früher zwei Optionals (`pendingResult`,
+    /// `result`), die nie gleichzeitig gesetzt sein durften.
+    enum SingleOutcome {
+        case none
+        /// Fertig, liegt als Temp-Datei vor und ist noch nicht gesichert.
+        case pending(CompressionResult)
+        /// Gesichert; `outputURL` ist das Ziel.
+        case saved(CompressionResult)
+    }
+
+    var isWorking: Bool { currentRun != nil }
+    var workStartedAt: Date? { currentRun?.startedAt }
+    var isCancelling: Bool { currentRun?.isCancelling ?? false }
+    var pendingResult: CompressionResult? {
+        if case .pending(let r) = singleOutcome { return r }
+        return nil
+    }
+    var result: CompressionResult? {
+        if case .saved(let r) = singleOutcome { return r }
+        return nil
+    }
+
+    private var currentRun: Run? {
+        if case .running(let run) = activity { return run }
+        return nil
+    }
+
+    /// Gehört `flag` zum laufenden Lauf?
+    private func isCurrent(_ flag: CancelFlag) -> Bool {
+        currentRun?.flag === flag
+    }
+
+    /// idle → running. Setzt den Fortschritt zurück und liefert das
+    /// Abbruch-Flag des neuen Laufs.
+    private func beginRun() -> CancelFlag {
+        let flag = CancelFlag()
+        activity = .running(Run(startedAt: Date(), flag: flag))
+        progressValue = 0
+        progressLabel = String(localized: "Dokument wird analysiert …")
+        return flag
+    }
+
+    /// running → idle, aber nur für den eigenen Lauf.
+    private func endRun(_ flag: CancelFlag) {
+        guard isCurrent(flag) else { return }
+        activity = .idle
     }
 
     var canCompress: Bool {
@@ -313,11 +380,10 @@ final class CompressionViewModel: ObservableObject {
         workTask?.cancel()
         workTask = nil
         clearBulk()
-        discardPending()
+        clearSingleOutcome()
 
         inputURL = url
         selectedPage = 0
-        result = nil
         errorMessage = nil
         hasSignature = false
         estimate = nil
@@ -362,9 +428,8 @@ final class CompressionViewModel: ObservableObject {
         estimateDebounceTask?.cancel()
         thumbnailTask?.cancel()
         pageThumbnails = [:]
-        discardPending()
+        clearSingleOutcome()
         inputURL = nil
-        result = nil
         errorMessage = nil
         hasSignature = false
         estimate = nil
@@ -495,16 +560,12 @@ final class CompressionViewModel: ObservableObject {
         guard let input = inputURL, canCompress else { return }
         workTask?.cancel()
 
-        isWorking = true
-        result = nil
+        // Ein noch ungesichertes Ergebnis würde sonst ohne Temp-Aufräumen
+        // ersetzt (nur programmatisch erreichbar; die Oberfläche zeigt dann
+        // keinen Komprimieren-Knopf).
+        clearSingleOutcome()
         errorMessage = nil
-        progressValue = 0
-        progressLabel = String(localized: "Dokument wird analysiert …")
-        workStartedAt = Date()
-        isCancelling = false
-        cancelFlag = CancelFlag()
-
-        let flag = cancelFlag
+        let flag = beginRun()
         // Dasselbe Optionsobjekt, das auch die Schätzung erzeugt hat.
         let options = currentOptions
         workTask = Task.detached(priority: .userInitiated) {
@@ -514,7 +575,8 @@ final class CompressionViewModel: ObservableObject {
                                                            options: options,
                                                            isCancelled: { flag.isCancelled }) { fraction, label in
                     Task { @MainActor in
-                        guard self.cancelFlag === flag else { return }
+                        // Verspätete Meldungen nach Laufende schreiben nicht mehr.
+                        guard self.isCurrent(flag) else { return }
                         self.progressValue = fraction
                         self.progressLabel = ProgressText.userFacing(label)
                     }
@@ -522,14 +584,12 @@ final class CompressionViewModel: ObservableObject {
                 completed = tempResult
                 try Task.checkCancellation()
                 await MainActor.run {
-                    guard self.cancelFlag === flag else {
+                    guard self.isCurrent(flag) else {
                         try? FileManager.default.removeItem(at: tempResult.outputURL)
                         return
                     }
-                    self.isWorking = false
-                    self.workStartedAt = nil
-                    self.isCancelling = false
-                    self.pendingResult = tempResult
+                    self.endRun(flag)
+                    self.singleOutcome = .pending(tempResult)
                 }
             } catch is CancellationError {
                 // Epic P9: fertige Temp-Ausgabe bei Abbruch sofort entsorgen.
@@ -537,39 +597,46 @@ final class CompressionViewModel: ObservableObject {
                     try? FileManager.default.removeItem(at: done.outputURL)
                 }
                 await MainActor.run {
-                    guard self.cancelFlag === flag else { return }
-                    self.isWorking = false
-                    self.workStartedAt = nil
-                    self.isCancelling = false
+                    guard self.isCurrent(flag) else { return }
+                    self.endRun(flag)
                     self.progressLabel = ""
                 }
             } catch {
                 await MainActor.run {
-                    guard self.cancelFlag === flag else { return }
+                    guard self.isCurrent(flag) else { return }
                     self.errorMessage = Self.userFacingMessage(for: error)
-                    self.isWorking = false
-                    self.workStartedAt = nil
-                    self.isCancelling = false
+                    self.endRun(flag)
                 }
             }
         }
     }
 
     func cancelWork() {
-        guard isWorking else { return }
-        isCancelling = true
+        guard case .running(var run) = activity else { return }
+        run.isCancelling = true
+        activity = .running(run)
         progressLabel = String(localized: "Wird abgebrochen …")
-        cancelFlag.cancel()
+        run.flag.cancel()
         workTask?.cancel()
     }
 
     // MARK: - Bulk (Phase 8 + Bulk-UI)
 
-    /// Ergebnisse des letzten Bulk-Laufs (nur Erfolge, in Eingabereihenfolge).
-    /// Die zugehörige Eingabe steht parallel in `bulkResultInputs`.
-    @Published private(set) var bulkResults: [CompressionResult] = []
-    /// Eingabe je Erfolg in `bulkResults` (gleicher Index).
-    @Published private(set) var bulkResultInputs: [URL] = []
+    /// Ein erfolgreich komprimiertes Stapel-Dokument. Eingabe, Ergebnis und
+    /// Sicherungsziel stehen zusammen – früher drei parallele Listen
+    /// (`bulkResults`, `bulkResultInputs`, `bulkSavedURLs`) plus eine
+    /// Gesichert-Menge in der View, die beim Werkzeugwechsel verloren ging.
+    struct BulkSuccess {
+        let input: URL
+        let result: CompressionResult
+        /// Ziel nach dem Sichern; nil = noch ungesichert.
+        var savedTo: URL?
+    }
+
+    /// Erfolge des letzten Bulk-Laufs, in Eingabereihenfolge.
+    @Published private(set) var bulkSuccesses: [BulkSuccess] = []
+    var bulkResults: [CompressionResult] { bulkSuccesses.map(\.result) }
+    var bulkResultInputs: [URL] { bulkSuccesses.map(\.input) }
     /// Eingaben des (laufenden oder letzten) Bulk-Laufs, in Reihenfolge.
     @Published private(set) var bulkInputs: [URL] = []
     /// Billige Metadaten je Bulk-Eingabe (nur Öffnen, kein Planen):
@@ -589,8 +656,18 @@ final class CompressionViewModel: ObservableObject {
     @Published private(set) var bulkErrors: [URL: String] = [:]
     /// Einzeln abgebrochene Eingaben (laufen nicht mehr, Rest läuft weiter).
     @Published private(set) var bulkCancelledURLs: Set<URL> = []
-    /// Ziele nach „Alle sichern" (gleiche Reihenfolge wie Ergebnisse).
-    @Published private(set) var bulkSavedURLs: [URL] = []
+    /// Gesicherte Ziele, in Reihenfolge der Ergebnisse.
+    var bulkSavedURLs: [URL] { bulkSuccesses.compactMap(\.savedTo) }
+
+    /// Wurde das Ergebnis zu dieser Eingabe schon gesichert?
+    func isBulkResultSaved(for url: URL) -> Bool {
+        bulkSuccesses.first { $0.input == url }?.savedTo != nil
+    }
+
+    /// Alle Erfolge gesichert (und es gibt mindestens einen).
+    var allBulkResultsSaved: Bool {
+        !bulkSuccesses.isEmpty && bulkSuccesses.allSatisfy { $0.savedTo != nil }
+    }
 
     /// true, sobald mehr als ein Dokument für Bulk ausgewählt ist.
     var isBulkSelection: Bool { bulkInputs.count > 1 }
@@ -606,39 +683,32 @@ final class CompressionViewModel: ObservableObject {
     /// Listenanzeige. Liefert die Erfolge in Eingabereihenfolge.
     @discardableResult
     func runBulkCompression(_ urls: [URL]) async throws -> [CompressionResult] {
-        guard !urls.isEmpty, !isWorking else { return [] }
+        guard let flag = beginBulkRun(urls) else { return [] }
+        return try await performBulkRun(urls, flag: flag)
+    }
+
+    /// idle → running für einen Stapel – synchron, damit zwischen Klick und
+    /// Laufbeginn kein Moment liegt, in dem die Oberfläche noch „bereit"
+    /// zeigt und ein zweiter Klick einen zweiten Lauf startet.
+    private func beginBulkRun(_ urls: [URL]) -> CancelFlag? {
+        guard !urls.isEmpty, !isWorking else { return nil }
         // Alte Bulk-Temps entsorgen, bevor neue entstehen.
         discardBulkResults()
-        isWorking = true
-        bulkResults = []
-        bulkResultInputs = []
         bulkInputs = urls
         bulkMode = mode
         bulkFractions = Dictionary(uniqueKeysWithValues: urls.indices.map { ($0, 0.0) })
         bulkLabels = [:]
         bulkErrors = [:]
         bulkCancelledURLs = []
-        bulkSavedURLs = []
-        let cancelledAtStart: Set<URL> = []
         // Einzel-State parken: Bulk und Einzel teilen sich Fortschritt/Abbruch.
-        result = nil
-        pendingResult = nil
+        clearSingleOutcome()
         errorMessage = nil
-        progressValue = 0
-        progressLabel = String(localized: "Dokument wird analysiert …")
-        workStartedAt = Date()
-        isCancelling = false
-        let flag = CancelFlag()
-        cancelFlag = flag
-        // Ein NACHFOLGER (neues cancelFlag) hat das Ruder übernommen – dann
-        // räumt der nicht mehr.
-        defer {
-            if cancelFlag === flag {
-                isWorking = false
-                workStartedAt = nil
-                isCancelling = false
-            }
-        }
+        return beginRun()
+    }
+
+    private func performBulkRun(_ urls: [URL], flag: CancelFlag) async throws -> [CompressionResult] {
+        // Ein Nachfolger hat das Ruder übernommen – dann räumt der nicht mehr.
+        defer { endRun(flag) }
 
         // Dasselbe Optionsobjekt wie im Einzellauf: Custom-Panel,
         // Zielgröße und Linearize gelten für JEDE Bulk-Datei.
@@ -651,14 +721,13 @@ final class CompressionViewModel: ObservableObject {
                 isCancelled: { flag.isCancelled || Task.isCancelled },
                 isCancelledFor: { [weak self] _, url in
                     self?.bulkCancelledURLs.contains(url) ?? false
-                        || cancelledAtStart.contains(url)
                 },
                 onDocumentProgress: { index, url, fraction, label in
                     let overall = progress.update(index: index, fraction: fraction)
                     Task { @MainActor [weak self] in
-                        // Nach Laufende (progressValue == 1) keine verspätete
-                        // Meldung mehr durchlassen.
-                        guard let self, self.cancelFlag === flag,
+                        // Nach Laufende keine verspätete Meldung mehr
+                        // durchlassen (die Zusammenfassung bleibt stehen).
+                        guard let self, self.isCurrent(flag),
                               self.progressValue < 1 else { return }
                         self.progressValue = overall
                         self.progressLabel = "\(url.lastPathComponent) "
@@ -669,15 +738,13 @@ final class CompressionViewModel: ObservableObject {
                     }
                 })
             try Task.checkCancellation()
-            var successes: [CompressionResult] = []
-            var successInputs: [URL] = []
+            var successes: [BulkSuccess] = []
             var errors: [URL: String] = [:]
             for (index, outcome) in outcomes.enumerated() {
                 let url = urls[index]
                 switch outcome {
                 case .success(let r):
-                    successes.append(r)
-                    successInputs.append(url)
+                    successes.append(BulkSuccess(input: url, result: r))
                 case .failure(let error):
                     if error is CancellationError,
                        bulkCancelledURLs.contains(url) {
@@ -689,8 +756,7 @@ final class CompressionViewModel: ObservableObject {
                 }
                 bulkFractions[index] = 1
             }
-            bulkResults = successes
-            bulkResultInputs = successInputs
+            bulkSuccesses = successes
             bulkErrors = errors
             progressValue = 1
             let ok = successes.count
@@ -698,13 +764,13 @@ final class CompressionViewModel: ObservableObject {
             let failed = errors.count
             progressLabel = Self.bulkSummaryText(total: urls.count, ok: ok,
                                                  cancelled: cancelled, failed: failed)
-            return successes
+            return successes.map(\.result)
         } catch is CancellationError {
             // Wie im Einzelpfad: globaler Abbruch ist kein Fehler.
-            if cancelFlag === flag { progressLabel = "" }
+            if isCurrent(flag) { progressLabel = "" }
             throw CancellationError()
         } catch {
-            if cancelFlag === flag { errorMessage = error.localizedDescription }
+            if isCurrent(flag) { errorMessage = error.localizedDescription }
             throw error
         }
     }
@@ -735,12 +801,11 @@ final class CompressionViewModel: ObservableObject {
         guard !isWorking,
               bulkInputs.indices.contains(index) else { return }
         let url = bulkInputs[index]
-        if let r = bulkResult(for: url) {
-            try? FileManager.default.removeItem(at: r.outputURL)
-            if let i = bulkResults.firstIndex(where: { $0.outputURL == r.outputURL }) {
-                bulkResults.remove(at: i)
-                bulkResultInputs.remove(at: i)
-            }
+        if let i = bulkSuccesses.firstIndex(where: { $0.input == url }) {
+            // Das Temp bleibt auch nach dem Sichern liegen (Kopie beim
+            // Sichern) und geht jetzt mit.
+            try? FileManager.default.removeItem(at: bulkSuccesses[i].result.outputURL)
+            bulkSuccesses.remove(at: i)
         }
         bulkInputs.remove(at: index)
         bulkErrors.removeValue(forKey: url)
@@ -749,14 +814,11 @@ final class CompressionViewModel: ObservableObject {
         bulkEstimates.removeValue(forKey: url)
         bulkFractions = [:]
         bulkLabels = [:]
-        bulkSavedURLs = []
     }
 
     /// Erfolg zu einer Bulk-Eingabe (nil ohne Erfolg).
     func bulkResult(for url: URL) -> CompressionResult? {
-        guard let i = bulkResultInputs.firstIndex(of: url),
-              bulkResults.indices.contains(i) else { return nil }
-        return bulkResults[i]
+        bulkSuccesses.first { $0.input == url }?.result
     }
 
     /// UI-Einstieg für einen Bulk-Lauf – fire-and-forget wie compress().
@@ -768,10 +830,9 @@ final class CompressionViewModel: ObservableObject {
         workTask?.cancel()
         // Einzel-State zurücksetzen, damit die Bulk-Liste die Bühne bekommt.
         inputURL = nil
-        result = nil
-        pendingResult = nil
+        guard let flag = beginBulkRun(urls) else { return }
         workTask = Task.detached(priority: .userInitiated) {
-            _ = try? await self.runBulkCompression(urls)
+            _ = try? await self.performBulkRun(urls, flag: flag)
         }
     }
 
@@ -808,8 +869,7 @@ final class CompressionViewModel: ObservableObject {
             clearBulk()
             select(pdfs[0])
         } else {
-            discardPending()
-            result = nil
+            clearSingleOutcome()
             errorMessage = nil
             inputURL = nil
             originalDocument = nil
@@ -820,12 +880,10 @@ final class CompressionViewModel: ObservableObject {
             targetAssessment = nil
             discardBulkResults()
             bulkInputs = pdfs
-            bulkResultInputs = []
             bulkFractions = [:]
             bulkLabels = [:]
             bulkErrors = [:]
             bulkCancelledURLs = []
-            bulkSavedURLs = []
             bulkPageCounts = [:]
             refreshBulkPageCounts()
             refreshBulkEstimates()
@@ -899,22 +957,20 @@ final class CompressionViewModel: ObservableObject {
         guard !isWorking else { return }
         discardBulkResults()
         bulkInputs = []
-        bulkResultInputs = []
         bulkFractions = [:]
         bulkLabels = [:]
         bulkErrors = [:]
         bulkCancelledURLs = []
-        bulkSavedURLs = []
         bulkPageCounts = [:]
         bulkEstimates = [:]
     }
 
+    /// Verwirft die Erfolge samt Temps (gesicherte Ziele sind Kopien).
     private func discardBulkResults() {
-        for r in bulkResults {
-            try? FileManager.default.removeItem(at: r.outputURL)
+        for success in bulkSuccesses {
+            try? FileManager.default.removeItem(at: success.result.outputURL)
         }
-        bulkResults = []
-        bulkResultInputs = []
+        bulkSuccesses = []
     }
 
     /// Speichert alle erfolgreichen Bulk-Ergebnisse in einen Ordner.
@@ -924,10 +980,11 @@ final class CompressionViewModel: ObservableObject {
     /// Temp-Dateien bleiben bis zum Verwerfen der Auswahl erhalten.
     @discardableResult
     func saveAllBulk(to folder: URL) throws -> [URL] {
-        guard !bulkResults.isEmpty,
-              bulkResults.count == bulkResultInputs.count else { return [] }
+        guard !bulkSuccesses.isEmpty else { return [] }
         var saved: [URL] = []
-        for (input, result) in zip(bulkResultInputs, bulkResults) {
+        for index in bulkSuccesses.indices {
+            let input = bulkSuccesses[index].input
+            let result = bulkSuccesses[index].result
             let suggested = folder.appendingPathComponent(
                 Compressor.suggestedOutputName(for: input, mode: bulkMode))
             var dest = suggested
@@ -942,7 +999,7 @@ final class CompressionViewModel: ObservableObject {
                                                      preservingSource: true)
             saved.append(finalized.outputURL)
             // Bereits gespeicherte Erfolge bleiben auch bei einem spaeteren Fehler sichtbar.
-            bulkSavedURLs.append(finalized.outputURL)
+            bulkSuccesses[index].savedTo = finalized.outputURL
         }
         return saved
     }
@@ -961,7 +1018,9 @@ final class CompressionViewModel: ObservableObject {
         do {
             _ = try Compressor.finalize(result: result, destination: dest,
                                         preservingSource: true)
-            bulkSavedURLs.append(dest)
+            if let i = bulkSuccesses.firstIndex(where: { $0.input == url }) {
+                bulkSuccesses[i].savedTo = dest
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -1005,8 +1064,8 @@ final class CompressionViewModel: ObservableObject {
         do {
             // Das Ergebnis wird verschoben – vorher die offene Ansicht lösen.
             compressedDocument = nil
-            result = try Compressor.finalize(result: r, destination: destination)
-            pendingResult = nil
+            singleOutcome = .saved(try Compressor.finalize(result: r, destination: destination))
+            errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
             loadCompressedDocument()   // Sichern gescheitert: Vergleich bleibt
@@ -1017,20 +1076,27 @@ final class CompressionViewModel: ObservableObject {
     /// ginge? „Bereits optimiert" zählt nicht – da gibt es nichts zu sichern.
     var hasUnsavedResult: Bool {
         if let pending = pendingResult { return !pending.alreadyOptimized }
-        return bulkSavedURLs.count < bulkResults.count
+        return bulkSuccesses.contains { $0.savedTo == nil }
     }
 
+    /// pending → none: Temp löschen. Ein Sichern-Fehler gehört zum
+    /// verworfenen Ergebnis und geht mit.
     func discardPending() {
         compressedDocument = nil
-        if let r = pendingResult {
-            try? FileManager.default.removeItem(at: r.outputURL)
-        }
-        pendingResult = nil
+        guard case .pending(let r) = singleOutcome else { return }
+        try? FileManager.default.removeItem(at: r.outputURL)
+        singleOutcome = .none
+        errorMessage = nil
+    }
+
+    /// pending/saved → none (ein ungesichertes Temp wird gelöscht).
+    private func clearSingleOutcome() {
+        discardPending()
+        singleOutcome = .none
     }
 
     // MARK: - Privat
 
-    private var cancelFlag = CancelFlag()
     private var workTask: Task<Void, Never>?
     private var estimateDebounceTask: Task<Void, Never>?
     private var estimateGeneration = 0

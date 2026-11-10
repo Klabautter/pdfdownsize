@@ -14,10 +14,13 @@ final class ConversionViewModel: ObservableObject {
         case imagesToPdf
     }
 
-    enum Stage {
+    /// Der eine Arbeitszustand. `working` war früher ein toter Fall: Der
+    /// Lauf stand in einem eigenen `isWorking` (plus `isCancelling`), die
+    /// Stufe blieb währenddessen `.ready`.
+    enum Stage: Equatable {
         case choose          // noch keine Quelle
         case ready           // Quelle gesetzt, Parameter wählbar
-        case working
+        case working(cancelling: Bool)
         case done
     }
 
@@ -34,7 +37,12 @@ final class ConversionViewModel: ObservableObject {
     /// Formatwechsel für einzelne Dateien.
     @Published var exportSettings = PageImageExporter.Settings()
 
-    @Published var isWorking = false
+    var isWorking: Bool {
+        if case .working = stage { return true }
+        return false
+    }
+    /// Sichtbarer Abbruch-Zustand für Leiste, Menü und Tests (S3, Review 2026-10-09).
+    var isCancelling: Bool { stage == .working(cancelling: true) }
     @Published var progress = 0.0
     @Published var statusLabel = ""
     @Published var resultFolder: URL?
@@ -100,7 +108,6 @@ final class ConversionViewModel: ObservableObject {
         direction = nil
         pdfURL = nil
         imageURLs = []
-        isWorking = false
         progress = 0
         statusLabel = ""
         resultFolder = nil
@@ -108,13 +115,23 @@ final class ConversionViewModel: ObservableObject {
         errorMessage = nil
     }
 
-    /// Sichtbarer Abbruch-Zustand für Leiste, Menü und Tests (S3, Review 2026-10-09).
-    @Published private(set) var isCancelling = false
-
     func cancelWork() {
         guard isWorking else { return }
-        isCancelling = true
+        stage = .working(cancelling: true)
         workTask?.cancel()
+    }
+
+    /// ready/done → working. Liefert die Stufe, zu der ein Lauf ohne
+    /// Ergebnis (Abbruch, Fehler, Sichern abgelehnt) zurückkehrt.
+    private func beginWork() -> Stage {
+        let previous = stage
+        stage = .working(cancelling: false)
+        return previous
+    }
+
+    /// working → previous, falls der Lauf nicht selbst `.done` gesetzt hat.
+    private func endWork(returningTo previous: Stage) {
+        if isWorking { stage = previous }
     }
 
     // MARK: PDF → Bilder
@@ -140,14 +157,13 @@ final class ConversionViewModel: ObservableObject {
         let options = exportSettings.options
         let runID = UUID()
         operationID = runID
-        isWorking = true
-        isCancelling = false
+        let previous = beginWork()
         progress = 0
         statusLabel = "Vorbereiten …"
         errorMessage = nil
 
         workTask = Task { @MainActor in
-            defer { isWorking = false; isCancelling = false }
+            defer { endWork(returningTo: previous) }
             do {
                 guard let pages = Self.pages(of: url) else {
                     throw ImageImporter.ImportError.unreadable(url.lastPathComponent)
@@ -157,8 +173,7 @@ final class ConversionViewModel: ObservableObject {
                                                               options: options,
                                                               to: folder) { fraction in
                     Task { @MainActor in
-                        guard self.isWorking, self.operationID == runID,
-                              self.stage != .done else { return }
+                        guard self.isWorking, self.operationID == runID else { return }
                         self.progress = fraction
                         self.statusLabel = "Seite \(Int((fraction * Double(total)).rounded(.up))) / \(total) …"
                     }
@@ -237,20 +252,18 @@ final class ConversionViewModel: ObservableObject {
         guard !isWorking, direction == .imagesToPdf, !imageURLs.isEmpty else { return }
         let runID = UUID()
         operationID = runID
-        isWorking = true
-        isCancelling = false
+        let previous = beginWork()
         progress = 0
         statusLabel = "Erstelle PDF …"
         errorMessage = nil
 
         let urls = imageURLs
         workTask = Task { @MainActor in
-            defer { isWorking = false; isCancelling = false }
+            defer { endWork(returningTo: previous) }
             do {
                 let tempURL = try await Self.combinedTemporaryPDF(from: urls) { fraction in
                     Task { @MainActor in
-                        guard self.isWorking, self.operationID == runID,
-                              self.stage != .done else { return }
+                        guard self.isWorking, self.operationID == runID else { return }
                         self.progress = fraction
                     }
                 }

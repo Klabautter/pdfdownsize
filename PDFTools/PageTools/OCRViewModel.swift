@@ -12,10 +12,13 @@ import UniformTypeIdentifiers
 @MainActor
 final class OCRViewModel: ObservableObject {
 
-    enum Stage {
+    /// Der eine Arbeitszustand. Früher stand der Lauf doppelt – in
+    /// `stage == .working` und in einem eigenen `isWorking` (plus
+    /// `isCancelling`) –, und beides musste von Hand gleich gehalten werden.
+    enum Stage: Equatable {
         case choose          // noch keine Quelle
         case ready           // Quelle gesetzt, Sprache wählbar
-        case working
+        case working(cancelling: Bool)
         case done
     }
 
@@ -25,7 +28,12 @@ final class OCRViewModel: ObservableObject {
     @Published var pdfURL: URL?
     @Published var languagePreset: OCREngine.OCRLanguagePreset = .germanEnglish
 
-    @Published var isWorking = false
+    var isWorking: Bool {
+        if case .working = stage { return true }
+        return false
+    }
+    /// Sichtbarer Abbruch-Zustand für Leiste, Menü und Tests (S3, Review 2026-10-09).
+    var isCancelling: Bool { stage == .working(cancelling: true) }
     @Published var progress = 0.0
     @Published var statusLabel = ""
     /// Rohergebnis der Engine; die Textspalte liest `textSections`.
@@ -308,7 +316,6 @@ final class OCRViewModel: ObservableObject {
         discardUnsavedOutput()
         stage = .choose
         pdfURL = nil
-        isWorking = false
         progress = 0
         statusLabel = ""
         pageResults = []
@@ -321,12 +328,9 @@ final class OCRViewModel: ObservableObject {
         showsRecognizedText = false
     }
 
-    /// Sichtbarer Abbruch-Zustand für Leiste, Menü und Tests (S3, Review 2026-10-09).
-    @Published private(set) var isCancelling = false
-
     func cancelWork() {
         guard isWorking else { return }
-        isCancelling = true
+        stage = .working(cancelling: true)
         workTask?.cancel()
     }
 
@@ -337,26 +341,24 @@ final class OCRViewModel: ObservableObject {
         discardUnsavedOutput()
         let runID = UUID()
         operationID = runID
-        isWorking = true
-        isCancelling = false
         progress = 0
         statusLabel = "Vorbereiten …"
         errorMessage = nil
         pageResults = []
         outputURL = nil
         savedURL = nil
-        stage = .working
+        stage = .working(cancelling: false)
 
         let languages = languagePreset.recognitionLanguages
         workTask = Task { @MainActor in
-            defer { isWorking = false; isCancelling = false }
+            // Jeder Ausgang ohne Ergebnis führt zurück zu `.ready`.
+            defer { if isWorking { stage = .ready } }
             do {
                 let total = PDFDocument(url: url)?.pageCount ?? 0
                 let output = try await OCREngine.run(
                     sourceURL: url, languages: languages) { fraction in
                     Task { @MainActor in
-                        guard self.isWorking, self.operationID == runID,
-                              self.stage != .done else { return }
+                        guard self.isWorking, self.operationID == runID else { return }
                         self.progress = fraction
                         // Die Seite, die gerade bearbeitet wird: nie „Seite 0"
                         // (Befund B12). `fraction` meldet den Stand NACH einer
@@ -480,7 +482,6 @@ final class OCRViewModel: ObservableObject {
         searchQuery = ""
         pageResults = []
         savedURL = nil
-        isWorking = false
         progress = 0
         statusLabel = ""
     }

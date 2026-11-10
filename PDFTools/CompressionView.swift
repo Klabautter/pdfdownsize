@@ -440,25 +440,33 @@ private struct ControlPanel: View {
                             isCancelling: viewModel.isCancelling,
                             onCancel: { viewModel.cancelWork() })
         } else if let r = pending {
-            if r.alreadyOptimized {
-                Button { viewModel.discardPending() } label: {
-                    Text("Fertig").frame(maxWidth: .infinity)
+            // Ein gescheitertes Sichern meldet sich hier – vorher stand der
+            // Fehler unsichtbar im Zustand und tauchte erst nach „Verwerfen"
+            // unter dem Komprimieren-Knopf auf.
+            VStack(alignment: .leading, spacing: 8) {
+                if let error = viewModel.errorMessage {
+                    InlineNotice(message: error)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-            } else {
-                HStack(spacing: 8) {
-                    Button("Verwerfen") { viewModel.discardPending() }
-                        .buttonStyle(.bordered)
-                    // ⌘S liegt im Ablage-Menü (Commands.swift, Befund S15).
-                    Button {
-                        viewModel.savePending(r)
-                    } label: {
-                        Text("Sichern …").frame(maxWidth: .infinity)
+                if r.alreadyOptimized {
+                    Button { viewModel.discardPending() } label: {
+                        Text("Fertig").frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                } else {
+                    HStack(spacing: 8) {
+                        Button("Verwerfen") { viewModel.discardPending() }
+                            .buttonStyle(.bordered)
+                        // ⌘S liegt im Ablage-Menü (Commands.swift, Befund S15).
+                        Button {
+                            viewModel.savePending(r)
+                        } label: {
+                            Text("Sichern …").frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .controlSize(.large)
                 }
-                .controlSize(.large)
             }
         } else if let saved = viewModel.result {
             SavedResultBlock(urls: [saved.outputURL],
@@ -867,9 +875,6 @@ private struct BulkStage: View {
     @EnvironmentObject private var discardGuard: DiscardGuard
     let isTargeted: Bool
 
-    /// Eingaben, deren Ergebnis gesichert wurde (Befund S9): Die Zeile
-    /// zeigt dann „Gesichert" statt des Sichern-Links.
-    @State private var savedInputs: Set<URL> = []
     /// Sichern-Fehler als System-Alert (Befunde M7/S6) – Aktionsfehler
     /// gehören nicht in eine Fußzeile.
     @State private var saveError: String?
@@ -878,10 +883,9 @@ private struct BulkStage: View {
         viewModel.bulkInputs.enumerated().map { BulkRow(index: $0.offset, url: $0.element) }
     }
 
-    private var allSaved: Bool {
-        !viewModel.bulkResults.isEmpty
-            && viewModel.bulkResultInputs.allSatisfy { savedInputs.contains($0) }
-    }
+    /// Gesichert-Stand aus dem ViewModel (Befund S9): überlebt den
+    /// Werkzeugwechsel, vorher hielt ihn ein `@State` dieser View.
+    private var allSaved: Bool { viewModel.allBulkResultsSaved }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -924,7 +928,6 @@ private struct BulkStage: View {
                 .padding(.vertical, 14)
         }
         .dropTargetOverlay(isTargeted)
-        .onChange(of: viewModel.bulkResults.count) { _, _ in savedInputs = [] }
         .alert("Sichern fehlgeschlagen", isPresented: Binding(
             get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
             Button("OK", role: .cancel) {}
@@ -996,7 +999,7 @@ private struct BulkStage: View {
     private func trailing(_ row: BulkRow) -> some View {
         let url = row.url
         if viewModel.bulkResult(for: url) != nil, !viewModel.isWorking {
-            if savedInputs.contains(url) {
+            if viewModel.isBulkResultSaved(for: url) {
                 Label("Gesichert", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(Theme.savings)
                     .font(.callout)
@@ -1086,11 +1089,8 @@ private struct BulkStage: View {
     }
 
     private func saveSingle(_ url: URL) {
-        let before = viewModel.bulkSavedURLs.count
         viewModel.saveBulkResult(for: url)
-        if viewModel.bulkSavedURLs.count > before {
-            savedInputs.insert(url)
-        } else if let error = viewModel.errorMessage {
+        if !viewModel.isBulkResultSaved(for: url), let error = viewModel.errorMessage {
             viewModel.errorMessage = nil
             saveError = error
         }
@@ -1106,7 +1106,6 @@ private struct BulkStage: View {
         guard panel.runModal() == .OK, let folder = panel.url else { return }
         do {
             _ = try viewModel.saveAllBulk(to: folder)
-            savedInputs.formUnion(viewModel.bulkResultInputs)
         } catch {
             // Teilerfolge stehen in bulkSavedURLs; der Fehler nennt den Rest.
             saveError = error.localizedDescription

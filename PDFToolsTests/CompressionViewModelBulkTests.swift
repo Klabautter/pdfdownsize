@@ -304,4 +304,75 @@ import PDFKit
         viewModel.cancelBulkFile(at: 0)
         #expect(viewModel.bulkCancelledURLs.isEmpty)
     }
+
+    // MARK: - Zustandsübergänge (Zustandsautomat 2026-11-10)
+
+    /// „Alle komprimieren" ist ein Übergang idle → running, der sofort gilt.
+    ///
+    /// Fehlermöglichkeiten: `compressAll` kehrt zurück, während das ViewModel
+    /// noch „bereit" meldet (die Oberfläche zeigt weiter den Startknopf, ein
+    /// zweiter Klick startet einen zweiten Lauf); ein zweiter Aufruf löst den
+    /// ersten Lauf ab, sodass „Abbrechen" ihn nicht mehr erreicht; nach dem
+    /// Lauf bleibt ein Rest von „läuft" stehen.
+    @Test(.hangGuard) @MainActor func compressAllStartetSofortUndNurEinmal() async throws {
+        CompressionConcurrency.maxConcurrentDocuments = 2
+        defer { CompressionConcurrency.resetLimit() }
+
+        let inputs = try fixtures([1, 2])
+        defer { for url in inputs { try? FileManager.default.removeItem(at: url) } }
+
+        let viewModel = CompressionViewModel(defaults: .isolatedForTest())
+        defer { viewModel.clearBulk() }
+        viewModel.selectMany(inputs)
+        viewModel.compressAll(inputs)
+        #expect(viewModel.isWorking, "Lauf gilt erst nach einem Hop – Startknopf bliebe aktiv")
+        let startedAt = try #require(viewModel.workStartedAt)
+
+        viewModel.compressAll(inputs)
+        #expect(viewModel.workStartedAt == startedAt, "Zweiter Klick hat einen neuen Lauf begonnen")
+
+        try await TestFactory.waitFor({ !viewModel.isWorking }, timeout: .seconds(60))
+        #expect(viewModel.bulkResults.count == 2)
+        #expect(viewModel.workStartedAt == nil)
+        #expect(viewModel.isCancelling == false)
+    }
+
+    /// Der Gesichert-Stand gehört zum Ergebnis im ViewModel.
+    ///
+    /// Fehlermöglichkeiten: Der Stand lebt nur in der View und geht beim
+    /// Werkzeugwechsel verloren (Zeilen bieten wieder „Sichern …" an,
+    /// „Alle sichern" erscheint erneut); Entfernen einer Zeile setzt den
+    /// Stand aller anderen zurück (unnötige Verwerfen-Rückfrage); Entfernen
+    /// einer gesicherten Zeile löscht die gesicherte Datei des Nutzers.
+    @Test(.hangGuard) @MainActor func gesichertStandLebtImViewModel() async throws {
+        CompressionConcurrency.maxConcurrentDocuments = 2
+        defer { CompressionConcurrency.resetLimit() }
+
+        let inputs = try fixtures([1, 2, 3])
+        defer { for url in inputs { try? FileManager.default.removeItem(at: url) } }
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bulk-gesichert-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let viewModel = CompressionViewModel(defaults: .isolatedForTest())
+        defer { viewModel.clearBulk() }
+        _ = try await viewModel.runBulkCompression(inputs)
+        #expect(viewModel.hasUnsavedResult)
+        #expect(!viewModel.allBulkResultsSaved)
+
+        let saved = try viewModel.saveAllBulk(to: folder)
+        #expect(saved.count == 3)
+        #expect(inputs.allSatisfy { viewModel.isBulkResultSaved(for: $0) })
+        #expect(viewModel.allBulkResultsSaved)
+        #expect(!viewModel.hasUnsavedResult)
+
+        viewModel.removeBulkInput(at: 0)
+        #expect(viewModel.bulkInputs == Array(inputs.dropFirst()))
+        #expect(inputs.dropFirst().allSatisfy { viewModel.isBulkResultSaved(for: $0) },
+                "Entfernen hat den Stand der übrigen Zeilen zurückgesetzt")
+        #expect(!viewModel.hasUnsavedResult, "Verwerfen-Rückfrage ohne ungesichertes Ergebnis")
+        #expect(saved.allSatisfy { FileManager.default.fileExists(atPath: $0.path) },
+                "Gesicherte Datei des Nutzers ist weg")
+    }
 }

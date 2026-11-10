@@ -13,7 +13,7 @@ struct OCRTests {
         let vm = OCRViewModel()
         let original = URL(fileURLWithPath: "/tmp/source-a.pdf")
         vm.accept([original])
-        vm.isWorking = true
+        vm.stage = .working(cancelling: false)
         vm.accept([URL(fileURLWithPath: "/tmp/source-b.pdf")])
         vm.reset()
         #expect(vm.pdfURL == original)
