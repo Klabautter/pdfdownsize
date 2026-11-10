@@ -9,7 +9,9 @@
 #   1. Vorprüfung (vor dem Bauen): RELEASE_NOTES.md vorhanden, Arbeitsbaum
 #      sauber, gh installiert und angemeldet, Tag v<Version> noch nicht auf
 #      GitHub.
-#   2. Bauen, packen, signieren, appcast.xml schreiben (noch nicht committen).
+#   2. Bauen, mit Developer ID signieren (Hardened Runtime), bei Apple
+#      notarisieren und das Ticket anheften, packen, Sparkle-Signatur,
+#      appcast.xml schreiben (noch nicht committen).
 #   3. Rückfrage. Dann: main pushen (der Code, auf den das Release zeigt),
 #      Tag v<Version> anlegen und pushen, GitHub-Release mit ZIP und den
 #      Notizen anlegen.
@@ -29,8 +31,15 @@
 # kein Update signieren, das bestehende Installationen annehmen. Er verlässt
 # den Mac nie – deshalb läuft das Release hier und nicht bei GitHub Actions.
 #
-# --dry-run: alle Schritte bis zur Signatur laufen echt (Build, ZIP, Appcast
-# in den Arbeitsbaum), Push, Tag und Release werden nur angezeigt.
+# --dry-run: alle Schritte bis zur Signatur laufen echt (Build, Developer-ID-
+# Signatur, Notarisierung bei Apple, ZIP, Appcast in den Arbeitsbaum), Push,
+# Tag und Release werden nur angezeigt.
+#
+# Signieren (seit 1.0.8): Zertifikat „Developer ID Application" des Teams
+# $TEAM_ID im Schlüsselbund, Notarisierung über ein notarytool-Profil
+# (`xcrun notarytool store-credentials`). Das Profil gilt für alle Apps des
+# Teams; überschreibbar mit PDFDOWNSIZE_NOTARY_PROFILE. Ohne beides bricht das
+# Skript ab, statt eine unsignierte App zu veröffentlichen.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -39,6 +48,8 @@ REPO="Klabautter/pdfdownsize"
 DERIVED="${PDFDOWNSIZE_DERIVED_DATA:-$ROOT/tmp/release-build}"
 NOTES_FILE="$ROOT/RELEASE_NOTES.md"
 DRY_RUN=0
+TEAM_ID="F73HH23RLN"
+NOTARY_PROFILE="${PDFDOWNSIZE_NOTARY_PROFILE:-financetracker-notary}"
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
@@ -75,6 +86,19 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
 fi
 
 command -v gh >/dev/null || { echo "gh fehlt: brew install gh, dann gh auth login" >&2; exit 1; }
+
+# Developer ID, nie das Entwicklungszertifikat (das trägt eine Mailadresse).
+SIGN_ID="$(security find-identity -v -p codesigning \
+    | awk -v team="($TEAM_ID)" '/"Developer ID Application: / && index($0, team) {print $2; exit}')"
+[ -n "$SIGN_ID" ] || {
+    echo "Kein gültiges Zertifikat „Developer ID Application\" für Team $TEAM_ID im Schlüsselbund." >&2
+    exit 1
+}
+xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1 || {
+    echo "notarytool-Profil „$NOTARY_PROFILE\" fehlt oder Apple lehnt es ab:" >&2
+    echo "  xcrun notarytool store-credentials $NOTARY_PROFILE --apple-id … --team-id $TEAM_ID" >&2
+    exit 1
+}
 gh auth status -h github.com >/dev/null 2>&1 || { echo "gh ist nicht angemeldet: gh auth login" >&2; exit 1; }
 
 VERSION="$(xcodebuild -project PDFTools.xcodeproj -scheme PDFTools -configuration Release \
@@ -117,7 +141,31 @@ xcodebuild build -project PDFTools.xcodeproj -scheme PDFTools \
 
 APP="$DERIVED/Build/Products/Release/PDFdownsize.app"
 [ -d "$APP" ] || { echo "Build fehlgeschlagen: $APP fehlt" >&2; exit 1; }
+# --- Signieren: von innen nach außen, Hardened Runtime, Zeitstempel ---------
+# Reihenfolge und Sparkle-Teile nach der Sparkle-Dokumentation („Distributing
+# with Developer ID"); der Downloader behält seine eigenen Entitlements.
+echo "→ Signiere mit Developer ID ($TEAM_ID) …"
+sign() { codesign --force --timestamp --options runtime --sign "$SIGN_ID" "$@"; }
+ENTITLEMENTS="$(mktemp /tmp/pdfdownsize-entitlements.XXXXXX)"
+trap 'rm -f "$ENTITLEMENTS"' EXIT
+codesign -d --entitlements - --xml "$APP" > "$ENTITLEMENTS" 2>/dev/null
+SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+sign "$APP/Contents/Helpers/qpdf"
+sign "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
+sign --preserve-metadata=entitlements "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
+sign "$SPARKLE/Versions/B/Autoupdate"
+sign "$SPARKLE/Versions/B/Updater.app"
+sign "$SPARKLE"
+if [ -s "$ENTITLEMENTS" ]; then sign --entitlements "$ENTITLEMENTS" "$APP"; else sign "$APP"; fi
 codesign --verify --deep --strict "$APP"
+# Jede ausführbare Datei muss von uns und mit Hardened Runtime signiert sein –
+# kommt ein neuer Helfer dazu, fällt er hier auf statt erst bei Apple.
+while IFS= read -r -d '' bin; do
+    file -b "$bin" | grep -q 'Mach-O' || continue
+    info="$(codesign -dv "$bin" 2>&1)"
+    grep -q "TeamIdentifier=$TEAM_ID" <<< "$info" && grep -q 'flags=.*runtime' <<< "$info" || {
+        echo "Nicht mit Developer ID und Hardened Runtime signiert: ${bin#$APP/}" >&2; exit 1; }
+done < <(find "$APP" -type f -perm +111 -print0)
 
 # Kein Pfad des Entwicklungsrechners im veröffentlichten Bundle.
 if grep -rlaF "$HOME/" "$APP" >/dev/null 2>&1; then
@@ -139,6 +187,27 @@ MINOS="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Conten
 [ "$BUILT_VERSION" = "$VERSION" ] || {
     echo "Gebaute Version $BUILT_VERSION ≠ Projektversion $VERSION" >&2; exit 1; }
 ZIP="$ROOT/PDFdownsize-$VERSION.zip"
+
+# --- Notarisieren und Ticket anheften --------------------------------------
+# Auch im Trockenlauf echt: Es veröffentlicht nichts, prüft aber, ob Apple die
+# App annimmt. Das Ticket kommt in die App, damit sie auch offline startet.
+echo "→ Notarisiere bei Apple (dauert meist wenige Minuten) …"
+NOTARY_ZIP="$(mktemp -d /tmp/pdfdownsize-notary.XXXXXX)/PDFdownsize.zip"
+ditto -c -k --keepParent "$APP" "$NOTARY_ZIP"
+NOTARY_OUT="$(xcrun notarytool submit "$NOTARY_ZIP" --keychain-profile "$NOTARY_PROFILE" --wait 2>&1)" || true
+rm -rf "$(dirname "$NOTARY_ZIP")"
+echo "$NOTARY_OUT" | grep -E '^\s*(id|status):' | head -2
+if ! grep -qE '^\s*status: Accepted' <<< "$NOTARY_OUT"; then
+    echo "Notarisierung nicht angenommen – Release abgebrochen. Protokoll:" >&2
+    SUB_ID="$(awk '/^ *id:/ {print $2; exit}' <<< "$NOTARY_OUT")"
+    [ -n "$SUB_ID" ] && xcrun notarytool log "$SUB_ID" --keychain-profile "$NOTARY_PROFILE" >&2 || echo "$NOTARY_OUT" >&2
+    exit 1
+fi
+xcrun stapler staple "$APP" >/dev/null
+xcrun stapler validate "$APP" >/dev/null
+spctl --assess --type execute "$APP" 2>/dev/null || {
+    echo "Gatekeeper lehnt die notarisierte App ab – Release abgebrochen:" >&2
+    spctl --assess -vv --type execute "$APP" >&2; exit 1; }
 
 rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"

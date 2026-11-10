@@ -30,13 +30,7 @@ The compressor never overwrites the original and validates every result (page co
 
 Download `PDFdownsize.app` from the [Releases](../../releases) page and move it to *Applications*.
 
-**The app is currently not signed with an Apple Developer ID.** macOS will therefore refuse to open it on the first try. To allow it once:
-
-1. Open the app (macOS shows a warning – close it).
-2. Go to *System Settings → Privacy & Security*, scroll down and click **Open Anyway** next to the PDFdownsize message.
-3. Confirm with your password. From then on the app opens normally.
-
-If you prefer not to do that, build the app yourself (see below).
+From version 1.0.8 on, the app is signed with an Apple Developer ID and notarized by Apple, so it opens directly.
 
 ## Updates
 
