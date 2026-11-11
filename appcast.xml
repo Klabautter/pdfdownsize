@@ -4,14 +4,14 @@
     <title>PDFdownsize</title>
     <link>https://github.com/Klabautter/pdfdownsize</link>
     <item>
-      <title>Version 1.0.8</title>
-      <pubDate>Tue, 10 Nov 2026 21:43:43 +0000</pubDate>
-      <sparkle:version>9</sparkle:version>
-      <sparkle:shortVersionString>1.0.8</sparkle:shortVersionString>
+      <title>Version 1.0.9</title>
+      <pubDate>Wed, 11 Nov 2026 00:48:03 +0000</pubDate>
+      <sparkle:version>10</sparkle:version>
+      <sparkle:shortVersionString>1.0.9</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[PDFdownsize is now signed with an Apple Developer ID and notarized by Apple, so it opens directly.]]></description>
-      <enclosure url="https://github.com/Klabautter/pdfdownsize/releases/download/v1.0.8/PDFdownsize-1.0.8.zip"
-                 sparkle:edSignature="EkaWhGmRAjsD2io+UKCZOqEhDqvlZciKBcPGkgbAPexfyGcmpI9uV21WIpJA403hBCnG3zBdtUSc4Y69n3xABw==" length="9782142" type="application/octet-stream"/>
+      <description><![CDATA[Text recognition now tells you when it is getting ready, and Cancel stops it right away.]]></description>
+      <enclosure url="https://github.com/Klabautter/pdfdownsize/releases/download/v1.0.9/PDFdownsize-1.0.9.zip"
+                 sparkle:edSignature="tkHIYSmzN84gF7Ej/w4NUez/g057yjeDm0Jsjj0DOaDItJL1d4d6yCbwjV9X9XyS78oFijvibHhabKKTIc7eCg==" length="9788208" type="application/octet-stream"/>
     </item>
   </channel>
 </rss>
