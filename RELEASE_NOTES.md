@@ -1,17 +1,11 @@
-PDFdownsize is now signed with an Apple Developer ID and notarized by Apple, so it opens directly.
+Text recognition now tells you when it is getting ready, and Cancel stops it right away.
 
-## What's new in 1.0.8
+## What's new in 1.0.9
 
-- **Opens without workarounds** – the app is signed with an Apple Developer ID and notarized by Apple. New downloads no longer need “Open Anyway” in System Settings.
-- **Updates as before** – installed versions from 1.0.2 on offer this update themselves. The update keeps your settings.
-
-## Fixes
-
-- If saving a compressed file fails, the error now appears right above the Save buttons instead of only after “Discard”.
-- In batch mode, files you already saved stay marked as saved after switching tools, and removing one row no longer resets the others.
-- “Compress all” starts only one run, even when clicked twice.
-- Compression results and the size estimate do not change in this version.
+- **Clear status on the first run** – the first text recognition after installing or updating can take up to a minute while macOS loads its recognition models. The progress bar now says “Preparing text recognition…” with a short explanation instead of standing still on page 1.
+- **Cancel works immediately** – cancelling text recognition returns at once, even while the models are still loading. Before, it could wait until the current page was finished.
 
 ## Notes
 
+- Recognition results, compression and the size estimate do not change in this version.
 - macOS 26, Apple silicon.
