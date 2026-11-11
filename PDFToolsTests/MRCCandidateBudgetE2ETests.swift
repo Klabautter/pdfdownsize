@@ -42,7 +42,12 @@ import PDFKit
         defer { try? FileManager.default.removeItem(at: r.outputURL) }
 
         // P0.1-Stand 7.569 B (balanced-Stufe); Fehlerbild 15.487 B.
-        #expect(r.outputBytes <= 9_000, "\(r.outputBytes) Bytes – Ziel ≤ 9.000")
+        // Seit 2026-11-04 (Entscheidung Linus, 5720dda) überspringt MRC
+        // JPEG-Scans im DPI-Budget – die DPI-Regel geht vor. Diese Datei ist
+        // ein 250-DPI-RGB-JPEG (Budget 220 × 1,15), MRC tritt also nicht mehr
+        // an; Smart kodiert sie als Dokumentscan auf 150 DPI neu (69.062 B am
+        // 11.11.2026). Die Grenze bewacht diesen Stand, nicht mehr P0.1.
+        #expect(r.outputBytes <= 80_000, "\(r.outputBytes) Bytes – Ziel ≤ 80.000")
 
         let pages = try RenderDifferential.compare(sourceURL: url, outputURL: r.outputURL, dpi: 144)
         let minSSIM = pages.map(\.ssim).min() ?? 0
@@ -56,7 +61,7 @@ import PDFKit
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let artifact: [String: Any] = ["input_bytes": r.inputBytes, "output_bytes": r.outputBytes,
                                        "min_page_ssim_144dpi": (minSSIM * 10000).rounded() / 10000,
-                                       "limit_bytes": 9_000]
+                                       "limit_bytes": 80_000]
         try JSONSerialization.data(withJSONObject: artifact, options: [.prettyPrinted, .sortedKeys])
             .write(to: dir.appendingPathComponent("mrc-budget.json"))
     }

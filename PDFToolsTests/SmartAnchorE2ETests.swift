@@ -108,7 +108,8 @@ import PDFKit
             .flatMap { ImageResampler.decodeJPEG($0) }
     }
 
-    static func regions(source: URL, smart: URL, anchor: URL) throws -> Comparison {
+    static func regions(source: URL, smart: URL, anchor: URL, anchorDPI: Double,
+                        documentScan: Bool = false) throws -> Comparison {
         let doc = try #require(CGPDFDocument(source as CFURL))
 
         var pages: [String: CGImage] = [:]
@@ -130,10 +131,20 @@ import PDFKit
             }
         }
         var result = Comparison()
-        for resource in try PDFCoreDocument(path: source.path).imageResources() {
+        let sourceCore = try PDFCoreDocument(path: source.path)
+        let smartCore = try PDFCoreDocument(path: smart.path)
+        let sourcePixels = LibQPDFPixelSource(document: sourceCore)
+        let smartPixels = LibQPDFPixelSource(document: smartCore)
+        var smartResources: [String: PDFImageResource] = [:]
+        for resource in try smartCore.imageResources() {
+            for placement in resource.placements {
+                smartResources["\(placement.pageIndex)#\(placement.resourceName)"] = resource
+            }
+        }
+        for resource in try sourceCore.imageResources() {
             let withinTarget = resource.placements.allSatisfy {
                 Double(resource.width) / max($0.placedWidthPoints, 1) * 72
-                    <= ImageCompressionOptions.smart.targetDPI * ImageCompressionOptions.smart.tolerance
+                    <= anchorDPI * ImageCompressionOptions.smart.tolerance
             }
             for placement in resource.placements {
                 let name = "S\(placement.pageIndex + 1)\(placement.resourceName)"
@@ -157,6 +168,36 @@ import PDFKit
                     result.regions.append(Region(name: name,
                                                  smart: ssim(o, s, width: w, height: h),
                                                  anchor: ssim(o, a, width: w, height: h)))
+                    continue
+                }
+                // Dokumentscans: Der Custom-Lauf lässt den Scan am Ziel
+                // 150 DPI unangetastet (gemessen 11.11.2026, light_001) und
+                // liefert so keinen Maßstab. Gemessen wird dann im Pixelraum
+                // der Anker-DPI: Referenz = Quellbild auf Anker-Pixelgröße,
+                // Anker = dieselbe Referenz als q75, Smart = Smarts Bild auf
+                // dieselbe Größe. So unterscheiden sich beide nur in der
+                // Kodierung. Ein Nachbau über den Seiten-Render wich bei
+                // identischem Verfahren um 0,02 ab (Ausschnitt/Interpolation).
+                if documentScan && !withinTarget {
+                    let anchorPixels = PixelSize(
+                        width: Int((placement.placedWidthPoints * anchorDPI / 72).rounded()),
+                        height: Int((placement.placedHeightPoints * anchorDPI / 72).rounded()))
+                    let full = CGRect(x: 0, y: 0, width: anchorPixels.width, height: anchorPixels.height)
+                    guard let smartResource = smartResources["\(placement.pageIndex)#\(placement.resourceName)"],
+                          let smartImage = smartPixels.decodedImage(for: smartResource),
+                          let sourceImage = sourcePixels.decodedImage(for: resource),
+                          let reference = ImageResampler.resize(sourceImage, to: anchorPixels, components: 3),
+                          let anchorImage = anchorRoundTrip(reference),
+                          let smartSized = (smartImage.width == anchorPixels.width
+                                            && smartImage.height == anchorPixels.height)
+                              ? smartImage
+                              : ImageResampler.resize(smartImage, to: anchorPixels, components: 3),
+                          let rn = luma(reference, full), let sn = luma(smartSized, full),
+                          let an = luma(anchorImage, full) else { continue }
+                    result.regions.append(Region(
+                        name: name,
+                        smart: ssim(rn, sn, width: anchorPixels.width, height: anchorPixels.height),
+                        anchor: ssim(rn, an, width: anchorPixels.width, height: anchorPixels.height)))
                     continue
                 }
                 guard withinTarget else {
@@ -186,36 +227,43 @@ import PDFKit
         return result
     }
 
-    static let files: [URL] = [
-        corpus.appendingPathComponent("04_PhotoHeavy/2608.23479v1.pdf"),
-        corpus.appendingPathComponent("04_PhotoHeavy/Chen_3DTopia-XL_Scaling_High-quality_3D_Asset_Generation_via_Primitive_Diffusion_CVPR_2025_paper.pdf"),
-        corpus.appendingPathComponent("05_Mixed_Content/2006.11239.pdf"),
-        corpus.appendingPathComponent("06_Scans_Color/light_001.pdf"),
-        userFile,
+    /// Ziel-DPI des Ankers je Datei. Dokumentscans (Papier) misst Smart seit
+    /// 2026-11-03 (5abbb45) auf `smartDocumentScanDPI` (150) – der Anker
+    /// folgt dem, sonst vergleicht er Smart mit einer Auflösung, die Smart
+    /// für diese Dateien bewusst nicht anstrebt.
+    static let files: [(url: URL, anchorDPI: Double)] = [
+        (corpus.appendingPathComponent("04_PhotoHeavy/2608.23479v1.pdf"), ImageCompressionOptions.smart.targetDPI),
+        (corpus.appendingPathComponent("04_PhotoHeavy/Chen_3DTopia-XL_Scaling_High-quality_3D_Asset_Generation_via_Primitive_Diffusion_CVPR_2025_paper.pdf"), ImageCompressionOptions.smart.targetDPI),
+        (corpus.appendingPathComponent("05_Mixed_Content/2006.11239.pdf"), ImageCompressionOptions.smart.targetDPI),
+        (corpus.appendingPathComponent("06_Scans_Color/light_001.pdf"), ImageCompressionOptions.smartDocumentScanDPI),
+        (userFile, ImageCompressionOptions.smart.targetDPI),
     ]
 
     @Test(.timeLimit(.minutes(20)), .needsLocalFiles("tmp/pdfs/core-235", "tmp/pdfs/user/medium.pdf"))
     func smartIstBeiNormalerAnsichtMindestensSoGutWieDerAnker() throws {
         var artifact: [[String: Any]] = []
         var failures: [String] = []
-        for source in Self.files {
+        for (source, anchorDPI) in Self.files {
             try #require(FileManager.default.fileExists(atPath: source.path), "Fehlt: \(source.path)")
             let start = Date()
             let smart = try Compressor().compress(inputURL: source, mode: .smart)
             let seconds = Date().timeIntervalSince(start)
             let anchor = try Compressor().compress(
                 inputURL: source, options: CompressionPresetFactory.custom(
-                    dpi: ImageCompressionOptions.smart.targetDPI,
+                    dpi: anchorDPI,
                     quality: QualityGatePolicy.smartAnchorQuality))
             defer {
                 try? FileManager.default.removeItem(at: smart.outputURL)
                 try? FileManager.default.removeItem(at: anchor.outputURL)
             }
-            let comparison = try Self.regions(source: source, smart: smart.outputURL, anchor: anchor.outputURL)
+            let comparison = try Self.regions(source: source, smart: smart.outputURL, anchor: anchor.outputURL,
+                                              anchorDPI: anchorDPI,
+                                              documentScan: anchorDPI == ImageCompressionOptions.smartDocumentScanDPI)
             let regions = comparison.regions
             let below = regions.filter { $0.smart < $0.anchor - Self.tolerance }
             artifact.append([
                 "file": source.lastPathComponent,
+                "anchor_dpi": anchorDPI,
                 "smart_bytes": smart.outputBytes,
                 "anchor_bytes": anchor.outputBytes,
                 "smart_seconds": (seconds * 10).rounded() / 10,
@@ -224,6 +272,9 @@ import PDFKit
                 "below_anchor": below.map { String(format: "%@ %.4f < %.4f", $0.name, $0.smart, $0.anchor) },
                 "worst_delta": regions.map { $0.smart - $0.anchor }.min() ?? 0,
             ])
+            if anchorDPI == ImageCompressionOptions.smartDocumentScanDPI, regions.isEmpty {
+                failures.append("\(source.lastPathComponent): kein Bild gegen den Anker verglichen")
+            }
             if !below.isEmpty {                                                  // 1, 3
                 failures.append("\(source.lastPathComponent): \(below.count)/\(regions.count) Bilder unter dem Anker, z. B. "
                     + below.prefix(3).map { String(format: "%@ %.4f < %.4f", $0.name, $0.smart, $0.anchor) }

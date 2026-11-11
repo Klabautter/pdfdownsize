@@ -55,8 +55,11 @@ import Foundation
         let start = Date()
         let estimate = try #require(CompressionEstimator.quickEstimate(url: url, options: .smart))
         let seconds = Date().timeIntervalSince(start)
-        // Vor dem Fix (Debug) 35 s; der Wert selbst stand bei 11.223.406 B.
-        #expect(estimate.pointBytes == 11_223_406, "Punktwert \(estimate.pointBytes)")
+        // Vor dem Fix (Debug) 35 s. Der Wert stand damals bei 11.223.406 B
+        // (65 % Ersparnis, echt sind es 7 %). Seit dem Strukturprofil nach
+        // Byte-Anteil (1.0.7, a28f84d) trifft die Schätzung: 29.722.601 B
+        // von 31.959.786 B = 7 %. Festgeschrieben am 11.11.2026.
+        #expect(estimate.pointBytes == 29_722_601, "Punktwert \(estimate.pointBytes)")
         #expect(seconds < 3, "Schnellschätzung \(seconds) s")
     }
 }
