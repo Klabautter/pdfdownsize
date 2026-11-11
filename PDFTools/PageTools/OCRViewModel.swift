@@ -36,6 +36,17 @@ final class OCRViewModel: ObservableObject {
     var isCancelling: Bool { stage == .working(cancelling: true) }
     @Published var progress = 0.0
     @Published var statusLabel = ""
+    /// Vision lädt beim ersten Lauf nach Installation oder Update bis zu
+    /// einer Minute seine Modelle (10.11.2026). Wird erst nach kurzer
+    /// Wartezeit sichtbar, damit warme Läufe nicht flackern.
+    @Published private(set) var isPreparingRecognition = false
+    private var enginePreparing = false
+    static let preparationHintDelay: Duration = .milliseconds(1500)
+
+    /// Text der Fortschrittsleiste – während der Vorbereitung deren Hinweis.
+    var progressLabel: String {
+        isPreparingRecognition ? String(localized: "Texterkennung wird vorbereitet …") : statusLabel
+    }
     /// Rohergebnis der Engine; die Textspalte liest `textSections`.
     @Published var pageResults: [OCREngine.PageResult] = [] {
         didSet {
@@ -331,6 +342,7 @@ final class OCRViewModel: ObservableObject {
     func cancelWork() {
         guard isWorking else { return }
         stage = .working(cancelling: true)
+        endPreparation()
         workTask?.cancel()
     }
 
@@ -348,15 +360,25 @@ final class OCRViewModel: ObservableObject {
         outputURL = nil
         savedURL = nil
         stage = .working(cancelling: false)
+        endPreparation()
 
         let languages = languagePreset.recognitionLanguages
         workTask = Task { @MainActor in
             // Jeder Ausgang ohne Ergebnis führt zurück zu `.ready`.
-            defer { if isWorking { stage = .ready } }
+            defer {
+                if operationID == runID { endPreparation() }
+                if isWorking { stage = .ready }
+            }
             do {
                 let total = PDFDocument(url: url)?.pageCount ?? 0
                 let output = try await OCREngine.run(
-                    sourceURL: url, languages: languages) { fraction in
+                    sourceURL: url, languages: languages,
+                    preparing: { active in
+                        Task { @MainActor in
+                            guard self.isWorking, self.operationID == runID else { return }
+                            self.preparationChanged(active, runID: runID)
+                        }
+                    }) { fraction in
                     Task { @MainActor in
                         guard self.isWorking, self.operationID == runID else { return }
                         self.progress = fraction
@@ -398,6 +420,21 @@ final class OCRViewModel: ObservableObject {
                 stage = .ready
             }
         }
+    }
+
+    private func preparationChanged(_ active: Bool, runID: UUID) {
+        guard active else { endPreparation(); return }
+        enginePreparing = true
+        Task { @MainActor in
+            try? await Task.sleep(for: Self.preparationHintDelay)
+            guard enginePreparing, isWorking, !isCancelling, operationID == runID else { return }
+            isPreparingRecognition = true
+        }
+    }
+
+    private func endPreparation() {
+        enginePreparing = false
+        isPreparingRecognition = false
     }
 
     // MARK: Ausgabe

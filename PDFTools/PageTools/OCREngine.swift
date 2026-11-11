@@ -3,6 +3,7 @@ import AppKit
 import PDFKit
 import Vision
 import CoreText
+import os
 
 /// OCR-Engine (v2, 2026-10-01): macht ein PDF lokal durchsuchbar, OHNE
 /// es zu rastern.
@@ -154,8 +155,12 @@ enum OCREngine {
     }
 
     /// Ein Durchgang: Scan-Seiten erkennen → Textebene ins Original.
+    /// `preparing(true)` meldet, dass die erste Erkennung im Prozess beginnt,
+    /// solange Vision noch nicht geladen ist; `preparing(false)`, wenn sie
+    /// fertig ist (siehe `visionIsWarm`).
     @concurrent nonisolated static func run(sourceURL: URL,
                                 languages: [String],
+                                preparing: @escaping (Bool) -> Void = { _ in },
                                 progress: @escaping (Double) -> Void) async throws -> RunOutput {
         let (doc, core) = try open(sourceURL)
         let resources = (try? core.imageResources()) ?? []
@@ -175,10 +180,13 @@ enum OCREngine {
                 continue
             }
             let render = try renderCGImage(of: page)
+            let cold = !visionIsWarm
+            if cold { preparing(true) }
             // Vorhandenen digitalen Text nicht ein zweites Mal ablegen.
-            var lines = try recognize(cgImage: render.image, languages: languages)
-            lines += try photoLines(page: page, pageIndex: i, resources: resources,
-                                    pixels: pixels, existing: lines, languages: languages)
+            var lines = try await recognize(cgImage: render.image, languages: languages)
+            if cold { preparing(false) }
+            lines += try await photoLines(page: page, pageIndex: i, resources: resources,
+                                          pixels: pixels, existing: lines, languages: languages)
             lines = lines.filter { !duplicatesExistingText($0, page: page) }
             results.append(PageResult(pageIndex: i, lines: lines))
             let content = textLayer(lines: lines, page: page)
@@ -224,7 +232,7 @@ enum OCREngine {
                                        resources: [PDFImageResource],
                                        pixels: ImagePixelSource,
                                        existing: [Line],
-                                       languages: [String]) throws -> [Line] {
+                                       languages: [String]) async throws -> [Line] {
         guard RotationNormalizer.normalized(page.rotation) == 0 else { return [] }
         let media = page.bounds(for: .mediaBox)
         let pageArea = max(media.width * media.height, 1)
@@ -249,7 +257,7 @@ enum OCREngine {
                         image = smaller
                     }
                 }
-                for line in try recognize(cgImage: image, languages: languages) {
+                for line in try await recognize(cgImage: image, languages: languages) {
                     // Einheitsquadrat des Bildes (Vision: Ursprung unten links,
                     // wie PDF) → Seite → normiert auf die angezeigte Seite.
                     let box = line.boundingBox
@@ -365,10 +373,10 @@ enum OCREngine {
     /// ergänzt. Überlappende Streifen wurden verworfen: An den Schnittkanten
     /// entstanden halbe Zeilen und damit Dubletten.
     private nonisolated static func recognize(cgImage: CGImage,
-                                              languages: [String]) throws -> [Line] {
-        var lines = try recognizeOnce(cgImage: cgImage, languages: languages)
+                                              languages: [String]) async throws -> [Line] {
+        var lines = try await recognizeOnce(cgImage: cgImage, languages: languages)
         if let variant = scaled(cgImage, by: secondPassScale) {
-            for line in try recognizeOnce(cgImage: variant, languages: languages)
+            for line in try await recognizeOnce(cgImage: variant, languages: languages)
             where !lines.contains(where: { isSameLine($0, text: line.text, box: line.boundingBox) }) {
                 lines.append(line)   // normierte Koordinaten gelten unverändert
             }
@@ -386,7 +394,7 @@ enum OCREngine {
                                                         height: halfHeight)) else { continue }
             let bottomInPage = Double(height - top - halfHeight) / Double(height)
             let scale = Double(halfHeight) / Double(height)
-            for line in try recognizeOnce(cgImage: half, languages: languages) {
+            for line in try await recognizeOnce(cgImage: half, languages: languages) {
                 let box = line.boundingBox
                 if cutAtBottom ? box.minY < cutMargin : box.maxY > 1 - cutMargin { continue }
                 let mapped = CGRect(x: box.minX, y: bottomInPage + box.minY * scale,
@@ -466,8 +474,43 @@ enum OCREngine {
         return total == 0 ? 0 : 2 * Double(common) / Double(total)
     }
 
+    /// Hat Vision in diesem Prozess schon einmal erkannt? Der erste Aufruf
+    /// nach Installation oder Update lädt die Modelle auf die Neural Engine
+    /// und brauchte gemessen 27–55 s (10.11.2026), jeder weitere 0,03 s.
+    private static let visionWarm = OSAllocatedUnfairLock(initialState: false)
+    nonisolated static var visionIsWarm: Bool { visionWarm.withLock { $0 } }
+
+    /// Ein Vision-Aufruf, der sich sofort abbrechen lässt. `perform` selbst
+    /// hält nicht an – auch `VNRequest.cancel()` kam beim Kaltstart erst nach
+    /// 15 s zurück. Deshalb läuft der Aufruf auf einer eigenen Queue, und ein
+    /// Abbruch beendet nur das Warten; der Aufruf läuft im Hintergrund aus
+    /// und lädt dabei die Modelle fertig, sodass ein neuer Lauf sofort startet.
     private nonisolated static func recognizeOnce(cgImage: CGImage,
-                                                  languages: [String]) throws -> [Line] {
+                                                  languages: [String]) async throws -> [Line] {
+        try Task.checkCancellation()
+        typealias Waiter = CheckedContinuation<[Line], Error>
+        let waiter = OSAllocatedUnfairLock<Waiter?>(initialState: nil)
+        @Sendable func finish(_ result: Result<[Line], Error>) {
+            waiter.withLock { pending in
+                pending?.resume(with: result)
+                pending = nil
+            }
+        }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: Waiter) in
+                waiter.withLock { $0 = continuation }
+                if Task.isCancelled { finish(.failure(CancellationError())); return }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    finish(Result { try performRecognition(cgImage: cgImage, languages: languages) })
+                }
+            }
+        } onCancel: {
+            finish(.failure(CancellationError()))
+        }
+    }
+
+    private nonisolated static func performRecognition(cgImage: CGImage,
+                                                       languages: [String]) throws -> [Line] {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = languages
@@ -477,6 +520,7 @@ enum OCREngine {
         } catch {
             throw OCRError.recognitionFailed(error.localizedDescription)
         }
+        visionWarm.withLock { $0 = true }
         let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
         return observations.compactMap { obs -> Line? in
             guard let candidate = obs.topCandidates(1).first else { return nil }

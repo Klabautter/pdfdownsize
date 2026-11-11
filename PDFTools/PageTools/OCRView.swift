@@ -184,9 +184,15 @@ struct OCRView: View {
             }
             if vm.isWorking {
                 WorkProgressBar(progress: vm.progress,
-                                label: vm.statusLabel,
+                                label: vm.progressLabel,
                                 isCancelling: vm.isCancelling,
                                 onCancel: { vm.cancelWork() })
+                if vm.isPreparingRecognition {
+                    Text("Beim ersten Mal nach einer Installation oder einem Update kann das bis zu einer Minute dauern.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             if vm.showsText, !vm.searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
                 hitBar

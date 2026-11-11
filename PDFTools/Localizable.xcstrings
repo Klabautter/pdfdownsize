@@ -1273,6 +1273,22 @@
         }
       }
     },
+    "Beim ersten Mal nach einer Installation oder einem Update kann das bis zu einer Minute dauern.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beim ersten Mal nach einer Installation oder einem Update kann das bis zu einer Minute dauern."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The first time after installing or updating, this can take up to a minute."
+          }
+        }
+      }
+    },
     "Bereits optimal": {
       "localizations": {
         "de": {
@@ -4767,6 +4783,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Text recognition failed: %@"
+          }
+        }
+      }
+    },
+    "Texterkennung wird vorbereitet …": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Texterkennung wird vorbereitet …"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparing text recognition…"
           }
         }
       }
