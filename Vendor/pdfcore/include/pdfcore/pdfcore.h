@@ -138,6 +138,17 @@ int pdfcore_named_destination_count(pdfcore_document_t *doc);
 /// Embedded-Files-Einträge im Names-Baum. -1=Fehler.
 int pdfcore_attachment_count(pdfcore_document_t *doc);
 
+/// Masterplan A4: Bytes des ICCBased-Profils eines Bildes (auch als Basis
+/// von /Indexed). Puffer mit free() freigeben. CHECK_FAILED = kein Profil.
+int pdfcore_get_image_icc_profile(pdfcore_document_t *doc, int obj, int gen,
+                                  unsigned char **out, size_t *out_len);
+
+/// Masterplan A4: Markiert ein ersetztes Bild, dessen Pixel nach sRGB
+/// umgerechnet wurden, als [/ICCBased <sRGB>] (bei /Indexed: die Basis).
+/// Das Profil liegt einmal je Dokument. CHECK_FAILED = kein RGB-Bild.
+int pdfcore_tag_image_srgb(pdfcore_document_t *doc, int obj, int gen,
+                           const unsigned char *icc, size_t icc_len);
+
 /// Masterplan E4: PDF/A-Teil laut XMP (pdfaid:part), 0 = keine Behauptung.
 int pdfcore_pdfa_part(pdfcore_document_t *doc);
 

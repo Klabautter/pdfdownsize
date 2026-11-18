@@ -1160,6 +1160,38 @@ extension PDFCoreDocument {
     /// - `decoded: true`  → von libqpdf aufgelöste Bytes (Flate/LZW/RunLength
     ///   inkl. Predictor). Kann libqpdf nicht ALLE Filter auflösen, wird
     ///   `nil` geliefert – niemals Ersatzdaten.
+    /// Masterplan A4: Das ICCBased-Profil eines Bildes (auch als Basis von
+    /// /Indexed), nil ohne Profil.
+    func imageICCProfile(objectID: PDFObjectID) -> Data? {
+        gate.lock(); defer { gate.unlock() }
+        var ptr: UnsafeMutablePointer<UInt8>?
+        var len: Int = 0
+        let rc = pdfcore_get_image_icc_profile(
+            handle, Int32(objectID.objectNumber), Int32(objectID.generation), &ptr, &len)
+        guard rc == PDFCORE_OK.rawValue, let base = ptr, len > 0 else {
+            if let base = ptr { free(base) }
+            return nil
+        }
+        defer { free(base) }
+        return Data(bytes: base, count: len)
+    }
+
+    /// Masterplan A4: Ersetztes Bild als sRGB markieren (Pixel wurden aus
+    /// dem PDF-Profil nach sRGB umgerechnet).
+    func tagImageSRGB(objectID: PDFObjectID) throws {
+        gate.lock(); defer { gate.unlock() }
+        guard let icc = Self.srgbICC else { throw PDFCoreError.internalError }
+        let rc = icc.withUnsafeBytes { raw in
+            pdfcore_tag_image_srgb(handle, Int32(objectID.objectNumber), Int32(objectID.generation),
+                                   raw.baseAddress!.assumingMemoryBound(to: UInt8.self), raw.count)
+        }
+        guard rc == PDFCORE_OK.rawValue else {
+            throw rc == PDFCORE_ERR_CHECK_FAILED.rawValue ? PDFCoreError.checkFailed : PDFCoreError.internalError
+        }
+    }
+
+    private static let srgbICC: Data? = CGColorSpace(name: CGColorSpace.sRGB)?.copyICCData() as Data?
+
     func imageStreamData(objectID: PDFObjectID, decoded: Bool) -> Data? {
         gate.lock(); defer { gate.unlock() }
         var ptr: UnsafeMutablePointer<CChar>?

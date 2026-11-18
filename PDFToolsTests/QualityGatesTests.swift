@@ -404,7 +404,7 @@ import CoreGraphics
             let start = clock.now
             for q in ladder {
                 guard let decoded = ImageResampler.encodeJPEG(photo, quality: q)
-                    .flatMap(ImageResampler.decodeJPEG) else { continue }
+                    .flatMap({ ImageResampler.decodeJPEG($0) }) else { continue }
                 _ = QualityMetrics.ssim(original: photo, candidate: decoded)
             }
             return clock.now - start
@@ -415,7 +415,7 @@ import CoreGraphics
             let start = clock.now
             for q in ladder {
                 guard let decoded = ImageResampler.encodeJPEG(photo, quality: q)
-                    .flatMap(ImageResampler.decodeJPEG) else { continue }
+                    .flatMap({ ImageResampler.decodeJPEG($0) }) else { continue }
                 _ = evaluator.measure(candidate: decoded)
             }
             return clock.now - start

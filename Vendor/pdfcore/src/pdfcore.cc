@@ -185,7 +185,9 @@ struct pdfcore_document {
     // → neue Masse. pdfcore_fit_soft_masks richtet die Masken danach aus.
     std::map<QPDFObjGen, std::pair<int, int>> shrunkenMaskedImages;
     // Masterplan E5: die glyphenlose OCR-Schrift, einmal je Dokument.
-    QPDFObjectHandle ocrFont;
+    QPDFObjectHandle ocrFont = QPDFObjectHandle::newNull();
+    // Masterplan A4: das sRGB-Profil für umgerechnete ICC-Bilder, einmal je Dokument.
+    QPDFObjectHandle srgbProfile = QPDFObjectHandle::newNull();
 };
 
 static pdfcore_status map_exception(const std::exception& e)
@@ -4255,6 +4257,90 @@ int pdfcore_replace_image_object_cmyk(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
+}
+
+// ============================================================================
+// Masterplan A4 – ICC-Profil beim Ersatz
+// ============================================================================
+
+namespace {
+
+/// Das ICCBased-Profil eines Bildfarbraums (auch als Basis von /Indexed),
+/// sonst null.
+QPDFObjectHandle image_icc_stream(QPDFObjectHandle image)
+{
+    QPDFObjectHandle cs = image.getDict().getKey("/ColorSpace");
+    if (cs.isArray() && cs.getArrayNItems() > 1 && cs.getArrayItem(0).isName()
+        && cs.getArrayItem(0).getName() == "/Indexed") {
+        cs = cs.getArrayItem(1);
+    }
+    if (cs.isArray() && cs.getArrayNItems() > 1 && cs.getArrayItem(0).isName()
+        && cs.getArrayItem(0).getName() == "/ICCBased" && cs.getArrayItem(1).isStream()) {
+        return cs.getArrayItem(1);
+    }
+    return QPDFObjectHandle::newNull();
+}
+
+} // namespace
+
+int pdfcore_get_image_icc_profile(pdfcore_document_t *doc, int obj, int gen,
+                                  unsigned char **out, size_t *out_len)
+{
+    PDFCORE_GUARD_BEGIN
+    if (!doc || !out || !out_len) { return PDFCORE_ERR_INTERNAL; }
+    *out = nullptr; *out_len = 0;
+    QPDFObjectHandle image = find_image_object(doc->qpdf, obj, gen);
+    if (!image.isStream()) { return PDFCORE_ERR_CHECK_FAILED; }
+    QPDFObjectHandle icc = image_icc_stream(image);
+    if (!icc.isStream()) { return PDFCORE_ERR_CHECK_FAILED; }
+    std::shared_ptr<Buffer> data = icc.getStreamData(qpdf_dl_generalized);
+    if (!data || data->getSize() == 0) { return PDFCORE_ERR_CHECK_FAILED; }
+    *out = static_cast<unsigned char*>(std::malloc(data->getSize()));
+    if (!*out) { return PDFCORE_ERR_INTERNAL; }
+    std::memcpy(*out, data->getBuffer(), data->getSize());
+    *out_len = data->getSize();
+    return PDFCORE_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
+}
+
+int pdfcore_tag_image_srgb(pdfcore_document_t *doc, int obj, int gen,
+                           const unsigned char *icc, size_t icc_len)
+{
+    PDFCORE_GUARD_BEGIN
+    if (!doc || !icc || icc_len == 0) { return PDFCORE_ERR_INTERNAL; }
+    QPDFObjectHandle image = find_image_object(doc->qpdf, obj, gen);
+    if (!image.isStream()) { return PDFCORE_ERR_CHECK_FAILED; }
+    if (!doc->srgbProfile.isIndirect()) {
+        QPDFObjectHandle profile = QPDFObjectHandle::newStream(
+            &doc->qpdf, std::string(reinterpret_cast<char const*>(icc), icc_len));
+        profile.getDict().replaceKey("/N", QPDFObjectHandle::newInteger(3));
+        profile.getDict().replaceKey("/Alternate", QPDFObjectHandle::newName("/DeviceRGB"));
+        doc->srgbProfile = profile;   // newStream ist bereits indirekt
+    }
+    QPDFObjectHandle space = QPDFObjectHandle::newArray();
+    space.appendItem(QPDFObjectHandle::newName("/ICCBased"));
+    space.appendItem(doc->srgbProfile);
+    QPDFObjectHandle dict = image.getDict();
+    QPDFObjectHandle cs = dict.getKey("/ColorSpace");
+    if (cs.isArray() && cs.getArrayNItems() == 4 && cs.getArrayItem(0).isName()
+        && cs.getArrayItem(0).getName() == "/Indexed") {
+        // Palette in sRGB: nur die Basis tauschen.
+        QPDFObjectHandle indexed = cs.shallowCopy();
+        indexed.setArrayItem(1, space);
+        dict.replaceKey("/ColorSpace", indexed);
+        return PDFCORE_OK;
+    }
+    if (cs.isName() && cs.getName() == "/DeviceRGB") {
+        dict.replaceKey("/ColorSpace", space);
+        return PDFCORE_OK;
+    }
+    if (image_icc_stream(image).isStream()) {
+        dict.replaceKey("/ColorSpace", space);
+        return PDFCORE_OK;
+    }
+    // Grau, CMYK oder anderes: nicht umgerechnet, nichts zu markieren.
+    return PDFCORE_ERR_CHECK_FAILED;
     PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 

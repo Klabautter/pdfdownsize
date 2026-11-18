@@ -226,6 +226,11 @@ enum CompressionExecutor {
                                               newHeight: target.height,
                                               grayscale: grayscale,
                                               decodeApplied: resource.hasDecodeArray)
+                    // Masterplan A4: Pixel sind aus dem PDF-Profil nach sRGB
+                    // umgerechnet – die Ausgabe sagt das.
+                    if !grayscale, LibQPDFPixelSource.needsSRGBTag(resource) {
+                        try document.tagImageSRGB(objectID: objectID)
+                    }
                 case .cmykJpegReencode(let objectID, let target, _, _, _):
                     // Phase 6C – die Bridge trägt DeviceCMYK bzw. den
                     // ICCBased-4-Farbraum der Quelle über die Ersetzung.
@@ -247,6 +252,11 @@ enum CompressionExecutor {
                                                       components: components,
                                                       predictor: predictor,
                                                       decodeApplied: resource.hasDecodeArray)
+                    // Masterplan A4: Die Bytes sind sRGB, nicht mehr Werte im
+                    // Quellprofil – das übernommene Profil würde sie doppelt deuten.
+                    if components == 3, LibQPDFPixelSource.needsSRGBTag(resource) {
+                        try document.tagImageSRGB(objectID: objectID)
+                    }
                 case .indexed(let objectID, let target, let bpc,
                               let paletteComponents, let palette, _, _, _, _):
                     // V2-3b (§9.6) – die Indizes kommen als Flate+Prädiktor-
@@ -262,6 +272,9 @@ enum CompressionExecutor {
                                                      bitsPerComponent: bpc,
                                                      paletteComponents: paletteComponents,
                                                      decodeApplied: resource.hasDecodeArray)
+                    if paletteComponents == 3, LibQPDFPixelSource.needsSRGBTag(resource) {
+                        try document.tagImageSRGB(objectID: objectID)
+                    }
                 case .ccittG4(let objectID, _, _):
                     // Phase 2b – Bilevel behält seine Maße; die Bridge schreibt
                     // BitsPerComponent 1, DeviceGray und die /BlackIs1-
@@ -914,12 +927,31 @@ enum CompressionExecutor {
 struct LibQPDFPixelSource: ImagePixelSource {
     let document: PDFCoreDocument
 
+    /// Masterplan A4: Das /ICCBased-Profil (drei Kanäle) aus dem PDF. Die
+    /// Pixel werden damit nach sRGB umgerechnet; der Executor markiert das
+    /// ersetzte Bild danach als sRGB (`needsSRGBTag`). Vorher blieb das
+    /// Profil unangewendet und die Ausgabe hieß /DeviceRGB – Display-P3-Rot
+    /// verlor ΔE76 17.
+    func pdfProfile(for resource: PDFImageResource) -> CGColorSpace? {
+        guard Self.needsSRGBTag(resource),
+              let icc = document.imageICCProfile(objectID: resource.objectID),
+              let space = CGColorSpace(iccData: icc as CFData),
+              space.model == .rgb else { return nil }
+        return space
+    }
+
+    /// Bilder, deren Pixel beim Dekodieren nach sRGB umgerechnet werden.
+    static func needsSRGBTag(_ resource: PDFImageResource) -> Bool {
+        if case .iccBased(let n) = resource.pixelColorSpace { return n == 3 }
+        return false
+    }
+
     func decodedImage(for resource: PDFImageResource) -> CGImage? {
         switch resource.terminalFilter {
         case .dct:
             guard let data = document.imageStreamData(objectID: resource.objectID,
                                                       decoded: false) else { return nil }
-            return ImageResampler.decodeJPEG(data)
+            return ImageResampler.decodeJPEG(data, pdfProfile: pdfProfile(for: resource))
         case .flate, .lzw, .runLength, nil:
             guard let data = document.imageStreamData(objectID: resource.objectID,
                                                       decoded: true) else { return nil }
@@ -929,7 +961,8 @@ struct LibQPDFPixelSource: ImagePixelSource {
             }
             guard let samples = ImageSamples.normalized(data, resource: resource,
                                                         palette: palette) else { return nil }
-            return Self.bitmap(from: samples, resource: resource)
+            guard let bitmap = Self.bitmap(from: samples, resource: resource) else { return nil }
+            return ImageResampler.converted(bitmap, from: pdfProfile(for: resource))
 
         case .jpx:
             return jpxImage(resource: resource, reduce: 0)
@@ -992,11 +1025,12 @@ struct LibQPDFPixelSource: ImagePixelSource {
         if resource.colorSpace == .none, let info = JPXDecoder.colorInfo(of: data) {
             embedded = info.iccSpace
         }
-        return Self.bitmap(from: decoded.pixels,
-                           width: decoded.width,
-                           height: decoded.height,
-                           resource: resource,
-                           embeddedSpace: embedded)
+        guard let bitmap = Self.bitmap(from: decoded.pixels,
+                                       width: decoded.width,
+                                       height: decoded.height,
+                                       resource: resource,
+                                       embeddedSpace: embedded) else { return nil }
+        return ImageResampler.converted(bitmap, from: pdfProfile(for: resource))
     }
 
     /// ceil(edge / 2^reduce) – die Rastergröße, die cp_reduce erwartet.
@@ -1070,7 +1104,8 @@ struct LibQPDFPixelSource: ImagePixelSource {
                                                       decoded: false) else { return nil }
             return ImageResampler.decodeJPEG(
                 data, level: Self.dctLevel(resource: resource, target: target),
-                maximumPixels: CompressionPlanner.maximumDecodablePixels)
+                maximumPixels: CompressionPlanner.maximumDecodablePixels,
+                pdfProfile: pdfProfile(for: resource))
         }
         guard resource.terminalFilter == .jpx,
               target.width > 0, target.height > 0 else {

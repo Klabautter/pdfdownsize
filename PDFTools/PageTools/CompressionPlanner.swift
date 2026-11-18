@@ -1306,7 +1306,11 @@ enum ImageResampler {
     /// harter Grenze: Die Maße stammen aus dem JPEG-Kopf, bevor ein Pixel
     /// dekodiert ist. So zählt nicht, was das Bilddictionary behauptet.
     /// Ebene 0 liefert dieselben Pixel wie `decodeJPEG(_:)`.
-    static func decodeJPEG(_ data: Data, level: Int, maximumPixels: Int) -> CGImage? {
+    /// `pdfProfile` (Masterplan A4): das /ICCBased-Profil aus dem PDF. Es
+    /// gilt vor einem im JPEG eingebetteten Profil (das PDF-Wörterbuch
+    /// bestimmt den Farbraum); die Pixel werden damit nach sRGB umgerechnet.
+    static func decodeJPEG(_ data: Data, level: Int, maximumPixels: Int,
+                           pdfProfile: CGColorSpace? = nil) -> CGImage? {
         let scaling: [CFString: Any] = level > 0
             ? [kCGImageSourceSubsampleFactor: 1 << level] : [:]
         guard let src = CGImageSourceCreateWithData(data as CFData, nil),
@@ -1316,16 +1320,27 @@ enum ImageResampler {
         let options = scaling.merging([kCGImageSourceShouldCacheImmediately: true]) { $1 }
         guard let decoded = CGImageSourceCreateImageAtIndex(src, 0, options as CFDictionary)
         else { return nil }
-        return materialized(decoded)
+        return converted(decoded, from: pdfProfile)
     }
 
-    static func decodeJPEG(_ data: Data) -> CGImage? {
+    static func decodeJPEG(_ data: Data, pdfProfile: CGColorSpace? = nil) -> CGImage? {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil),
               CGImageSourceGetCount(src) > 0 else { return nil }
         guard let decoded = CGImageSourceCreateImageAtIndex(src, 0, [
             kCGImageSourceShouldCacheImmediately: true
         ] as CFDictionary) else { return nil }
-        return materialized(decoded)
+        return converted(decoded, from: pdfProfile)
+    }
+
+    /// Masterplan A4: Deutet RGB-Pixel im PDF-Profil und rechnet sie nach
+    /// sRGB um. Ohne Profil (oder bei Nicht-RGB) wie bisher `materialized`.
+    static func converted(_ image: CGImage, from pdfProfile: CGColorSpace?) -> CGImage {
+        guard let pdfProfile, pdfProfile.model == .rgb, image.colorSpace?.model == .rgb,
+              let tagged = image.copy(colorSpace: pdfProfile),
+              let srgb = resize(tagged, to: PixelSize(width: image.width, height: image.height),
+                                components: 3)
+        else { return materialized(image) }
+        return srgb
     }
 
     /// Die CMYK-Abtastwerte als ihr Gegenteil (255 − Wert). Die Polarität
