@@ -50,4 +50,19 @@ import Foundation
         }
         #expect(Date().timeIntervalSince(start) < 150, "Dauer \(Date().timeIntervalSince(start)) s")
     }
+
+    /// hang-3921: Ein mutiertes JPX-Bild ließ CoreGraphics beim Zeichnen der
+    /// Render-Stichprobe (A3) nicht mehr zurückkehren.
+    @Test(.timeLimit(.minutes(4)), .needsLocalFiles("tmp/fuzz-findings/hang-3921.pdf"))
+    func jpxRenderHaengerEndet() throws {
+        let url = LocalTestData.repoRoot.appendingPathComponent("tmp/fuzz-findings/hang-3921.pdf")
+        let start = Date()
+        do {
+            let result = try Compressor().compress(inputURL: url, mode: .smart)
+            if result.outputURL != url { try? FileManager.default.removeItem(at: result.outputURL) }
+        } catch {
+            // Ablehnen ist erlaubt – hängen nicht.
+        }
+        #expect(Date().timeIntervalSince(start) < 200, "Dauer \(Date().timeIntervalSince(start)) s")
+    }
 }

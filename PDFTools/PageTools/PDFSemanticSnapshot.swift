@@ -247,16 +247,8 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
     static let pageTextTimeout: Double = 15
 
     static func boundedText(_ page: PDFPage) -> String? {
-        final class Box: @unchecked Sendable { var text: String? }
-        let box = Box()
-        let done = DispatchSemaphore(value: 0)
         nonisolated(unsafe) let page = page
-        Thread.detachNewThread {
-            box.text = page.string ?? ""
-            done.signal()
-        }
-        guard done.wait(timeout: .now() + pageTextTimeout) == .success else { return nil }
-        return box.text
+        return FrameworkWatchdog.run(timeout: pageTextTimeout) { page.string ?? "" }
     }
 
     /// Masterplan C2: Ab `parallelPageThreshold` Seiten wird der Seitenteil

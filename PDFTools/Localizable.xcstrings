@@ -2257,6 +2257,22 @@
         }
       }
     },
+    "Der Text von Seite %lld ließ sich nicht in angemessener Zeit lesen.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Text von Seite %lld ließ sich nicht in angemessener Zeit lesen."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The text of page %lld could not be read in reasonable time."
+          }
+        }
+      }
+    },
     "Der erkannte Text erscheint hier, sobald alle Seiten bearbeitet sind.": {
       "localizations": {
         "de": {
@@ -5430,6 +5446,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Page %lld could not be read."
+          }
+        }
+      }
+    },
+    "Seite %lld ließ sich nicht in angemessener Zeit darstellen.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Seite %lld ließ sich nicht in angemessener Zeit darstellen."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Page %lld could not be rendered in reasonable time."
           }
         }
       }

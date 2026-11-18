@@ -386,6 +386,8 @@ enum PDFValidator {
     /// den meisten veränderten Bildbytes). Kosten je Seite rund 60 ms.
     static let maximumRenderSamplePages = 6
     static let renderSampleDPI = 110.0
+    /// Masterplan D5: Zeitlimit für das Zeichnen von Referenz und Ausgabe einer Seite.
+    static let renderSampleTimeout = 30.0
     /// Strukturkollaps: dieselbe Grenze wie der Katastrophen-Floor der
     /// Bildgates – darunter ist eine Seite kaputt, nicht nur komprimiert.
     static let renderSampleMinimumSSIM = QualityGatePolicy.catastrophicGlobalFloor
@@ -425,10 +427,25 @@ enum PDFValidator {
                 message: "Render-Stichprobe nicht möglich"))
             return
         }
-        for index in pages where index < source.numberOfPages && index < output.numberOfPages {
+        var timedOut = false
+        for index in pages where index < source.numberOfPages && index < output.numberOfPages && !timedOut {
             autoreleasepool {
-                guard let reference = renderPage(source, index: index),
-                      let candidate = renderPage(output, index: index),
+                // Masterplan D5: Zeichnen mit Zeitlimit (CoreGraphics hing an
+                // einem mutierten JPX-Bild). Nach Ablauf werden die Dokumente
+                // nicht weiter benutzt – die Prüfung gilt als nicht bestanden.
+                nonisolated(unsafe) let sourceDoc = source
+                nonisolated(unsafe) let outputDoc = output
+                guard let rendered = FrameworkWatchdog.run(timeout: renderSampleTimeout, {
+                    (renderPage(sourceDoc, index: index), renderPage(outputDoc, index: index))
+                }) else {
+                    timedOut = true
+                    let message = String(localized: "Seite \(index + 1) ließ sich nicht in angemessener Zeit darstellen.")
+                    report.fail(message, ValidationFinding(kind: .render, severity: .error,
+                                                           pages: [index + 1], message: message))
+                    return
+                }
+                guard let reference = rendered.0,
+                      let candidate = rendered.1,
                       reference.width == candidate.width, reference.height == candidate.height
                 else {
                     report.fail("Seite \(index + 1): nicht vergleichbar gerendert", ValidationFinding(
