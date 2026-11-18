@@ -5,7 +5,7 @@ import ImageIO
 import UniformTypeIdentifiers
 
 /// Images → PDF (Review §65, Feature 4): Bilder werden beim Import in eine
-/// einseitige Temp-PDF umgewandelt und sind danach normale Organizer-Seiten –
+/// Temp-PDF umgewandelt (eine Seite je Bild, mehrseitige TIFFs komplett) und sind danach normale Organizer-Seiten –
 /// mischbar mit PDF-Seiten, inkl. Reorder/Extract/Split/Bildexport.
 enum ImageImporter {
 
@@ -47,9 +47,13 @@ enum ImageImporter {
 
     /// Liest Pixelmaße + Orientation aus den Metadaten – NICHT `NSImage.size`
     /// (das ist eine durch DPI-Metadaten skalierte Punktgröße).
-    static func pixelInfo(of url: URL) -> PixelInfo? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+    static func pixelInfo(of url: URL, index: Int = 0) -> PixelInfo? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return pixelInfo(of: source, index: index)
+    }
+
+    private static func pixelInfo(of source: CGImageSource, index: Int) -> PixelInfo? {
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, index, nil)
                     as? [CFString: Any],
               let w = props[kCGImagePropertyPixelWidth] as? Int,
               let h = props[kCGImagePropertyPixelHeight] as? Int else {
@@ -59,25 +63,30 @@ enum ImageImporter {
         return PixelInfo(width: w, height: h, orientation: orientation)
     }
 
-    /// Dekodiert das Bild in Originalpixeln und richtet die EXIF-Orientierung auf.
-    private static func uprightCGImage(of url: URL) -> (cgImage: CGImage,
-                                                        pixelInfo: PixelInfo)? {
-        guard let info = pixelInfo(of: url),
-              let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+    /// Masterplan E5: Seiten einer Bilddatei. Mehrseitige TIFFs (Fax, Scanner)
+    /// liefern jede Seite; vorher kam nur Bild 0 an. Andere Formate mit
+    /// mehreren Bildern (animiertes GIF, HEIC-Serien) bleiben bei einem Bild –
+    /// dort sind die weiteren Bilder keine Seiten.
+    static func pageCount(of source: CGImageSource) -> Int {
+        let type = CGImageSourceGetType(source) as String?
+        guard type == UTType.tiff.identifier else { return 1 }
+        return max(1, CGImageSourceGetCount(source))
+    }
 
+    /// Dekodiert ein Bild in Originalpixeln und richtet die EXIF-Orientierung auf.
+    private static func uprightCGImage(of source: CGImageSource, index: Int) -> CGImage? {
+        guard let info = pixelInfo(of: source, index: index) else { return nil }
         // Thumbnail-API mit Transform = voll auflösend + orientierungskorrigiert.
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: max(info.width, info.height),
         ]
-        guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
-            return nil
-        }
-        return (cg, info)
+        return CGImageSourceCreateThumbnailAtIndex(source, index, options as CFDictionary)
     }
 
-    /// Wandelt ein Bild in eine einseitige PDF um.
+    /// Wandelt eine Bilddatei in eine PDF um – eine Seite je Bild (mehrseitige
+    /// TIFFs: jede Seite, Masterplan E5).
     /// Seitenpunkte = Originalpixel (1:1, „An Bild anpassen“); die EXIF-
     /// Orientierung wird beim Dekodieren aufgerichtet (Thumbnail-Transform).
     /// Kein Upscaling, kein DPI-bedingtes Downsamplen (Review P0.3).
@@ -95,35 +104,43 @@ enum ImageImporter {
         return resized
     }
 
-    static func singlePagePDF(from imageURL: URL) throws -> URL {
-        guard let decoded = uprightCGImage(of: imageURL) else {
-            throw ImportError.unreadable(imageURL.lastPathComponent)
-        }
+    struct ImportedPDF {
+        let url: URL
+        let pageCount: Int
+    }
 
-        // Der Dekodier-Schritt hat bereits transformiert → cg ist „upright“;
-        // Seitengröße = echte Pixelmaße des dekodierten Bildes.
-        //
-        // Pixel-Deckel (Befund A8, Review 2026-10-09): Die Kompression
-        // dekodiert nichts über `maximumDecodablePixels`; ein Import darüber
-        // bliebe später unoptimierbar und frisst beim Einbetten Speicher.
-        // Deshalb hier proportional auf das Budget verkleinern.
-        let cg = try Self.capped(decoded.cgImage, name: imageURL.lastPathComponent)
-        let size = CGSize(width: cg.width, height: cg.height)
-        let image = NSImage(cgImage: cg, size: size)
-        guard let page = PDFPage(image: image) else {
-            throw ImportError.encodingFailed(imageURL.lastPathComponent)
+    static func pdf(from imageURL: URL) throws -> ImportedPDF {
+        let name = imageURL.lastPathComponent
+        guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil) else {
+            throw ImportError.unreadable(name)
         }
-
         let doc = PDFDocument()
-        doc.insert(page, at: 0)
+        for index in 0..<pageCount(of: source) {
+            // Der Dekodier-Schritt hat bereits transformiert → cg ist „upright“;
+            // Seitengröße = echte Pixelmaße des dekodierten Bildes.
+            //
+            // Pixel-Deckel (Befund A8, Review 2026-10-09): Die Kompression
+            // dekodiert nichts über `maximumDecodablePixels`; ein Import darüber
+            // bliebe später unoptimierbar und frisst beim Einbetten Speicher.
+            // Deshalb hier proportional auf das Budget verkleinern.
+            try autoreleasepool {
+                guard let decoded = uprightCGImage(of: source, index: index) else {
+                    throw ImportError.unreadable(name)
+                }
+                let cg = try Self.capped(decoded, name: name)
+                let image = NSImage(cgImage: cg, size: CGSize(width: cg.width, height: cg.height))
+                guard let page = PDFPage(image: image) else { throw ImportError.encodingFailed(name) }
+                doc.insert(page, at: doc.pageCount)
+            }
+        }
 
         try FileManager.default.createDirectory(at: sessionDirectory,
                                                 withIntermediateDirectories: true)
         let tempURL = sessionDirectory.appendingPathComponent("\(UUID().uuidString).pdf")
         guard doc.write(to: tempURL) else {
-            throw ImportError.encodingFailed(imageURL.lastPathComponent)
+            throw ImportError.encodingFailed(name)
         }
-        return tempURL
+        return ImportedPDF(url: tempURL, pageCount: doc.pageCount)
     }
 
     enum ImportError: LocalizedError {

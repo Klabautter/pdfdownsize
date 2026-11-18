@@ -225,14 +225,15 @@ final class ConversionViewModel: ObservableObject {
             // (Befund B11, Review 2026-10-09); die Konvertierung selbst
             // läuft abseits des Main Threads.
             try Task.checkCancellation()
-            let converted = try await Task.detached(priority: .userInitiated) {
-                try ImageImporter.singlePagePDF(from: imgURL)
+            let imported = try await Task.detached(priority: .userInitiated) {
+                try ImageImporter.pdf(from: imgURL)
             }.value
-            intermediatePDFs.append(converted)
-            let source = SourceDocument(url: converted,
-                                        pageCount: 1,
+            intermediatePDFs.append(imported.url)
+            let source = SourceDocument(url: imported.url,
+                                        pageCount: imported.pageCount,
                                         displayFileName: imgURL.lastPathComponent)
-            items.append(PageItem(source: source, pageIndex: 0))
+            // Masterplan E5: mehrseitige TIFFs bringen alle Seiten mit.
+            items += (0..<imported.pageCount).map { PageItem(source: source, pageIndex: $0) }
             progress(Double(i + 1) / Double(imageURLs.count) * 0.7)
         }
 

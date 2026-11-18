@@ -48,7 +48,7 @@ struct ConverterHardeningTests {
         #expect(info?.orientation == 6)
 
         // Die erzeugte PDF-Seite ist aufgerichtet: 900 breit × 1200 hoch.
-        let pdfURL = try ImageImporter.singlePagePDF(from: url)
+        let pdfURL = try ImageImporter.pdf(from: url).url
         defer { try? FileManager.default.removeItem(at: pdfURL) }
         let doc = try #require(PDFDocument(url: pdfURL))
         let bounds = doc.page(at: 0)?.bounds(for: .mediaBox) ?? .zero

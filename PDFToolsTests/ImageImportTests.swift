@@ -24,7 +24,7 @@ struct ImageImportTests {
         try png.write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
 
-        let pdf = try ImageImporter.singlePagePDF(from: url)
+        let pdf = try ImageImporter.pdf(from: url).url
         defer { try? FileManager.default.removeItem(at: pdf) }
         let resource = try #require(try PDFCoreDocument(path: pdf.path).imageResources().first)
         #expect(resource.width * resource.height <= ImageImporter.maximumPixels,

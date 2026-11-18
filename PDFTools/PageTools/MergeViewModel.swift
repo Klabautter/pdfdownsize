@@ -215,7 +215,7 @@ final class MergeViewModel: ObservableObject {
     /// Ergebnis des Import-Scans abseits des Main Threads (B11).
     private enum ImportScan: Sendable {
         case pdf(url: URL, pageCount: Int, signed: Bool)
-        case image(original: URL, converted: URL)
+        case image(original: URL, converted: URL, pageCount: Int)
         case failed(String)
     }
 
@@ -257,8 +257,9 @@ final class MergeViewModel: ObservableObject {
                 }
                 for url in images {
                     do {
-                        result.append(.image(original: url,
-                                             converted: try ImageImporter.singlePagePDF(from: url)))
+                        let imported = try ImageImporter.pdf(from: url)
+                        result.append(.image(original: url, converted: imported.url,
+                                             pageCount: imported.pageCount))
                     } catch {
                         result.append(.failed(error.localizedDescription))
                     }
@@ -279,13 +280,16 @@ final class MergeViewModel: ObservableObject {
                     if signed, !signatureWarningDocs.contains(source.fileName) {
                         signatureWarningDocs.append(source.fileName)
                     }
-                case .image(let original, let converted):
-                    // Bilder → einseitige Temp-PDFs (§65, Feature 4).
+                case .image(let original, let converted, let pageCount):
+                    // Bilder → Temp-PDFs, eine Seite je Bild (§65, Feature 4; E5: TIFF-Seiten).
                     let source = SourceDocument(url: converted,
-                                                pageCount: 1,
+                                                pageCount: pageCount,
                                                 displayFileName: original.lastPathComponent)
                     addedDocs.append(source)
-                    addedPages.append(PageItem(source: source, pageIndex: 0))
+                    // Masterplan E5: mehrseitige TIFFs bringen alle Seiten mit.
+                    addedPages.append(contentsOf: (0..<pageCount).map {
+                        PageItem(source: source, pageIndex: $0)
+                    })
                 }
             }
 

@@ -552,7 +552,7 @@ enum OCREngine {
                              height: line.boundingBox.height * display.height)
             guard box.width > 0.5, box.height > 0.5 else { continue }
             let fontSize = max(1, box.height * 0.9)
-            let natural = helveticaWidth(line.text, size: fontSize)
+            let natural = glyphlessWidth(line.text, size: fontSize)
             let scale = natural > 0 ? min(max(box.width / natural * 100, 10), 500) : 100
             // Grundlinie: etwas über der Boxunterkante (Unterlängen).
             let dx = box.minX, dy = box.minY + box.height * 0.2
@@ -574,31 +574,17 @@ enum OCREngine {
         String(format: "%.2f", value)
     }
 
-    /// Breite in Helvetica (dieselben Metriken wie der Standard-14-Font).
-    private nonisolated static func helveticaWidth(_ text: String, size: Double) -> Double {
-        let font = CTFontCreateWithName("Helvetica" as CFString, size, nil)
-        let attributed = NSAttributedString(string: text, attributes: [.font: font])
-        return CTLineGetTypographicBounds(CTLineCreateWithAttributedString(attributed),
-                                          nil, nil, nil)
+    /// Natürliche Breite in der glyphenlosen OCR-Schrift: jede UTF-16-
+    /// Codeeinheit ist 500/1000 em breit (/DW 500, Masterplan E5).
+    private nonisolated static func glyphlessWidth(_ text: String, size: Double) -> Double {
+        Double(text.utf16.count) * 0.5 * size
     }
 
-    /// PDF-Literal in WinAnsi (Deutsch/Englisch vollständig); nicht
-    /// darstellbare Zeichen werden zu „?“, Sonderzeichen oktal maskiert.
+    /// Text als UTF-16BE-Hexstring für die Identity-H-Schrift – jede Schrift
+    /// bleibt erhalten (vorher CP1252, alles andere wurde „?“).
     nonisolated static func pdfString(_ text: String) -> String? {
-        guard let data = text.data(using: .windowsCP1252, allowLossyConversion: true),
-              !data.isEmpty else { return nil }
-        var out = "("
-        for byte in data {
-            switch byte {
-            case UInt8(ascii: "("), UInt8(ascii: ")"), UInt8(ascii: "\\"):
-                out += "\\" + String(UnicodeScalar(byte))
-            case 0x20...0x7E:
-                out += String(UnicodeScalar(byte))
-            default:
-                out += String(format: "\\%03o", byte)
-            }
-        }
-        return out + ")"
+        guard !text.isEmpty else { return nil }
+        return "<" + text.utf16.map { String(format: "%04X", $0) }.joined() + ">"
     }
 }
 

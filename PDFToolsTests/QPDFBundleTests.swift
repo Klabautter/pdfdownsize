@@ -55,7 +55,7 @@ struct QPDFBundleTests {
         #expect(info?.width == 1200)
         #expect(info?.height == 900)
 
-        let pdfURL = try ImageImporter.singlePagePDF(from: url)
+        let pdfURL = try ImageImporter.pdf(from: url).url
         defer { try? FileManager.default.removeItem(at: pdfURL) }
 
         let doc = try #require(PDFDocument(url: pdfURL))

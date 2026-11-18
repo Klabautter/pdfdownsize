@@ -712,7 +712,8 @@ int pdfcore_fit_soft_masks(pdfcore_document_t *doc, int *fitted);
 /* OCR-Textebene (2026-10-01): hängt `content` als eigenen Content-Stream an
  * die Seite an. Der bestehende Inhalt wird in q … Q gekapselt, damit sein
  * Grafikzustand die Textebene nicht verschiebt; die Seite erhält die
- * Font-Ressource /PDFToolsOCR (Helvetica, WinAnsiEncoding) – bei geteilten
+ * Font-Ressource /PDFToolsOCR (glyphenlose Type0, Identity-H, ToUnicode;
+ * Text als UTF-16BE-Hexstrings, Glyphenbreite 500/1000 em) – bei geteilten
  * Ressourcen als Kopie nur für diese Seite. Rückgabe PDFCORE_OK oder Fehler. */
 int pdfcore_append_ocr_layer(pdfcore_document_t *doc, int page_index,
                              const char *content, size_t content_len);

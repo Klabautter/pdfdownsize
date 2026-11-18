@@ -184,6 +184,8 @@ struct pdfcore_document {
     // Bilder mit weicher Maske, die in diesem Lauf verkleinert wurden: Objekt
     // → neue Masse. pdfcore_fit_soft_masks richtet die Masken danach aus.
     std::map<QPDFObjGen, std::pair<int, int>> shrunkenMaskedImages;
+    // Masterplan E5: die glyphenlose OCR-Schrift, einmal je Dokument.
+    QPDFObjectHandle ocrFont;
 };
 
 static pdfcore_status map_exception(const std::exception& e)
@@ -719,7 +721,7 @@ int destination_page_index(QPDF& qpdf, QPDFObjectHandle dest)
 {
     if (dest.isNull()) { return -1; }
     if (dest.isDictionary() && dest.hasKey("/D")) { dest = dest.getKey("/D"); }
-    QPDFObjectHandle pageRef;
+    QPDFObjectHandle pageRef = QPDFObjectHandle::newNull();
     if (dest.isArray()) {
         auto v = dest.getArrayAsVector();
         if (!v.empty()) { pageRef = v[0]; }
@@ -1806,7 +1808,7 @@ static std::vector<std::string> const& ensure_list(pdfcore_document_t& doc, int 
 
                     std::string destType = "none";
                     std::string namedDest;
-                    QPDFObjectHandle target;
+                    QPDFObjectHandle target = QPDFObjectHandle::newNull();
 
                     QPDFObjectHandle dest = a.getKey("/Dest");
                     if (!dest.isNull()) {
@@ -2877,7 +2879,8 @@ static int write_pages_impl(const char *const *source_paths,
             struct Node {
                 std::string title;           // Rohbytes des PDF-Strings
                 bool unicodeTitle = false;
-                QPDFObjectHandle dest;       // Ausgabe-Ziel oder null
+                // Ausdrücklich null: ein uninitialisiertes Handle ist NICHT isNull().
+                QPDFObjectHandle dest = QPDFObjectHandle::newNull();
                 int parent = -1;
                 std::vector<int> children;
                 bool kept = false;
@@ -3021,7 +3024,7 @@ static int write_pages_impl(const char *const *source_paths,
                     QPDFObjectHandle st = a.getKey("/Subtype");
                     if (!(st.isName() && st.getName() == "/Link")) { continue; }
                     bool internalLink = false;
-                    QPDFObjectHandle target;
+                    QPDFObjectHandle target = QPDFObjectHandle::newNull();
                     if (a.hasKey("/Dest")) { internalLink = true; target = a.getKey("/Dest"); }
                     else if (a.hasKey("/A")) {
                         QPDFObjectHandle action = a.getKey("/A");
@@ -3145,9 +3148,9 @@ int pdfcore_internal_link_targets(pdfcore_document_t *doc,
                     if (!(st.isName() && st.getName() == "/Link")) { continue; }
 
                     QPDFObjectHandle dest = a.getKey("/Dest");
-                    QPDFObjectHandle action;
+                    QPDFObjectHandle action = QPDFObjectHandle::newNull();
                     bool isInternal = false;
-                    QPDFObjectHandle target;
+                    QPDFObjectHandle target = QPDFObjectHandle::newNull();
 
                     if (!dest.isNull()) { isInternal = true; target = dest; }
                     else if (a.hasKey("/A")) {
@@ -3165,7 +3168,7 @@ int pdfcore_internal_link_targets(pdfcore_document_t *doc,
                         continue;
                     }
 
-                    QPDFObjectHandle pageRef;
+                    QPDFObjectHandle pageRef = QPDFObjectHandle::newNull();
                     if (target.isArray()) {
                         auto v = target.getArrayAsVector();
                         if (!v.empty()) { pageRef = v[0]; }
@@ -3228,7 +3231,7 @@ int pdfcore_remove_dangling_link_annots(pdfcore_document_t *doc, int *removed)
                 if (!(st.isName() && st.getName() == "/Link")) { continue; }
 
                 bool internalLink = false;
-                QPDFObjectHandle target;
+                QPDFObjectHandle target = QPDFObjectHandle::newNull();
                 if (a.hasKey("/Dest")) { internalLink = true; target = a.getKey("/Dest"); }
                 else if (a.hasKey("/A")) {
                     QPDFObjectHandle action = a.getKey("/A");
@@ -3241,7 +3244,7 @@ int pdfcore_remove_dangling_link_annots(pdfcore_document_t *doc, int *removed)
                 }
                 if (!internalLink) { continue; }
 
-                QPDFObjectHandle pageRef;
+                QPDFObjectHandle pageRef = QPDFObjectHandle::newNull();
                 if (target.isArray()) {
                     auto v = target.getArrayAsVector();
                     if (!v.empty()) { pageRef = v[0]; }
@@ -11021,12 +11024,51 @@ int pdfcore_append_ocr_layer(pdfcore_document_t *doc, int page_index,
         } else {
             fonts = fonts.shallowCopy();   // geteiltes Font-Dict nie verändern
         }
-        QPDFObjectHandle font = QPDFObjectHandle::newDictionary();
-        font.replaceKey("/Type", QPDFObjectHandle::newName("/Font"));
-        font.replaceKey("/Subtype", QPDFObjectHandle::newName("/Type1"));
-        font.replaceKey("/BaseFont", QPDFObjectHandle::newName("/Helvetica"));
-        font.replaceKey("/Encoding", QPDFObjectHandle::newName("/WinAnsiEncoding"));
-        fonts.replaceKey("/PDFToolsOCR", doc->qpdf.makeIndirectObject(font));
+        // Masterplan E5: glyphenlose Type0-Schrift mit Identity-H und
+        // ToUnicode – der Text steht als UTF-16-Codeeinheiten (CID =
+        // Codeeinheit) und deckt jede Schrift ab. Vorher Helvetica/WinAnsi:
+        // alles jenseits Westeuropas wurde „?“. Unsichtbar (3 Tr), also nie
+        // gezeichnet; jede Glyphe ist 500/1000 em breit, Tz passt die Zeile an.
+        if (!doc->ocrFont.isIndirect()) {   // uninitialisiert ist NICHT isNull()
+            QPDF& q = doc->qpdf;
+            std::string cmap =
+                "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
+                "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
+                "/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n"
+                "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n";
+            // Je Bereich höchstens das letzte Byte variieren (PDF 32000-1,
+            // 9.10.3); höchstens 100 Einträge je Block.
+            for (int block = 0; block < 256; block += 100) {
+                int const n = std::min(100, 256 - block);
+                cmap += std::to_string(n) + " beginbfrange\n";
+                for (int hi = block; hi < block + n; ++hi) {
+                    char line[40];
+                    std::snprintf(line, sizeof line, "<%02X00> <%02XFF> <%02X00>\n", hi, hi, hi);
+                    cmap += line;
+                }
+                cmap += "endbfrange\n";
+            }
+            cmap += "endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n";
+            QPDFObjectHandle toUnicode = QPDFObjectHandle::newStream(&q, cmap);
+
+            QPDFObjectHandle descriptor = QPDFObjectHandle::parse(
+                "<< /Type /FontDescriptor /FontName /GlyphLessFont /Flags 5"
+                " /FontBBox [0 0 500 1000] /ItalicAngle 0 /Ascent 1000 /Descent 0"
+                " /CapHeight 1000 /StemV 80 >>");
+            QPDFObjectHandle cidFont = QPDFObjectHandle::parse(
+                "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /GlyphLessFont"
+                " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>"
+                " /DW 500 /CIDToGIDMap /Identity >>");
+            cidFont.replaceKey("/FontDescriptor", q.makeIndirectObject(descriptor));
+            QPDFObjectHandle type0 = QPDFObjectHandle::parse(
+                "<< /Type /Font /Subtype /Type0 /BaseFont /GlyphLessFont /Encoding /Identity-H >>");
+            QPDFObjectHandle descendants = QPDFObjectHandle::newArray();
+            descendants.appendItem(q.makeIndirectObject(cidFont));
+            type0.replaceKey("/DescendantFonts", descendants);
+            type0.replaceKey("/ToUnicode", toUnicode);
+            doc->ocrFont = q.makeIndirectObject(type0);
+        }
+        fonts.replaceKey("/PDFToolsOCR", doc->ocrFont);
         resources.replaceKey("/Font", fonts);
 
         // Bestehenden Inhalt kapseln, Textebene anhängen.

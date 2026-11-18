@@ -28,3 +28,5 @@ MultiSourceCatalogE2ETests
 SaveOverSourceTests
 LocalizationHygieneTests
 PDFAClaimE2ETests
+OCRScriptCoverageTests
+MultiPageTIFFImportTests
