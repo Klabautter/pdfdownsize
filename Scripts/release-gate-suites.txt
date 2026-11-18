@@ -34,3 +34,4 @@ ICCProfileReplacementE2ETests
 TransportFilteredJPEGTests
 PasswordUnlockToolsE2ETests
 LinearizedInputTests
+CheckAgainstSourceTests

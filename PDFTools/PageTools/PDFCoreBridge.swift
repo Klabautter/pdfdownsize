@@ -62,10 +62,13 @@ final class PDFCoreDocument {
         return Int(pdfcore_page_count(handle))
     }
 
-    /// Strukturprüfung im Sinne von `qpdf --check`.
-    func check() throws {
+    /// Strukturprüfung im Sinne von `qpdf --check`. Mit `source` (Masterplan
+    /// C2 Schritt 5) werden Streams, die unverändert aus der Quelle stammen,
+    /// nicht dekodiert – sie sind so gültig wie dort.
+    func check(againstSource source: URL? = nil, password: String? = nil) throws {
         gate.lock(); defer { gate.unlock() }
-        let result = pdfcore_check(handle)
+        let result = source.map { pdfcore_check_against_source(handle, $0.path, password) }
+            ?? pdfcore_check(handle)
         guard result == PDFCORE_OK.rawValue else {
             throw result == PDFCORE_ERR_CHECK_FAILED.rawValue
                 ? PDFCoreError.checkFailed
