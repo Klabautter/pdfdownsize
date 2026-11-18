@@ -1262,6 +1262,8 @@ final class CompressionViewModel: ObservableObject {
         if let dir = url.deletingLastPathComponent() as URL? {
             panel.directoryURL = dir
         }
+        let guardian = SourceNameGuard(sources: bulkInputs)
+        panel.delegate = guardian
         guard panel.runModal() == .OK, let dest = panel.url else { return }
         do {
             try saveBulkResult(for: url, to: dest)
@@ -1273,6 +1275,8 @@ final class CompressionViewModel: ObservableObject {
     /// Sichert ein Stapelergebnis an ein gegebenes Ziel (ohne Dialog).
     func saveBulkResult(for url: URL, to dest: URL) throws {
         guard let result = bulkResult(for: url) else { return }
+        // E3: Kein Ergebnis über eine der Eingaben dieses Stapels.
+        try SourceOverwrite.check(dest, sources: bulkInputs)
         _ = try Compressor.finalize(result: result, destination: dest,
                                     preservingSource: true)
         if let i = bulkSuccesses.firstIndex(where: { $0.input == url }) {
@@ -1313,9 +1317,13 @@ final class CompressionViewModel: ObservableObject {
         if let dir = inputURL?.deletingLastPathComponent() {
             panel.directoryURL = dir
         }
+        let sources = inputURL.map { [$0] } ?? []
+        let guardian = SourceNameGuard(sources: sources)
+        panel.delegate = guardian
 
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         do {
+            try SourceOverwrite.check(destination, sources: sources)
             // Das Ergebnis wird verschoben – vorher die offene Ansicht lösen.
             compressedDocument = nil
             singleOutcome = .saved(try Compressor.finalize(result: r, destination: destination))

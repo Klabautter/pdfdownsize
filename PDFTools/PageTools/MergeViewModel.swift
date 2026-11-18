@@ -770,20 +770,29 @@ final class MergeViewModel: ObservableObject {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.nameFieldStringValue = suggestedFileName(for: outcome)
+        let guardian = SourceNameGuard(sources: project.documents.map(\.url))
+        panel.delegate = guardian
 
         guard panel.runModal() == .OK, let dest = panel.url else { return nil }
         do {
-            if FileManager.default.fileExists(atPath: dest.path) {
-                _ = try FileManager.default.replaceItemAt(dest, withItemAt: outcome.url)
-            } else {
-                try FileManager.default.moveItem(at: outcome.url, to: dest)
-            }
-            outcomeState = .saved(outcome, to: dest)
+            try saveOutcome(outcome, to: dest)
             return dest
         } catch {
             errorMessage = error.localizedDescription
             return nil
         }
+    }
+
+    /// Sichert ein Ergebnis an ein gegebenes Ziel (ohne Dialog).
+    func saveOutcome(_ outcome: MergeOutcome, to dest: URL) throws {
+        // E3: Kein Ergebnis über eine der Quellen des Projekts.
+        try SourceOverwrite.check(dest, sources: project.documents.map(\.url))
+        if FileManager.default.fileExists(atPath: dest.path) {
+            _ = try FileManager.default.replaceItemAt(dest, withItemAt: outcome.url)
+        } else {
+            try FileManager.default.moveItem(at: outcome.url, to: dest)
+        }
+        outcomeState = .saved(outcome, to: dest)
     }
 
     static func fileSize(_ url: URL) -> Int64 {

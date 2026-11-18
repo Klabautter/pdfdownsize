@@ -1985,22 +1985,6 @@
         }
       }
     },
-    "Bitte einen anderen Namen wählen – das Original bleibt unverändert.": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bitte einen anderen Namen wählen – das Original bleibt unverändert."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Please choose a different name – the original stays unchanged."
-          }
-        }
-      }
-    },
     "Bitte entweder eine PDF oder Bilder auswählen – gemischte Dateien kannst du unter „Organisieren“ kombinieren.": {
       "localizations": {
         "de": {
@@ -2077,22 +2061,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "The result has not been saved yet and will be lost."
-          }
-        }
-      }
-    },
-    "Das Original bleibt unverändert – die durchsuchbare PDF braucht einen eigenen Namen oder Ordner.": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Das Original bleibt unverändert – die durchsuchbare PDF braucht einen eigenen Namen oder Ordner."
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "The original stays unchanged – the searchable PDF needs its own name or folder."
           }
         }
       }
@@ -2430,6 +2398,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Cancel this file – the others keep running"
+          }
+        }
+      }
+    },
+    "Diese Datei ist eine der Quellen. Bitte einen anderen Namen wählen.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Datei ist eine der Quellen. Bitte einen anderen Namen wählen."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This file is one of the sources. Please choose a different name."
           }
         }
       }

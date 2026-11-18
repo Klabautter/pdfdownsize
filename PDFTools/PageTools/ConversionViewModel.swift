@@ -287,12 +287,20 @@ final class ConversionViewModel: ObservableObject {
                 let panel = NSSavePanel()
                 panel.allowedContentTypes = [.pdf]
                 panel.nameFieldStringValue = String(localized: "Konvertiert.pdf")
+                let sources = imageURLs
+                let guardian = SourceNameGuard(sources: sources)
+                panel.delegate = guardian
                 guard panel.runModal() == .OK, let dest = panel.url else {
                     try? FileManager.default.removeItem(at: tempURL)
                     statusLabel = ""
                     return
                 }
 
+                if SourceOverwrite.isSource(dest, among: sources) {
+                    try? FileManager.default.removeItem(at: tempURL)
+                    statusLabel = ""
+                    throw SourceOverwriteError.destinationIsSource
+                }
                 if FileManager.default.fileExists(atPath: dest.path) {
                     _ = try FileManager.default.replaceItemAt(dest, withItemAt: tempURL)
                 } else {

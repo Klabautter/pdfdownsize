@@ -533,13 +533,13 @@ final class OCRViewModel: ObservableObject {
         panel.nameFieldStringValue = base + ".pdf"
         // Der Name des Originals wird schon im Dialog abgelehnt – vorher kam
         // erst „Ersetzen?" und danach der Hinweis (L10).
-        let guardian = SourceNameGuard(source: pdfURL)
+        let guardian = SourceNameGuard(sources: pdfURL.map { [$0] } ?? [])
         panel.delegate = guardian
         guard panel.runModal() == .OK, let dest = panel.url else { return }
         // „Das Original bleibt unverändert" – also auch nicht überschreiben
         // (Befund B12, Review 2026-10-09).
-        if let source = pdfURL, dest.standardizedFileURL == source.standardizedFileURL {
-            errorMessage = String(localized: "Bitte einen anderen Namen wählen – das Original bleibt unverändert.")
+        if let source = pdfURL, SourceOverwrite.isSource(dest, among: [source]) {
+            errorMessage = SourceOverwrite.message
             return
         }
         do {
@@ -578,31 +578,6 @@ final class OCRViewModel: ObservableObject {
         statusLabel = ""
     }
 
-}
-
-// MARK: - Sichern-Dialog
-
-/// Lehnt im Sichern-Dialog den Namen der Quelldatei ab, BEVOR macOS nach dem
-/// Ersetzen fragt. Die Prüfung in `saveOutcome` bleibt als zweite Sicherung.
-private final class SourceNameGuard: NSObject, NSOpenSavePanelDelegate {
-    let source: URL?
-
-    init(source: URL?) { self.source = source }
-
-    func panel(_ sender: Any, userEnteredFilename filename: String, confirmed okFlag: Bool) -> String? {
-        guard let source, let panel = sender as? NSSavePanel, let directory = panel.directoryURL else {
-            return filename
-        }
-        var candidate = directory.appendingPathComponent(filename)
-        if candidate.pathExtension.isEmpty { candidate.appendPathExtension("pdf") }
-        guard candidate.standardizedFileURL == source.standardizedFileURL else { return filename }
-        let alert = NSAlert()
-        alert.messageText = String(localized: "Bitte einen anderen Namen wählen")
-        alert.informativeText = String(localized: "Das Original bleibt unverändert – die durchsuchbare PDF braucht einen eigenen Namen oder Ordner.")
-        alert.addButton(withTitle: "OK")
-        alert.beginSheetModal(for: panel)
-        return nil
-    }
 }
 
 // MARK: - Absatzbildung
