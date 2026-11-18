@@ -250,6 +250,15 @@ struct Compressor {
         // Cutover nur noch Differential- und Debug-Backend; die Entscheidung
         // fällt seither im gemeinsamen `CompressionPlanner`, den Estimator und
         // Executor teilen.
+        // Masterplan B7: Eine linearisierte Eingabe (schnelle Webanzeige)
+        // bleibt linearisiert – vorher fiel das still weg. Eine nicht
+        // lesbare Datei meldet der Lauf selbst; hier zählt nur das Merkmal.
+        var options = options
+        if options.linearizationPolicy == .none,
+           let document = try? PDFCoreDocument(path: inputURL.path),
+           document.structureProfile.isLinearized {
+            options.linearizationPolicy = .fastWebView
+        }
         return try compressLibQPDF(inputURL: inputURL,
                                    options: options,
                                    isCancelled: isCancelled,
