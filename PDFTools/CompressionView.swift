@@ -382,6 +382,12 @@ private struct ControlPanel: View {
                 SizeReadout(original: original,
                             content: .estimate(point: e.pointBytes),
                             refreshing: viewModel.estimateRefreshing)
+                if let note = CompressionViewModel.lowPotentialNote(e, mode: viewModel.mode) {
+                    Text(note)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let assessment = viewModel.targetAssessment {
                     Label(CompressionViewModel.targetEstimateText(assessment), systemImage: "target")
                         .font(.callout)

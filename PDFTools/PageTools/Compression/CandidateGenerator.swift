@@ -326,6 +326,9 @@ enum CandidateGenerator {
         /// Klassifikation für Trace und ResourceDecision (nil = strukturelles
         /// KEEP vor jeder Dekodierung).
         let classification: ResourceClassification?
+        /// Masterplan H1: Smart hat das Bild als Papier-Scan erkannt
+        /// (`isDocumentScanForSmart`) – MRC darf es dann auch im DPI-Budget.
+        var documentScan: Bool = false
     }
 
     /// §9.2 – Budget ernsthafter Kandidaten je Bild (KEEP eingerechnet).
@@ -523,7 +526,8 @@ enum CandidateGenerator {
                          actionsByCandidate: actions,
                          payloadByCandidate: payloads,
                          globalsByCandidate: generated.globalsByCandidate,
-                         classification: generated.classification)
+                         classification: generated.classification,
+                         documentScan: generated.documentScan)
     }
 
     /// Sammelt die Kandidaten EINER Ressource. Bewusst eigener Typ: Das
@@ -560,6 +564,7 @@ enum CandidateGenerator {
         private(set) var classification: ResourceClassification?
         /// JPEG-Quelle im DPI-Budget, die nur wegen ihrer Bitdichte hier ist.
         private var isWastefulJPEGWithinBudget = false
+        private var isDocumentScan = false
         /// Graue Grafik im Budget: Sie bleibt verlustfrei, auch in Klein.
         private var isGrayGraphicsWithinBudget = false
 
@@ -878,6 +883,7 @@ enum CandidateGenerator {
             // 3. Zielgröße aus Effective DPI + Kantenlimit (Never Upscale).
             if isDocumentScanForSmart() {
                 options.targetDPI = ImageCompressionOptions.smartDocumentScanDPI
+                isDocumentScan = true
             }
             let resize = CompressionPlanner.plannedSize(for: resource,
                                                         options: options)
@@ -2155,7 +2161,8 @@ enum CandidateGenerator {
             return Generated(set: set, actionsByCandidate: actions,
                              payloadByCandidate: payloadBy,
                              globalsByCandidate: globals,
-                             classification: classification)
+                             classification: classification,
+                             documentScan: isDocumentScan)
         }
     }
 

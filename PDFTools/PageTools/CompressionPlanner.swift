@@ -311,7 +311,8 @@ enum CompressionPlanner {
                 // DPI-Regel (Entscheidung Linus 2026-11-04): Ein JPEG im Budget
                 // wird nur verlustfrei umgepackt, MRC würde seine Pixel ersetzen.
                 if Self.dpiRuleExcludesMRC(resource: page.resource,
-                                           options: effectiveOptions) { continue }
+                                           options: effectiveOptions,
+                                           isPaperScan: entries[index].generated.documentScan) { continue }
                 var best = entries[index].generated.set.candidates
                     .map(\.metrics.encodedBytes).min() ?? Int.max
                 // Ein Scan im DPI-Budget hat nur KEEP – dessen Bytes sind
@@ -1118,9 +1119,16 @@ enum CompressionPlanner {
     /// ist? Dieselbe Bedingung wie `finishStructural(.withinBudget)` im
     /// Generator. Ein Zielgrößen-Ziel nimmt die Regel aus: Dort hat der Nutzer
     /// die Größe ausdrücklich verlangt, MRC ist der einzige Weg dorthin.
+    ///
+    /// Masterplan H1: Papier-Scans sind ebenfalls ausgenommen. MRC hält die
+    /// Textmaske in voller Auflösung, nur der Papiergrund wird gröber – der
+    /// Grund der Sperre (Text wird weich) trifft dort nicht zu. Farbige Tinte
+    /// schließt MRC weiterhin selbst aus (A2).
     static func dpiRuleExcludesMRC(resource: PDFImageResource,
-                                   options: CompressionOptions) -> Bool {
+                                   options: CompressionOptions,
+                                   isPaperScan: Bool = false) -> Bool {
         if case .targetBytes = options.goal { return false }
+        if isPaperScan { return false }
         return resource.terminalFilter == .dct
             && !options.image.forceGrayscale
             && plannedSize(for: resource, options: options.image) == nil

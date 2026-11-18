@@ -1777,6 +1777,22 @@
         }
       }
     },
+    "Bereits gut komprimiert – höchstens ≈ %lld %%.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bereits gut komprimiert – höchstens ≈ %lld %%."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Already well compressed – at most ≈ %lld %%."
+          }
+        }
+      }
+    },
     "Bereits optimal": {
       "localizations": {
         "de": {
@@ -3138,6 +3154,22 @@
         }
       }
     },
+    "Fast nur Text: ≈ %lld %% möglich.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fast nur Text: ≈ %lld %% möglich."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mostly text: ≈ %lld %% possible."
+          }
+        }
+      }
+    },
     "Fertig": {
       "localizations": {
         "de": {
@@ -3982,6 +4014,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Maximum"
+          }
+        }
+      }
+    },
+    "Mehr holt „Klein“.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mehr holt „Klein“."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“Small” gets more."
           }
         }
       }

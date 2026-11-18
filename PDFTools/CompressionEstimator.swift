@@ -10,6 +10,9 @@ struct CompressionEstimate {
     let highBytes: Int64
     let originalBytes: Int64
     let potential: Potential
+    /// Masterplan H4: Anteil der Bildbytes an der Datei (0…1) – für die
+    /// Auskunft „Fast nur Text“. 1 = unbekannt.
+    var imageByteShare: Double = 1
     /// Phase V2-10 (§16.2) – Anzahl der im Accurate-Modus gemessenen
     /// (sample-encodierten) Streams; 0 im Fast-Modus. Telemetrie.
     var sampledStreamCount: Int = 0
@@ -391,7 +394,12 @@ enum CompressionEstimator {
             // (Custom fährt kein MRC, `CompressionOptions.make`) – vorher
             // schätzte es modusblind (Befund B5, Review 2026-10-09).
             let scanRetention = options.featureFlags.mrc
-                && !CompressionPlanner.dpiRuleExcludesMRC(resource: resource, options: options)
+                && !CompressionPlanner.dpiRuleExcludesMRC(
+                    resource: resource, options: options,
+                    // Wie `isDocumentScanForSmart` im Lauf: nur Smart.
+                    isPaperScan: CompressionPlanner.adaptivePreset(for: options.image) == .smart
+                        && isFullPageScanRaster(resource, pageHasVisibleText: pageHasVisibleText)
+                        && looksLikePaper(resource))
                 ? quickScanRetention(resource: resource, qualityFloor: floor,
                                      pageHasVisibleText: pageHasVisibleText,
                                      contentIsNeutral: contentIsNeutral)
@@ -427,7 +435,8 @@ enum CompressionEstimator {
             pointBytes: clampedPoint,
             highBytes: min(highBytes, original),
             originalBytes: original,
-            potential: CompressionEstimate.classifyPotential(savings: savings))
+            potential: CompressionEstimate.classifyPotential(savings: savings),
+            imageByteShare: original > 0 ? min(1, Double(imageBytes + fixed) / Double(original)) : 1)
     }
 
     /// Was der Lauf seit 1.0.5 anders entscheidet als die allgemeinen Kurven:

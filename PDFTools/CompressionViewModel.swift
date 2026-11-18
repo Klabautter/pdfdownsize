@@ -1396,6 +1396,23 @@ final class CompressionViewModel: ObservableObject {
                                            isCancelled: { Task.isCancelled })
     }
 
+    // MARK: - Masterplan H4: ehrliche Auskunft, wo wenig geht
+
+    /// Begründung unter der Schätzung: Bei fast reinem Text oder schon gut
+    /// komprimierten Dateien nennt das Pult den Grund statt nur einer kleinen
+    /// Zahl; wer trotzdem mehr will, findet „Klein“.
+    static func lowPotentialNote(_ estimate: CompressionEstimate, mode: CompressionMode) -> String? {
+        let percent = Int((estimate.savingsRatio * 100).rounded())
+        let hint = mode == .small ? "" : " " + String(localized: "Mehr holt „Klein“.")
+        if estimate.savingsRatio < 0.08 {
+            return String(localized: "Bereits gut komprimiert – höchstens ≈ \(percent) %.") + hint
+        }
+        if estimate.imageByteShare < 0.15 {
+            return String(localized: "Fast nur Text: ≈ \(percent) % möglich.") + hint
+        }
+        return nil
+    }
+
     // MARK: - Phase V2-10 (§17) – Zielgrößen-Texte (ViewModel-Logik, getestet)
 
     /// Anzeige der Schätzer-Zeile bei gesetztem Ziel – ersetzt das normale
