@@ -7,7 +7,7 @@ Dieses Verzeichnis enthält eine statische, universelle Build-Artefakt-Kopie
   Tarball https://download.osgeo.org/libtiff/tiff-4.7.2.tar.gz)
 - Lizenz: BSD-artig (Sam Leffler / Silicon Graphics), upstream `LICENSE.md`.
 - Verwendung: CCITT G3/G4-Encoding (Fax-Codec) für Bilevel-PDF-Bilder
-  (COMPRESSION_ROADMAP.md, Phase 2). Keine Änderungen am Quellcode.
+  Keine Änderungen am Quellcode.
 - Build-Konfiguration: Release, BUILD_SHARED_LIBS=OFF, tiff-cxx=OFF,
   alle optionalen Codecs OFF (zlib/zstd/lzma/jpeg/webp/jbig/lerc/
   libdeflate/pixarlog). CCITT-Fax-Codec default-ON. Deployment-Target

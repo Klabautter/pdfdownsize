@@ -1563,7 +1563,7 @@ enum CandidateGenerator {
             // Vorher kostete ein 12-MP-Foto drei Kodierungen in voller
             // Auflösung, die nie gewannen. Kandidaten-IDs behalten ihren
             // Leiterindex, die Ausgabe bleibt byteidentisch (Smoke-Vergleich
-            // per SHA-256, siehe ENGINEERING_PROGRESS).
+            // per SHA-256).
             let order = ladder.indices.sorted {
                 ladder[$0].width * ladder[$0].height < ladder[$1].width * ladder[$1].height
             }

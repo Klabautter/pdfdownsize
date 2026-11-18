@@ -156,6 +156,10 @@ declare -a FAILED_LIST=()
 
 while IFS='|' read -r folder name url; do
     [ -z "${folder:-}" ] && continue
+    # Kommentarzeilen und Zeilen ohne URL sind keine Quellen. Ohne diese
+    # Prüfung legte mkdir für jede Kommentarzeile einen Ordner „# …" an.
+    case "$folder" in \#*) continue ;; esac
+    [ -z "${url:-}" ] && continue
     TOTAL=$((TOTAL + 1))
     dir="$ROOT/RealWorld/$folder"
     mkdir -p "$dir"

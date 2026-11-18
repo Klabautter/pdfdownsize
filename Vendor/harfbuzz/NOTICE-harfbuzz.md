@@ -10,7 +10,7 @@ Dieses Verzeichnis enthält eine statische, universelle Build-Artefakt-Kopie
 - Verwendung: Font-Subsetting über die hb-subset-Sets-API
   (hb_subset_input_create_or_fail / hb_subset_input_unicode_set /
   hb_subset_input_glyph_set / hb_subset_input_set_flags /
-  hb_subset_or_fail) für COMPRESSION_ROADMAP.md, Phase 5b.
+  hb_subset_or_fail).
   Keine Änderungen am Quellcode.
 - Build-Konfiguration: Release, CMake, BUILD_SHARED_LIBS=OFF,
   HB_BUILD_SUBSET=ON; glib/icu/cairo/freetype/graphite2/gobject/

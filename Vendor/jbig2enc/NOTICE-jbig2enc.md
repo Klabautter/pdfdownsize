@@ -13,7 +13,7 @@ Dieses Verzeichnis enthält statische, universelle Build-Artefakt-Kopien
    Lizenz: BSD-artig (upstream `leptonica-license.txt`, siehe unten)
 
 Verwendung: lossless JBIG2-Encoding für Bilevel-PDF-Bilder
-(COMPRESSION_ROADMAP.md, Phase 2). Keine Änderungen am Quellcode.
+Keine Änderungen am Quellcode.
 Regeln: NUR lossless, KEIN Refinement (CLI `-r` unbenutzt; bekannter
 Acrobat-Crasher). Das CLI `jbig2` ist NICHT Teil dieses Verzeichnisses
 (verbleibt unter /tmp/opencode).

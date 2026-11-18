@@ -122,7 +122,7 @@ cp "$WORK/tiff-arm64/libtiff/tiffconf.h" \
     echo "  Tarball https://download.osgeo.org/libtiff/tiff-$VERSION.tar.gz)"
     echo "- Lizenz: BSD-artig (Sam Leffler / Silicon Graphics), upstream \`LICENSE.md\`."
     echo "- Verwendung: CCITT G3/G4-Encoding (Fax-Codec) für Bilevel-PDF-Bilder"
-    echo "  (COMPRESSION_ROADMAP.md, Phase 2). Keine Änderungen am Quellcode."
+    echo "  Keine Änderungen am Quellcode."
     echo "- Build-Konfiguration: Release, BUILD_SHARED_LIBS=OFF, tiff-cxx=OFF,"
     echo "  alle optionalen Codecs OFF (zlib/zstd/lzma/jpeg/webp/jbig/lerc/"
     echo "  libdeflate/pixarlog). CCITT-Fax-Codec default-ON. Deployment-Target"

@@ -220,7 +220,7 @@ struct AssemblyCompatibilityTests {
         #expect(PDFDocument(url: out)?.pageCount == 3)
     }
 
-    /// Bekannte Limitierung (dokumentiert in RELEASE_READINESS.md):
+    /// Bekannte Limitierung:
     /// Dokument-Level-Strukturen wie Outlines überleben den page.copy-Assembly-Pfad nicht.
     @Test func outlinesDoNotSurvivePageCopy() throws {
         let sourceDoc = PDFDocument()

@@ -8,7 +8,7 @@ Dieses Verzeichnis enthält eine statische, universelle Build-Artefakt-Kopie
 - Lizenz: BSD-2-Klausel (upstream `LICENSE`, Volltext unten).
 - Verwendung: Dekodierung von `/JPXDecode`-Streams (JPEG 2000 rohe
   Codestreams + JP2-Container) für die Neukompression oversized JPX-
-  Bilder (COMPRESSION_ROADMAP.md, Phase 4). Ausdrücklich NUR Dekodier-
+  Bilder. Ausdrücklich NUR Dekodier-
   pfad: kein JPX-Output (PDFKit-Risiko). Keine Änderungen am Quellcode.
 - Build-Konfiguration: Release, BUILD_SHARED_LIBS=OFF,
   BUILD_STATIC_LIBS=ON, BUILD_CODEC=ON (Tools verbleiben unter

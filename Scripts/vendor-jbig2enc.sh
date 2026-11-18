@@ -175,7 +175,7 @@ cp "$WORK/leptonica-install-arm64/include/leptonica/"*.h "$DEST/include/leptonic
     echo "   Lizenz: BSD-artig (upstream \`leptonica-license.txt\`, siehe unten)"
     echo
     echo "Verwendung: lossless JBIG2-Encoding für Bilevel-PDF-Bilder"
-    echo "(COMPRESSION_ROADMAP.md, Phase 2). Keine Änderungen am Quellcode."
+    echo "Keine Änderungen am Quellcode."
     echo "Regeln: NUR lossless, KEIN Refinement (CLI \`-r\` unbenutzt; bekannter"
     echo "Acrobat-Crasher). Das CLI \`jbig2\` ist NICHT Teil dieses Verzeichnisses"
     echo "(verbleibt unter /tmp/opencode)."

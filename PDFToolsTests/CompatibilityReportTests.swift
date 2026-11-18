@@ -351,7 +351,6 @@ import Foundation
         lines.append("| `Results/<lauf>/failures/` | Fehlerartefakte je Fall |")
         lines.append("| `Results/CORPUS_INVENTORY.md` | Korpusbestand und Diversität |")
         lines.append("| `Results/COMPRESSION_ACCURACY_LAB.md` | Schätzgenauigkeit |")
-        lines.append("| `ENGINEERING_PROGRESS.md` | Fortschritt je Masterplan-Punkt |")
         lines.append("")
         return lines.joined(separator: "\n")
     }

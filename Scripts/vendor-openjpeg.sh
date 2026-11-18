@@ -3,8 +3,7 @@
 #
 # Kontext: JPX-Streams in INPUT-PDFs sollen dekodiert werden, um oversized
 # JPX-Bilder downzusamplen und als JPEG (DCTDecode) bzw. Flate+Predictor neu
-# zu kodieren. KEIN JPX-Output (PDFKit-Risiko, siehe COMPRESSION_ROADMAP.md
-# "Nicht tun").
+# zu kodieren. KEIN JPX-Output (PDFKit-Risiko).
 #
 # Ergebnis: EINE universelle (arm64 + x86_64) STATISCHE libopenjpeg.a in
 # Vendor/openjpeg – analog zu vendor-libtiff.sh (nur System-Abhängigkeiten,
@@ -170,7 +169,7 @@ cp "$WORK/openjpeg-universal/lib/libopenjp2.a" "$DEST/lib/libopenjpeg.a"
     echo "- Lizenz: BSD-2-Klausel (upstream \`LICENSE\`, Volltext unten)."
     echo "- Verwendung: Dekodierung von \`/JPXDecode\`-Streams (JPEG 2000 rohe"
     echo "  Codestreams + JP2-Container) für die Neukompression oversized JPX-"
-    echo "  Bilder (COMPRESSION_ROADMAP.md, Phase 4). Ausdrücklich NUR Dekodier-"
+    echo "  Bilder. Ausdrücklich NUR Dekodier-"
     echo "  pfad: kein JPX-Output (PDFKit-Risiko). Keine Änderungen am Quellcode."
     echo "- Build-Konfiguration: Release, BUILD_SHARED_LIBS=OFF,"
     echo "  BUILD_STATIC_LIBS=ON, BUILD_CODEC=ON (Tools verbleiben unter"

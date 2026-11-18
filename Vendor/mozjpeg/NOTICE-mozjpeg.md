@@ -7,7 +7,7 @@ Dieses Verzeichnis enthält eine statische, universelle Build-Artefakt-Kopie
 - Lizenz: BSD-3-Clause (siehe `LICENSE-mozjpeg.md`, upstream `LICENSE.md`;
   umfasst die Hinweise der IJG-/libjpeg-turbo-Vorläufer)
 - Verwendung: statisch gelinkte JPEG-Codec-Library für das JPEGBackend
-  (COMPRESSION_ROADMAP.md, Phase 1). Keine Änderungen am Quellcode.
+  Keine Änderungen am Quellcode.
 - Build-Konfiguration: Release, `ENABLE_SHARED=0`, `ENABLE_STATIC=1`,
   `WITH_JPEG8=0` (libjpeg-v6b-ABI, identisch zur libjpeg-turbo 3.1.0 in
   `Vendor/pdfcore`), `WITH_MEM_SRCDST=1`, `WITH_SIMD=1` (arm64, NEON) bzw.
