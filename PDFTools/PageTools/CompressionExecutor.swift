@@ -627,11 +627,21 @@ enum CompressionExecutor {
                 // Maximum (Zopfli) fällt AUSSERHALB hier zurück auf den
                 // Zwei-Write-Pfad (§15.7) – der Aufrufer reicht singleWrite
                 // nur bei FlatePolicy .standard.
-                try activeDocument.save(to: outputURL, options: PDFCoreSaveOptions(
-                    objectStreamsGenerate: plan.compatibilityPolicy != .maximum,
-                    recompressFlate: true,
-                    compressionLevel: 9,
-                    linearize: plan.linearizationPolicy == .fastWebView))
+                func write(linearize: Bool) throws {
+                    try activeDocument.save(to: outputURL, options: PDFCoreSaveOptions(
+                        objectStreamsGenerate: plan.compatibilityPolicy != .maximum,
+                        recompressFlate: true,
+                        compressionLevel: 9,
+                        linearize: linearize))
+                }
+                try write(linearize: plan.linearizationPolicy != .none)
+                // Masterplan B7: Eine von der Quelle übernommene Linearisierung
+                // darf die Ersparnis nicht kosten – dann ohne schreiben.
+                if plan.linearizationPolicy == .preserveFromSource,
+                   Compressor.fileSize(of: outputURL)
+                    >= Compressor.fileSize(of: URL(fileURLWithPath: document.sourcePath)) {
+                    try write(linearize: false)
+                }
                 singleWriteUsed = true
             } else {
                 try activeDocument.save(to: outputURL)

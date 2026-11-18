@@ -257,7 +257,7 @@ struct Compressor {
         if options.linearizationPolicy == .none,
            let document = try? PDFCoreDocument(path: inputURL.path),
            document.structureProfile.isLinearized {
-            options.linearizationPolicy = .fastWebView
+            options.linearizationPolicy = .preserveFromSource
         }
         return try compressLibQPDF(inputURL: inputURL,
                                    options: options,
@@ -377,12 +377,20 @@ struct Compressor {
         var structureOutput = imageOutput
         if !outcome.execution.singleWriteUsed {
             structureOutput = try StageTimer.run(stageTimer, .structureMs) {
-                try Self.runStructurePass(
+                var pass = try Self.runStructurePass(
                     input: imageOutput,
                     workDir: workDir,
-                    linearize: options.linearizationPolicy == .fastWebView,
+                    linearize: options.linearizationPolicy != .none,
                     compatibility: options.compatibilityPolicy,
                     flate: options.flatePolicy)
+                // B7: übernommene Linearisierung nur, wenn sie die Ersparnis nicht kostet.
+                if options.linearizationPolicy == .preserveFromSource,
+                   Self.fileSize(of: pass) >= Self.fileSize(of: inputURL) {
+                    pass = try Self.runStructurePass(
+                        input: imageOutput, workDir: workDir, linearize: false,
+                        compatibility: options.compatibilityPolicy, flate: options.flatePolicy)
+                }
+                return pass
             }
         }
 
@@ -494,13 +502,22 @@ struct Compressor {
             structureOutput = images
             if !outcome.execution.singleWriteUsed {
                 structureOutput = try StageTimer.run(stageTimer, .structureMs) {
-                    try Self.runStructurePass(
+                    var pass = try Self.runStructurePass(
                         input: images,
                         workDir: workDir,
-                        linearize: options.linearizationPolicy == .fastWebView,
+                        linearize: options.linearizationPolicy != .none,
                         compatibility: options.compatibilityPolicy,
                         flate: options.flatePolicy,
                         label: "structure-\(label)")
+                    // B7: übernommene Linearisierung nur, wenn sie die Ersparnis nicht kostet.
+                    if options.linearizationPolicy == .preserveFromSource,
+                       Self.fileSize(of: pass) >= Self.fileSize(of: inputURL) {
+                        pass = try Self.runStructurePass(
+                            input: images, workDir: workDir, linearize: false,
+                            compatibility: options.compatibilityPolicy, flate: options.flatePolicy,
+                            label: "structure-\(label)")
+                    }
+                    return pass
                 }
             }
             execution = outcome.execution

@@ -151,6 +151,11 @@ enum LinearizationPolicy: String, Codable, Sendable, CaseIterable {
     case none
     /// „Fast Web View" – linearisiert für seitenweises Laden.
     case fastWebView
+    /// Masterplan B7: Die Quelle war linearisiert – die Ausgabe bleibt es,
+    /// solange sie dabei kleiner als die Quelle bleibt. Linearisieren kostet
+    /// Objektströme (statab: 30,1 MB → 37,3 MB); kostet es die ganze
+    /// Ersparnis, wird ohne geschrieben. Kompression ist der Hauptzweck.
+    case preserveFromSource
 }
 
 // MARK: - Qualitätspolitik

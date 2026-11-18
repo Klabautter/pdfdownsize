@@ -274,6 +274,14 @@ cat > "$ROOT/appcast.xml" <<XML
 </rss>
 XML
 
+# Masterplan G6: Ab dieser Version verlangt die App einen signierten Appcast
+# (SURequireSignedFeed). sign_update bettet die EdDSA-Signatur in die Datei
+# ein; die Prüfung direkt danach stellt sicher, dass nie ein unsignierter
+# oder falsch signierter Appcast veröffentlicht wird.
+"$SIGN" --account pdfdownsize "$ROOT/appcast.xml"
+"$SIGN" --account pdfdownsize --verify "$ROOT/appcast.xml" \
+    || { echo "✗ Appcast-Signatur ungültig" >&2; exit 1; }
+
 # Die gebaute App wird nach dem Packen entfernt: Sie steckt in der ZIP, und
 # eine zweite PDFdownsize.app im Projektordner taucht sonst in Spotlight und
 # Alfred neben der installierten auf. Der Rest des Build-Ordners bleibt als

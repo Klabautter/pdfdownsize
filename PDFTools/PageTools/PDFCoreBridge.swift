@@ -35,6 +35,8 @@ final class PDFCoreDocument {
     private static let processGate = NSLock()
 
     let handle: OpaquePointer
+    /// Die geöffnete Datei (für Vergleiche mit der Quelle, z. B. B7).
+    let sourcePath: String
 
     init(path: String, password: String? = nil) throws {
         var status = PDFCORE_OK
@@ -50,6 +52,7 @@ final class PDFCoreDocument {
             throw PDFCoreError.openFailed(code: status.rawValue)
         }
         self.handle = handle
+        self.sourcePath = path
     }
 
     deinit {

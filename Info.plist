@@ -31,5 +31,9 @@
 	<string>O1KCwyjikSiGIx6j7pqMYeND4kc3oQ/yk3q++KqZoUo=</string>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 </dict>
 </plist>

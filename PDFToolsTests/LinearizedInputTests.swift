@@ -36,4 +36,17 @@ import Foundation
                     "Eingabe linearisiert: \(expected)")
         }
     }
+
+    /// Linearisieren kostet Objektströme: statab (linearisiert) wurde dadurch
+    /// größer als die Quelle (30,1 → 37,3 MB) und kam als Original zurück –
+    /// die Ersparnis war weg. Dann wird ohne Linearisierung geschrieben.
+    @Test(.needsLocalFiles("tmp/pdfs/core-235/01_BornDigital_Text/statab_2012.pdf"))
+    func linearisierungKostetNieDieErsparnis() throws {
+        let url = LocalTestData.repoRoot.appendingPathComponent("tmp/pdfs/core-235/01_BornDigital_Text/statab_2012.pdf")
+        #expect(try PDFCoreDocument(path: url.path).structureProfile.isLinearized)
+        let result = try Compressor().compress(inputURL: url, mode: .smart)
+        defer { if result.outputURL != url { try? FileManager.default.removeItem(at: result.outputURL) } }
+        #expect(!result.returnedOriginal, "Original zurückgegeben – Linearisierung hat die Ersparnis gekostet")
+        #expect(result.outputBytes < result.inputBytes)
+    }
 }

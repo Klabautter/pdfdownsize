@@ -160,13 +160,7 @@ struct MemoryRegressionTests {
     /// file-backed. Zwei Prüfungen an EINEM rund 48-MB-Dokument (eine
     /// unkomprimierte Graustufenseite, generiert direkt auf die Platte):
     ///
-    /// 1. File-backed Eingang: Beim Parsen – der Scan berührt JEDES Byte
-    ///    der Datei, der Worst Case der alten Ganzdatei-Haltung – darf der
-    ///    Fußabdruck nicht mit der Dateigröße skalieren. Kalibriert gegen
-    ///    die alte Fassung: `Data(contentsOf:)` wuchs um ~100 % der
-    ///    Dateigröße (anonymer Speicher), `mappedIfSafe` liegt nahe 0
-    ///    (cleanes Mapping, im phys_footprint nicht gezählt).
-    /// 2. Kompression ohne Steigung: Der volle Produktionspfad (Analyzer,
+    /// Kompression ohne Steigung: Der volle Produktionspfad (Analyzer,
     ///    Planner, Executor, Struktur-Pass, Validierung) über wiederholte
     ///    Durchläufe. Ein Restbestand von Bild- oder Planartefakten würde
     ///    als weiteres Wachstum im zweiten Block sichtbar.
@@ -178,19 +172,11 @@ struct MemoryRegressionTests {
             atPath: fixture.path)[.size] as? Int64) ?? 0
         #expect(size > 40 * 1_048_576, "Fixture zu klein für die Aussage: \(size) Bytes")
 
-        // 1) File-backed Eingang – Grenze: ein Viertel der Dateigröße.
-        //    Die alte Ganzdatei-Haltung misst hier ~100 % und fällt klar durch.
-        let parseBefore = Self.currentRSS()
-        let document = try PDFDocumentFile(url: fixture)
-        #expect(!document.imageObjectNumbers().isEmpty)
-        let parseDelta = Self.currentRSS() - parseBefore
-        let parseBound = max(12_000_000, size / 4)
-        #expect(parseDelta < parseBound, Comment(rawValue: String(format:
-            "Fußabdruck beim Parsen einer %.0f-MB-Datei: %.1f MB (Grenze %.1f MB)",
-            Self.asMegabytes(size), Self.asMegabytes(parseDelta),
-            Self.asMegabytes(parseBound))))
+        // (Der frühere Teil 1 prüfte den Fußabdruck des alten Swift-Parsers
+        // `PDFDocumentFile`. Der Parser hatte keinen Verwender mehr und ist
+        // mit Masterplan G6 entfernt; gelesen wird ausschließlich über libqpdf.)
 
-        // 2) Steigung über wiederholte Kompressionen desselben Dokuments.
+        // Steigung über wiederholte Kompressionen desselben Dokuments.
         let growth = try Self.growthPerBlock(warmup: 1, blockSize: 2) {
             let result = try Compressor().compress(inputURL: fixture, mode: .smart)
             try? FileManager.default.removeItem(at: result.outputURL)
