@@ -6,7 +6,7 @@ DEST="${BUILT_PRODUCTS_DIR:?}/${CONTENTS_FOLDER_PATH:?}/Resources/ReleaseEvidenc
 mkdir -p "$DEST"
 for path in \
     Vendor/qpdf/LICENSE-qpdf.txt Vendor/qpdf/NOTICE-qpdf.md \
-    Vendor/qpdf/LICENSE-libjpeg-turbo.md Vendor/qpdf/LICENSE-libjpeg-mozjpeg.md \
+    Vendor/qpdf/LICENSE-libjpeg-mozjpeg.md \
     Vendor/qpdf/LICENSE-zopfli.txt \
     Vendor/mozjpeg/LICENSE-mozjpeg.md Vendor/mozjpeg/NOTICE-mozjpeg.md \
     Vendor/jbig2enc/NOTICE-jbig2enc.md Vendor/libtiff/NOTICE-libtiff.md \

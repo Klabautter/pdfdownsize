@@ -1,100 +1,88 @@
 #!/bin/bash
-# Inkrementeller Rebuild NUR der C-Bridge (Vendor/pdfcore/src/pdfcore.cc).
+# Baut die C-Bridge Vendor/pdfcore/lib/libpdfcore.a (nur arm64).
 #
-# `vendor-qpdf.sh` lädt und baut die komplette qpdf-Toolchain neu (Minuten).
-# Beim Arbeiten an der Bridge ändert sich aber ausschließlich pdfcore.cc –
-# dieses Skript kompiliert nur diese Übersetzungseinheit neu und linkt sie
-# gegen die bereits gebaute libqpdf.a.
+# Beim Arbeiten an der Bridge ändert sich nur pdfcore.cc – dieses Skript
+# kompiliert diese Übersetzungseinheit neu und packt sie mit allen
+# vorgebauten Bibliotheken in EIN Archiv. Die App linkt nur noch
+# -lpdfcore (plus -lc++ -lz aus dem System).
 #
-# Voraussetzung: vendor-qpdf.sh wurde mindestens einmal ausgeführt, sodass
-# $WORK/qpdf-build/libqpdf/libqpdf.a und $WORK/qpdf-headers existieren.
-# Fehlen sie, verweist das Skript auf den vollständigen Vendor-Lauf, statt
-# still etwas Halbfertiges zu produzieren.
+# Voraussetzung: vendor-qpdf.sh lief mindestens einmal, sodass libqpdf.a,
+# libzopfli.a und die qpdf-Header im Arbeitsverzeichnis liegen. Fehlen sie,
+# verweist das Skript auf den vollständigen Vendor-Lauf, statt still etwas
+# Halbfertiges zu bauen.
 set -euo pipefail
+source "$(dirname "$0")/vendor-common.sh"
 
-WORK="/tmp/opencode/pdftools-vendor"
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CORE_SRC="$ROOT/Vendor/pdfcore/src"
-CORE_DEST="$ROOT/Vendor/pdfcore"
+CORE_SRC="$VENDOR_ROOT/Vendor/pdfcore/src"
+CORE_DEST="$VENDOR_ROOT/Vendor/pdfcore"
 
 QPDF_LIB="$WORK/qpdf-build/libqpdf/libqpdf.a"
 QPDF_HEADERS="$WORK/qpdf-headers"
+ZOPFLI_DIR="$WORK/zopfli-$VENDOR_ARCH"
 
-# Phase 1b: mozjpeg ERSETZT libjpeg-turbo als EINZIGE JPEG-Implementierung im
-# App-Binary (gleiche ABI 62, Superset-Symbole – siehe
-# Vendor/mozjpeg/INTEGRATION_NOTES.md). Die Headers sitzen neben der Lib,
-# die App linkt das Artefakt unter dem bekannten Namen libjpeg_universal.a.
-MOZJPEG_INC="$ROOT/Vendor/mozjpeg/include"
-MOZJPEG_LIB="$ROOT/Vendor/mozjpeg/lib/libmozjpeg.a"
+# mozjpeg ist die einzige JPEG-Implementierung (qpdf-DCT-Pfad und
+# JPEGBackend teilen sie).
+MOZJPEG_INC="$VENDOR_ROOT/Vendor/mozjpeg/include"
+MOZJPEG_LIB="$VENDOR_ROOT/Vendor/mozjpeg/lib/libmozjpeg.a"
+# libtiff (CCITT G4), jbig2enc + Leptonica (verlustfreies JBIG2). Reihenfolge
+# im Archiv: jbig2enc VOR Leptonica (jbig2enc referenziert Leptonica).
+TIFF_INC="$VENDOR_ROOT/Vendor/libtiff/include"
+TIFF_LIB="$VENDOR_ROOT/Vendor/libtiff/lib/libtiff.a"
+JBIG2_INC="$VENDOR_ROOT/Vendor/jbig2enc/include"
+LEPT_INC="$VENDOR_ROOT/Vendor/jbig2enc/include/leptonica"
+JBIG2_LIB="$VENDOR_ROOT/Vendor/jbig2enc/lib/libjbig2enc.a"
+LEPT_LIB="$VENDOR_ROOT/Vendor/jbig2enc/lib/libleptonica.a"
+# OpenJPEG – nur Dekodierung von JPX-Eingaben.
+OPENJP_INC="$VENDOR_ROOT/Vendor/openjpeg/include/openjpeg-2.5"
+OPENJP_LIB="$VENDOR_ROOT/Vendor/openjpeg/lib/libopenjpeg.a"
+# HarfBuzz (Kern + Subsetter in einem Archiv) für Font-Subsetting.
+HB_INC="$VENDOR_ROOT/Vendor/harfbuzz/include/hb"
+HB_LIB="$VENDOR_ROOT/Vendor/harfbuzz/lib/libharfbuzz.a"
 
-# Phase 2b: libtiff (CCITT G4) sowie jbig2enc + Leptonica (lossless JBIG2)
-# wandern MIT in die pdfcore-Statik. Reihenfolge im Archiv: jbig2enc VOR
-# Leptonica (jbig2enc referenziert Leptonica-Symbole), libtiff ohne externe
-# Abhängigkeiten. Alle drei sind statisch und universell (arm64 + x86_64),
-# siehe Vendor/*/NOTICE-*.md.
-TIFF_INC="$ROOT/Vendor/libtiff/include"
-TIFF_LIB="$ROOT/Vendor/libtiff/lib/libtiff.a"
-JBIG2_INC="$ROOT/Vendor/jbig2enc/include"
-LEPT_INC="$ROOT/Vendor/jbig2enc/include/leptonica"
-JBIG2_LIB="$ROOT/Vendor/jbig2enc/lib/libjbig2enc.a"
-LEPT_LIB="$ROOT/Vendor/jbig2enc/lib/libleptonica.a"
-
-# Phase 4b: OpenJPEG (JPEG2000) – NUR zur Dekodierung von JPX-Eingaben,
-# es gibt keinen Encode-Shim (JPX wird nie als Output geschrieben).
-# Statisch und universell (arm64 + x86_64), siehe Vendor/openjpeg/NOTICE-openjpeg.md.
-OPENJP_INC="$ROOT/Vendor/openjpeg/include/openjpeg-2.5"
-OPENJP_LIB="$ROOT/Vendor/openjpeg/lib/libopenjpeg.a"
-
-# Phase 5b: HarfBuzz (hb-subset) für Font-Subsetting. Statisch, universell,
-# ohne glib/icu/cairo (Unicode über hb-ucd); Kern + Subsetter sind im
-# Vendor-Skript bereits zu EINEM Archiv verschmolzen (hb-static-Dublette
-# entfernt), siehe Vendor/harfbuzz/NOTICE-harfbuzz.md.
-HB_INC="$ROOT/Vendor/harfbuzz/include/hb"
-HB_LIB="$ROOT/Vendor/harfbuzz/lib/libharfbuzz.a"
-
-if [ ! -f "$QPDF_LIB" ] || [ ! -d "$QPDF_HEADERS" ]; then
+if [ ! -f "$QPDF_LIB" ] || [ ! -d "$QPDF_HEADERS" ] || [ ! -f "$ZOPFLI_DIR/libzopfli.a" ]; then
     echo "FEHLER: qpdf-Buildartefakte fehlen unter $WORK."
     echo "        Einmalig 'Scripts/vendor-qpdf.sh' ausführen."
     exit 1
 fi
-if [ ! -f "$MOZJPEG_LIB" ]; then
-    echo "FEHLER: $MOZJPEG_LIB fehlt."
-    echo "        Einmalig 'Scripts/vendor-mozjpeg.sh' ausführen."
-    exit 1
-fi
-for lib in "$TIFF_LIB" "$JBIG2_LIB" "$LEPT_LIB" "$OPENJP_LIB" "$HB_LIB"; do
+for lib in "$MOZJPEG_LIB" "$TIFF_LIB" "$JBIG2_LIB" "$LEPT_LIB" "$OPENJP_LIB" "$HB_LIB"; do
     if [ ! -f "$lib" ]; then
         echo "FEHLER: $lib fehlt."
-        echo "        Einmalig 'Scripts/vendor-libtiff.sh', 'Scripts/vendor-jbig2enc.sh', 'Scripts/vendor-openjpeg.sh' und 'Scripts/vendor-harfbuzz.sh' ausführen."
+        echo "        Einmalig die Scripts/vendor-*.sh-Skripte ausführen."
         exit 1
     fi
 done
+require_arm64_only "$QPDF_LIB" "$ZOPFLI_DIR/libzopfli.a" "$MOZJPEG_LIB" \
+    "$TIFF_LIB" "$JBIG2_LIB" "$LEPT_LIB" "$OPENJP_LIB" "$HB_LIB"
 
 CLANGXX="$(xcrun --find clang++)"
 SDK_PATH="$(xcrun --show-sdk-path)"
 
-echo "→ Kompiliere pdfcore.cc (arm64 + x86_64) …"
+# Quell-Hash: SHA-256 über pdfcore.cc gefolgt von pdfcore.h. Die Bibliothek
+# meldet ihn über pdfcore_source_hash(); Hygiene-Test und verify-pdfcore.sh
+# vergleichen ihn mit dem aktuellen Quelltext.
+SOURCE_HASH="$(cat "$CORE_SRC/pdfcore.cc" "$CORE_SRC/pdfcore.h" | shasum -a 256 | cut -d' ' -f1)"
+
+echo "→ Kompiliere pdfcore.cc ($VENDOR_ARCH, Quelle ${SOURCE_HASH:0:12}) …"
 "$CLANGXX" -std=c++17 -O2 \
-    -arch arm64 -arch x86_64 \
-    -mmacosx-version-min=11.0 \
+    -DPDFCORE_SOURCE_HASH="\"$SOURCE_HASH\"" \
+    -arch "$VENDOR_ARCH" \
+    -mmacosx-version-min="$VENDOR_DEPLOYMENT_TARGET" \
     -isysroot "$SDK_PATH" \
     -I"$CORE_SRC" -I"$QPDF_HEADERS" -I"$MOZJPEG_INC" \
     -I"$TIFF_INC" -I"$JBIG2_INC" -I"$LEPT_INC" -I"$OPENJP_INC" \
-    -I"$HB_INC" -I"$WORK/zopfli-universal/include" \
+    -I"$HB_INC" -I"$ZOPFLI_DIR/include" \
     -c "$CORE_SRC/pdfcore.cc" -o "$WORK/pdfcore.o"
 
-echo "→ Linke libpdfcore_universal.a (qpdf + mozjpeg-Freunde + Fax/JBIG2/JPX/HarfBuzz) …"
-libtool -static -o "$CORE_DEST/lib/libpdfcore_universal.a" \
-    "$WORK/pdfcore.o" "$QPDF_LIB" "$TIFF_LIB" "$JBIG2_LIB" "$LEPT_LIB" "$WORK/zopfli-universal/libzopfli.a" "$OPENJP_LIB" "$HB_LIB"
-# libqpdf ist seit Phase 3a mit ZOPFLI-Makro kompiliert – ohne libzopfli.a
-# würde der App-Link mit undefinierten Zopfli-Symbolen scheitern. OpenJPEG
-# und HarfBuzz stehen am Ende: keine Abhängigkeiten außer libc/libm (libSystem).
-
-# Das JPEG-Artefakt bleibt im Dateinamen stabil (Xcode-Link: -ljpeg_universal),
-# der INHALT ist seit Phase 1b mozjpeg.
-cp "$MOZJPEG_LIB" "$CORE_DEST/lib/libjpeg_universal.a"
+echo "→ Linke libpdfcore.a (Bridge + qpdf + mozjpeg + Fax/JBIG2/JPX/HarfBuzz) …"
+mkdir -p "$CORE_DEST/lib" "$CORE_DEST/include/pdfcore"
+rm -f "$CORE_DEST/lib/libpdfcore_universal.a" "$CORE_DEST/lib/libjpeg_universal.a"
+libtool -static -o "$CORE_DEST/lib/libpdfcore.a" \
+    "$WORK/pdfcore.o" "$QPDF_LIB" "$MOZJPEG_LIB" "$TIFF_LIB" "$JBIG2_LIB" \
+    "$LEPT_LIB" "$ZOPFLI_DIR/libzopfli.a" "$OPENJP_LIB" "$HB_LIB"
+# libqpdf ist mit Zopfli übersetzt – ohne libzopfli.a scheitert der App-Link
+# an undefinierten Zopfli-Symbolen.
 
 cp "$CORE_SRC/pdfcore.h" "$CORE_DEST/include/pdfcore/"
 
-lipo -info "$CORE_DEST/lib/libpdfcore_universal.a"
+require_arm64_only "$CORE_DEST/lib/libpdfcore.a"
 echo "✓ pdfcore aktualisiert"

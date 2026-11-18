@@ -247,6 +247,11 @@ int pdfcore_check(pdfcore_document_t *doc);
 /// qpdf-Version in Puffer schreiben. Gibt benötigte Länge zurück (ohne NUL).
 int pdfcore_version(char *buffer, size_t buffer_size);
 
+/// SHA-256 (hex, 64 Zeichen) über `pdfcore.cc` gefolgt von `pdfcore.h`, wie
+/// sie beim Bau der Bibliothek vorlagen (Scripts/build-pdfcore.sh). Damit
+/// lässt sich exakt prüfen, ob die gelinkte Bridge zum Quelltext passt.
+const char *pdfcore_source_hash(void);
+
 void pdfcore_close(pdfcore_document_t *doc);
 
 /// Schreibt das (ggf. sanitisierte) Dokument neu. 0=ok.

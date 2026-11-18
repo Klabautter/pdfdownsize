@@ -1855,7 +1855,7 @@ extension PDFCoreDocument {
     /// regenerieren sie. Verwaiste Thumb-Streams verwirft der Writer.
     ///
     /// Rebuild-tolerant: Das Symbol existiert erst nach dem nächsten
-    /// `build-pdfcore.sh`-Lauf in libpdfcore_universal.a. Bis dahin löst
+    /// `build-pdfcore.sh`-Lauf in libpdfcore.a. Bis dahin löst
     /// dlsym nil auf und der Pass meldet 0 (Skip) statt den Link zu
     /// brechen – kein Verhalten ändert sich, kein Build bricht.
     @discardableResult

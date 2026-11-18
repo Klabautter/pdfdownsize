@@ -19,12 +19,21 @@ struct QPDFBundleTests {
         #expect(resolved == bundled.path)
     }
 
-    @Test func bundledHelperIsUniversalAndRuns() throws {
+    /// Nur arm64 (Entscheidung 18.11.2026): Ein Fat-Binary mit Intel-Anteil
+    /// beginnt mit der Fat-Magic 0xCAFEBABE, ein reines arm64-Binary mit
+    /// MH_MAGIC_64 und CPU_TYPE_ARM64.
+    @Test func bundledHelperIsArm64OnlyAndRuns() throws {
         let bundled = Compressor.bundledQPDFURL()
         guard FileManager.default.isExecutableFile(atPath: bundled.path) else {
             Issue.record("Vendored qpdf fehlt – Scripts/vendor-qpdf.sh ausführen")
             return
         }
+        let header = try FileHandle(forReadingFrom: bundled).read(upToCount: 8) ?? Data()
+        let words = header.withUnsafeBytes { raw in
+            (raw.load(fromByteOffset: 0, as: UInt32.self), raw.load(fromByteOffset: 4, as: UInt32.self))
+        }
+        #expect(words.0 == 0xFEED_FACF, "qpdf-Helfer ist kein reines 64-Bit-Mach-O (Fat-Binary?)")
+        #expect(words.1 == 0x0100_000C, "qpdf-Helfer ist nicht arm64")
         let process = Process()
         process.executableURL = bundled
         process.arguments = ["--version"]

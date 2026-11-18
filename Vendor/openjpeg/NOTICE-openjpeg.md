@@ -1,21 +1,20 @@
 # NOTICE – OpenJPEG (vendored)
 
-Dieses Verzeichnis enthält eine statische, universelle Build-Artefakt-Kopie
-(arm64 + x86_64) von **OpenJPEG v2.5.4**.
+Dieses Verzeichnis enthält eine statische Build-Artefakt-Kopie (nur arm64)
+von **OpenJPEG v2.5.4**.
 
 - Quelle: https://github.com/uclouvain/openjpeg (Tag `v2.5.4`,
-  Tarball https://github.com/uclouvain/openjpeg/archive/refs/tags/v2.5.4.tar.gz)
+  Tarball https://github.com/uclouvain/openjpeg/archive/refs/tags/v2.5.4.tar.gz,
+  per SHA-256 geprüft)
 - Lizenz: BSD-2-Klausel (upstream `LICENSE`, Volltext unten).
 - Verwendung: Dekodierung von `/JPXDecode`-Streams (JPEG 2000 rohe
-  Codestreams + JP2-Container) für die Neukompression oversized JPX-
-  Bilder. Ausdrücklich NUR Dekodier-
-  pfad: kein JPX-Output (PDFKit-Risiko). Keine Änderungen am Quellcode.
+  Codestreams + JP2-Container) für die Neukompression übergroßer
+  JPX-Bilder. Ausdrücklich NUR Dekodierpfad: kein JPX-Output
+  (PDFKit-Risiko). Keine Änderungen am Quellcode.
 - Build-Konfiguration: Release, BUILD_SHARED_LIBS=OFF,
-  BUILD_STATIC_LIBS=ON, BUILD_CODEC=ON (Tools verbleiben unter
-  /tmp/opencode), BUILD_TESTING=OFF, BUILD_DOC=OFF. Alle optionalen
-  Drittanbieter-Bibliotheken deaktiviert (zlib/png/tiff/lcms/lcms2) –
-  der Kern braucht nur libm; Konsequenz: Farbmanagement (lcms) der
-  JP2-Tools ist aus, rohe Codestream-Dekodierung unberührt.
+  BUILD_STATIC_LIBS=ON, BUILD_CODEC=OFF, BUILD_TESTING=OFF,
+  BUILD_DOC=OFF. Alle optionalen Drittanbieter-Bibliotheken
+  deaktiviert (zlib/png/tiff/lcms/lcms2) – der Kern braucht nur libm.
   Deployment-Target macOS 11.0.
 
 Original-Lizenztext:

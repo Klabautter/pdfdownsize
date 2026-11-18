@@ -19,7 +19,7 @@
 #define MEM_SRCDST_SUPPORTED 1
 
 /* Use accelerated SIMD routines. */
-/* #undef WITH_SIMD */
+#define WITH_SIMD 1
 
 /*
  * Define BITS_IN_JSAMPLE as either

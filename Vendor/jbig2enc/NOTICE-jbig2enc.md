@@ -1,10 +1,8 @@
 # NOTICE – jbig2enc + Leptonica (vendored)
 
-Dieses Verzeichnis enthält statische, universelle Build-Artefakt-Kopien
-(arm64 + x86_64) von:
+Dieses Verzeichnis enthält statische Build-Artefakt-Kopien (nur arm64) von:
 
-1. **jbig2enc**, Commit `23f992c92b10048064602b4d8ea29bb434752634` (Master-Stand Aug 2026, kein
-   Release-Tag – Commit gepinnt)
+1. **jbig2enc**, Commit `23f992c92b10048064602b4d8ea29bb434752634` (kein Release-Tag – Commit gepinnt)
    Quelle: https://github.com/agl/jbig2enc
    Lizenz: Apache-2.0 (upstream `COPYING`, siehe unten)
 
@@ -12,11 +10,11 @@ Dieses Verzeichnis enthält statische, universelle Build-Artefakt-Kopien
    Quelle: https://github.com/DanBloomberg/leptonica (Tag `1.87.0`)
    Lizenz: BSD-artig (upstream `leptonica-license.txt`, siehe unten)
 
-Verwendung: lossless JBIG2-Encoding für Bilevel-PDF-Bilder
+Beide Tarballs werden per SHA-256 geprüft (Scripts/vendor-common.sh).
+
+Verwendung: verlustfreies JBIG2-Encoding für Bilevel-PDF-Bilder.
 Keine Änderungen am Quellcode.
-Regeln: NUR lossless, KEIN Refinement (CLI `-r` unbenutzt; bekannter
-Acrobat-Crasher). Das CLI `jbig2` ist NICHT Teil dieses Verzeichnisses
-(verbleibt unter /tmp/opencode).
+Regeln: NUR verlustfrei, KEIN Refinement (bekannter Acrobat-Absturz).
 
 Build-Konfiguration: Release, BUILD_SHARED_LIBS=OFF. Leptonica mit ALLEN
 optionalen Codecs OFF (zlib/png/gif/jpeg/tiff/webp/openjpeg) – BMP/PNM

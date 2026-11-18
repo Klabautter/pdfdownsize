@@ -1,5 +1,7 @@
 import Testing
 import Foundation
+import CryptoKit
+import pdfcore
 
 /// Phase 10 – Entwicklersonden dürfen nicht im Testbaum liegenbleiben.
 ///
@@ -72,35 +74,28 @@ import Foundation
             """)
     }
 
-    /// Die Bridge-Bibliothek muss NEUER sein als ihr Quelltext.
+    /// Die gelinkte Bridge muss zum Quelltext passen (Masterplan G4).
     ///
     /// `Vendor/pdfcore/src/pdfcore.cc` wird nicht vom Xcode-Build übersetzt –
-    /// gelinkt wird `Vendor/pdfcore/lib/libpdfcore_universal.a`, die
+    /// gelinkt wird `Vendor/pdfcore/lib/libpdfcore.a`, die
     /// `Scripts/build-pdfcore.sh` erzeugt. Wer den Quelltext ändert und den
     /// Rebuild vergisst, testet gegen die ALTE Bridge: Der Build ist grün,
-    /// die Tests laufen, und die Änderung ist einfach nicht da. Kein Fehler
-    /// weist darauf hin.
-    @Test func bridgeBibliothekIstNichtVeraltet() {
+    /// die Tests laufen, und die Änderung ist einfach nicht da.
+    ///
+    /// Früher verglich dieser Test Änderungszeiten; ein `git checkout` oder
+    /// Kopieren setzt die aber beliebig. Jetzt trägt die Bibliothek den
+    /// SHA-256 ihres Quelltexts, und der Test rechnet ihn nach.
+    @Test func bridgeBibliothekPasstZumQuelltext() throws {
         let root = Self.testDirectory().deletingLastPathComponent()
-        let source = root.appendingPathComponent("Vendor/pdfcore/src/pdfcore.cc")
-        let library = root.appendingPathComponent(
-            "Vendor/pdfcore/lib/libpdfcore_universal.a")
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: source.path),
-              fm.fileExists(atPath: library.path) else { return }
-
-        func modified(_ url: URL) -> Date? {
-            (try? fm.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date
-        }
-        guard let sourceDate = modified(source), let libraryDate = modified(library)
-        else { return }
-
-        // Eine Sekunde Spielraum: Beide entstehen im selben Arbeitsgang, und
-        // Dateisystem-Zeitstempel sind nicht feiner aufgelöst als nötig.
-        #expect(libraryDate.timeIntervalSince(sourceDate) >= -1, """
-            libpdfcore_universal.a ist älter als pdfcore.cc \
-            (\(libraryDate) gegenüber \(sourceDate)). Die Tests laufen gegen \
-            eine veraltete Bridge. Abhilfe: Scripts/build-pdfcore.sh
+        let src = root.appendingPathComponent("Vendor/pdfcore/src")
+        var data = try Data(contentsOf: src.appendingPathComponent("pdfcore.cc"))
+        data.append(try Data(contentsOf: src.appendingPathComponent("pdfcore.h")))
+        let expected = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let linked = String(cString: pdfcore_source_hash())
+        #expect(linked == expected, """
+            Die gelinkte libpdfcore.a stammt aus einem anderen Quelltext \
+            (gelinkt \(linked.prefix(12)), Quelle \(expected.prefix(12))). \
+            Abhilfe: Scripts/build-pdfcore.sh
             """)
     }
 

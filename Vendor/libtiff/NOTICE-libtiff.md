@@ -1,18 +1,18 @@
 # NOTICE – libtiff (vendored)
 
-Dieses Verzeichnis enthält eine statische, universelle Build-Artefakt-Kopie
-(arm64 + x86_64) von **libtiff v4.7.2**.
+Dieses Verzeichnis enthält eine statische Build-Artefakt-Kopie (nur arm64)
+von **libtiff v4.7.2**.
 
 - Quelle: https://gitlab.com/libtiff/libtiff (Release `v4.7.2`,
-  Tarball https://download.osgeo.org/libtiff/tiff-4.7.2.tar.gz)
+  Tarball https://download.osgeo.org/libtiff/tiff-4.7.2.tar.gz,
+  per SHA-256 geprüft)
 - Lizenz: BSD-artig (Sam Leffler / Silicon Graphics), upstream `LICENSE.md`.
-- Verwendung: CCITT G3/G4-Encoding (Fax-Codec) für Bilevel-PDF-Bilder
+- Verwendung: CCITT G3/G4-Encoding (Fax-Codec) für Bilevel-PDF-Bilder.
   Keine Änderungen am Quellcode.
 - Build-Konfiguration: Release, BUILD_SHARED_LIBS=OFF, tiff-cxx=OFF,
   alle optionalen Codecs OFF (zlib/zstd/lzma/jpeg/webp/jbig/lerc/
   libdeflate/pixarlog). CCITT-Fax-Codec default-ON. Deployment-Target
-  macOS 11.0. Tools/Tests/Docs nicht enthalten (verbleiben unter
-  /tmp/opencode).
+  macOS 11.0. Tools/Tests/Docs nicht enthalten.
 
 Original-Lizenztext:
 

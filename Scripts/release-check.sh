@@ -34,14 +34,13 @@ check() { # name, command...
 echo "Release-Check: $APP"
 check "Helper vorhanden"          test -f "$QPDF"
 check "Helper ausführbar"         test -x "$QPDF"
-check "Universal Binary"          sh -c "lipo -info '$QPDF' | grep -q 'x86_64 arm64\|arm64 x86_64'"
-check "arm64 Slice"               sh -c "lipo -info '$QPDF' | grep -q arm64"
-check "x86_64 Slice"              sh -c "lipo -info '$QPDF' | grep -q x86_64"
+check "Helper nur arm64"          sh -c "[ \"\$(lipo -archs '$QPDF')\" = arm64 ]"
+check "App nur arm64"             sh -c "[ \"\$(lipo -archs '$APP/Contents/MacOS/PDFdownsize')\" = arm64 ]"
 check "Keine Homebrew-Dylibs"     sh -c "! otool -L '$QPDF' | grep -qE '/opt/homebrew|/usr/local/'"
 check "--version läuft (arm64)"   sh -c "arch -arm64 '$QPDF' --version | grep -q qpdf" 
 check "--check läuft"             sh -c "'$QPDF' --help >/dev/null"
 
-for f in LICENSE-qpdf.txt NOTICE-qpdf.md LICENSE-libjpeg-turbo.md \
+for f in LICENSE-qpdf.txt NOTICE-qpdf.md \
     LICENSE-libjpeg-mozjpeg.md LICENSE-zopfli.txt LICENSE-mozjpeg.md \
     NOTICE-mozjpeg.md NOTICE-jbig2enc.md NOTICE-libtiff.md \
     NOTICE-openjpeg.md NOTICE-harfbuzz.md; do

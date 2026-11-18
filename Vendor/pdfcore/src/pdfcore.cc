@@ -424,6 +424,14 @@ int pdfcore_check(pdfcore_document_t *doc)
     }
 }
 
+#ifndef PDFCORE_SOURCE_HASH
+#error "PDFCORE_SOURCE_HASH fehlt – die Bridge nur über Scripts/build-pdfcore.sh bauen."
+#endif
+const char *pdfcore_source_hash(void)
+{
+    return PDFCORE_SOURCE_HASH;
+}
+
 int pdfcore_version(char *buffer, size_t buffer_size)
 {
     try {

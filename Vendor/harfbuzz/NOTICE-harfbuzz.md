@@ -1,17 +1,16 @@
 # NOTICE – HarfBuzz (vendored)
 
-Dieses Verzeichnis enthält eine statische, universelle Build-Artefakt-Kopie
-(arm64 + x86_64) von **HarfBuzz v11.5.1** (Kern + Subsetter).
+Dieses Verzeichnis enthält eine statische Build-Artefakt-Kopie (nur arm64)
+von **HarfBuzz v11.5.1** (Kern + Subsetter).
 
 - Quelle: https://github.com/harfbuzz/harfbuzz (Release `11.5.1`,
-  Tarball harfbuzz-11.5.1.tar.xz)
+  Tarball harfbuzz-11.5.1.tar.xz, per SHA-256 geprüft)
 - Lizenz: „Old MIT“ (upstream `COPYING`); einzelne Teile tragen
   eigene Lizenzhinweise in Unterverzeichnissen (z. B. src/hb-ucd).
 - Verwendung: Font-Subsetting über die hb-subset-Sets-API
   (hb_subset_input_create_or_fail / hb_subset_input_unicode_set /
   hb_subset_input_glyph_set / hb_subset_input_set_flags /
-  hb_subset_or_fail).
-  Keine Änderungen am Quellcode.
+  hb_subset_or_fail). Keine Änderungen am Quellcode.
 - Build-Konfiguration: Release, CMake, BUILD_SHARED_LIBS=OFF,
   HB_BUILD_SUBSET=ON; glib/icu/cairo/freetype/graphite2/gobject/
   introspection/CoreText OFF (Unicode via eingebauter hb-ucd),

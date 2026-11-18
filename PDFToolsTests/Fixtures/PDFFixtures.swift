@@ -2651,7 +2651,7 @@ extension PDFFixtures {
     // MARK: - Phase 4b – JPX-Eingabefixtures (echte JPEG-2000-Codestreams)
 
     /// Die JPX-Codestreams sind EINMALIG mit opj_compress (OpenJPEG 2.5.4,
-    /// /tmp/opencode/pdftools-vendor/openjpeg-universal) erzeugt und als
+    /// damaliges Vendor-Arbeitsverzeichnis) erzeugt und als
     /// Base64 eingebacken – deterministisch, ohne externe Tool-Abhängigkeit
     /// der Tests. Quell-Hashes (SHA-256):
     ///   photoRGBLossy      240×180, 4683 B, q=45 dB, 9/7 (irreversibel)
