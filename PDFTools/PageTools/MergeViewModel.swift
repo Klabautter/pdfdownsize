@@ -845,6 +845,13 @@ final class MergeViewModel: ObservableObject {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.nameFieldStringValue = suggestedFileName(for: outcome)
+        // Wie Komprimieren: im Ordner der ersten Quelle (entsperrt: ihres Originals).
+        if let first = project.documents.first {
+            let original = unlockedSources[first.url]?.original ?? first.url
+            if !original.path.hasPrefix(ImageImporter.sessionDirectory.path) {
+                panel.directoryURL = original.deletingLastPathComponent()
+            }
+        }
         let guardian = SourceNameGuard(sources: project.documents.map(\.url)
                                        + unlockedSources.values.map(\.original))
         panel.delegate = guardian

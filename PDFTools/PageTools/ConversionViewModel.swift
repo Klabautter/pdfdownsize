@@ -337,6 +337,8 @@ final class ConversionViewModel: ObservableObject {
                 let panel = NSSavePanel()
                 panel.allowedContentTypes = [.pdf]
                 panel.nameFieldStringValue = String(localized: "Konvertiert.pdf")
+                // Wie Komprimieren: im Ordner der (ersten) Quelle.
+                if let dir = imageURLs.first?.deletingLastPathComponent() { panel.directoryURL = dir }
                 let sources = imageURLs
                 let guardian = SourceNameGuard(sources: sources)
                 panel.delegate = guardian

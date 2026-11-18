@@ -590,6 +590,9 @@ final class OCRViewModel: ObservableObject {
         let base = (pdfURL?.deletingPathExtension().lastPathComponent).map { $0 + "_" + String(localized: "durchsuchbar", comment: "Dateisuffix") }
             ?? String(localized: "Durchsuchbar")
         panel.nameFieldStringValue = base + ".pdf"
+        // Wie Komprimieren: der Dialog öffnet im Ordner des Originals – vorher
+        // im zuletzt benutzten Ordner (G3: OCR-Ergebnis landete in Dokumente).
+        if let dir = pdfURL?.deletingLastPathComponent() { panel.directoryURL = dir }
         // Der Name des Originals wird schon im Dialog abgelehnt – vorher kam
         // erst „Ersetzen?" und danach der Hinweis (L10).
         let guardian = SourceNameGuard(sources: pdfURL.map { [$0] } ?? [])
