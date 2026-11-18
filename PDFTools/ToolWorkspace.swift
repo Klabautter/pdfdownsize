@@ -206,7 +206,7 @@ struct WorkProgressBar: View {
             VStack(alignment: .leading, spacing: 8) {
                 ProgressView(value: progress)
                     .progressViewStyle(.linear)
-                    .animation(.easeOut(duration: 0.35), value: progress)
+                    .motionSafeAnimation(.easeOut(duration: 0.35), value: progress)
                 HStack {
                     Text(text)
                         .lineLimit(1)
@@ -259,7 +259,7 @@ struct SavedResultBlock: View {
         VStack(alignment: .leading, spacing: 8) {
             Label(title, systemImage: "checkmark.circle.fill")
                 .font(.callout.weight(.semibold))
-                .foregroundStyle(Theme.savings)
+                .foregroundStyle(Theme.savingsText)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let detail {
                 Text(detail)
@@ -332,7 +332,7 @@ extension View {
                     .allowsHitTesting(false)
             }
         }
-        .animation(.easeOut(duration: 0.15), value: isTargeted)
+        .motionSafeAnimation(.easeOut(duration: 0.15), value: isTargeted)
     }
 }
 

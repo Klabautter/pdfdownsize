@@ -61,6 +61,8 @@ struct ImageExportSheet: View {
                         LabeledContent("Qualität") {
                             HStack(spacing: 8) {
                                 Slider(value: $settings.quality, in: 0.4...1, step: 0.05)
+                                    .accessibilityLabel("Qualität")
+                                    .accessibilityValue("\(Int(settings.quality * 100)) %")
                                 Text("\(Int(settings.quality * 100)) %")
                                     .monospacedDigit()
                                     .frame(width: 44, alignment: .trailing)

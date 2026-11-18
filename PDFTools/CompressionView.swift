@@ -323,7 +323,7 @@ private struct ControlPanel: View {
                 Label("Digital signiert – die Signatur wird dabei ungültig.",
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.callout)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Theme.warningText)
             }
             if viewModel.pdfaPart > 0 {
                 Label("PDF/A-Dokument: Die Kennzeichnung geht beim Komprimieren verloren.",
@@ -364,7 +364,7 @@ private struct ControlPanel: View {
                                                                met: r.targetMet ?? false),
                           systemImage: r.targetMet == true ? "checkmark.circle" : "target")
                         .font(.callout)
-                        .foregroundStyle(r.targetMet == true ? AnyShapeStyle(Theme.savings) : AnyShapeStyle(.secondary))
+                        .foregroundStyle(r.targetMet == true ? AnyShapeStyle(Theme.savingsText) : AnyShapeStyle(.secondary))
                 }
                 if let hint = CompressionViewModel.qualityHintText(qaReplanCount: r.qaReplanCount,
                                                                    fallbackCount: r.qaFallbackCount) {
@@ -416,7 +416,7 @@ private struct ControlPanel: View {
                 if viewModel.targetSizeInvalid {
                     Text("Bitte eine Zahl in MB eingeben, zum Beispiel 5 oder 2,5.")
                         .font(.footnote)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Theme.warningText)
                 }
                 Toggle("Schnelles Laden im Web", isOn: $viewModel.linearizeForWeb)
                     .toggleStyle(.switch)
@@ -545,7 +545,7 @@ struct SizeReadout: View {
             bar.frame(height: 6)
         }
         .opacity(refreshing ? 0.5 : 1)
-        .animation(.smooth(duration: 0.25), value: content)
+        .motionSafeAnimation(.smooth(duration: 0.25), value: content)
         .accessibilityElement(children: .combine)
     }
 
@@ -587,7 +587,7 @@ struct SizeReadout: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(percent(output)) % kleiner")
                     .font(Theme.figure)
-                    .foregroundStyle(Theme.savings)
+                    .foregroundStyle(Theme.savingsText)
                 Text("\(CompressionResult.format(original)) → \(CompressionResult.format(output))")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -597,7 +597,7 @@ struct SizeReadout: View {
             VStack(alignment: .leading, spacing: 2) {
                 Label("Bereits optimal", systemImage: "checkmark.seal.fill")
                     .font(.title3.weight(.semibold))
-                    .foregroundStyle(Theme.savings)
+                    .foregroundStyle(Theme.savingsText)
                 Text("Kaum weitere Verkleinerung möglich – das Original bleibt die beste Wahl.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -732,7 +732,7 @@ struct PaperSheet: View {
             }
         }
         .opacity(scanning ? 0.85 : 1)
-        .animation(.easeInOut(duration: 0.25), value: scanning)
+        .motionSafeAnimation(.easeInOut(duration: 0.25), value: scanning)
         .shadow(color: .black.opacity(0.10), radius: 6, y: 2)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -769,7 +769,7 @@ struct DocumentStage: View {
                            onPageChange: onPageChange,
                            onPageFrame: { pageFrame = $0 })
                 .opacity(scanning ? 0.85 : 1)
-                .animation(.easeInOut(duration: 0.25), value: scanning)
+                .motionSafeAnimation(.easeInOut(duration: 0.25), value: scanning)
                 .overlay(alignment: .topLeading) {
                     if comparing {
                         divider(in: geo.size)
@@ -930,7 +930,7 @@ private struct BulkComparisonStage: View {
                 Spacer()
                 if let r = viewModel.bulkResult(for: input) {
                     Text("\(Int(r.savedPercent.rounded())) % kleiner · \(CompressionResult.format(r.outputBytes))")
-                        .foregroundStyle(Theme.savings)
+                        .foregroundStyle(Theme.savingsText)
                         .monospacedDigit()
                 }
             }
@@ -1033,7 +1033,7 @@ private struct BulkStage: View {
                 Label(String(localized: "\(viewModel.bulkSigned.count) Dateien digital signiert – die Signatur wird dabei ungültig."),
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.callout)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Theme.warningText)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 20)
                     .padding(.top, 8)
@@ -1097,7 +1097,7 @@ private struct BulkStage: View {
         if let r = viewModel.bulkResult(for: url) {
             Text(r.alreadyOptimized ? "Bereits optimal"
                  : "\(Int(r.savedPercent.rounded())) % kleiner · \(CompressionResult.format(r.outputBytes))")
-                .foregroundStyle(Theme.savings)
+                .foregroundStyle(Theme.savingsText)
                 .monospacedDigit()
         } else if let verdict = viewModel.bulkVerdicts[url], !verdict.isOK {
             // Vorprüfung (B1): Grund sofort, nicht „…“ – die Datei läuft nicht mit.
@@ -1130,7 +1130,7 @@ private struct BulkStage: View {
         if viewModel.bulkResult(for: url) != nil, !viewModel.isWorking {
             if viewModel.isBulkResultSaved(for: url) {
                 Label("Gesichert", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(Theme.savings)
+                    .foregroundStyle(Theme.savingsText)
                     .font(.callout)
             } else {
                 Button("Sichern …") { saveSingle(url) }
@@ -1179,7 +1179,7 @@ private struct BulkStage: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("\(Int(viewModel.bulkSavedPercent.rounded())) % kleiner")
                         .font(.title2.weight(.semibold))
-                        .foregroundStyle(Theme.savings)
+                        .foregroundStyle(Theme.savingsText)
                     Text(viewModel.progressLabel)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -1189,7 +1189,7 @@ private struct BulkStage: View {
                     // Nach dem Sichern dasselbe Muster wie im Pult (S9).
                     Label("Gesichert", systemImage: "checkmark.circle.fill")
                         .font(.callout.weight(.semibold))
-                        .foregroundStyle(Theme.savings)
+                        .foregroundStyle(Theme.savingsText)
                     Button("Im Finder zeigen") {
                         NSWorkspace.shared.activateFileViewerSelecting(viewModel.bulkSavedURLs)
                     }

@@ -179,6 +179,9 @@ struct ConvertView: View {
                 }
                 Slider(value: $vm.exportSettings.quality, in: 0.4...1, step: 0.05)
                     .labelsHidden()
+                    // Masterplan F4: VoiceOver nennt den Regler und seinen Wert.
+                    .accessibilityLabel("Qualität")
+                    .accessibilityValue("\(Int(vm.exportSettings.quality * 100)) %")
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text("Auflösung").font(.subheadline.weight(.semibold))

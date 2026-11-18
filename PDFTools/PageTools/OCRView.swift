@@ -311,7 +311,7 @@ struct OCRView: View {
                 Label("Digital signiert – die Textebene macht die Signatur ungültig. Das Original bleibt unverändert.",
                       systemImage: "signature")
                     .font(.callout)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Theme.warningText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }

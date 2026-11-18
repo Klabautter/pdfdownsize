@@ -253,7 +253,7 @@ struct OrganizeView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(.easeInOut(duration: 0.18), value: vm.selectedPageIDs.isEmpty)
+        .motionSafeAnimation(.easeInOut(duration: 0.18), value: vm.selectedPageIDs.isEmpty)
         // Masterplan B2: gesperrte PDFs aus dem Import – Passwort oder überspringen.
         .sheet(isPresented: Binding(get: { !vm.lockedPending.isEmpty },
                                     set: { if !$0 { vm.skipPendingLocked() } })) {
@@ -326,7 +326,7 @@ struct OrganizeView: View {
         Label("Digitale Signatur erkannt (\(vm.signatureWarningDocs.joined(separator: ", "))) – Zusammenführen macht sie ungültig.",
               systemImage: "exclamationmark.shield.fill")
             .font(.callout)
-            .foregroundStyle(.orange)
+            .foregroundStyle(Theme.warningText)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -347,7 +347,8 @@ struct OrganizeView: View {
                              showLeadingIndicator: dragInsertIndex == index,
                              showTrailingIndicator: dragInsertIndex == vm.project.pages.count && index == vm.project.pages.count - 1,
                              service: ThumbnailService.shared,
-                             positionLabel: String(localized: "Seite \(index + 1) von \(vm.project.pages.count)"),
+                             sourceName: vm.project.document(for: item.sourceDocumentID)?.fileName,
+                             positionLabel: String(localized: "Position \(index + 1) von \(vm.project.pages.count)"),
                              onRotate: { delta in
                                  vm.ensureContextSelection(item)
                                  vm.rotateSelectedPages(by: delta)
@@ -391,7 +392,7 @@ struct OrganizeView: View {
                         .disabled(vm.isProcessing)
                     }
                     .opacity(draggingIDs.contains(item.id) ? 0.35 : 1)
-                    .animation(.easeInOut(duration: 0.12), value: draggingIDs)
+                    .motionSafeAnimation(.easeInOut(duration: 0.12), value: draggingIDs)
                     .background(
                         GeometryReader { geo in
                             Color.clear.preference(key: CellFramesKey.self,
@@ -612,7 +613,7 @@ struct OrganizeView: View {
         .allowsHitTesting(false)
         .position(x: pointerX, y: pointerViewportY)
         .opacity(draggingIDs.isEmpty ? 0 : 1)
-        .animation(.easeInOut(duration: 0.1), value: draggingIDs.isEmpty)
+        .motionSafeAnimation(.easeInOut(duration: 0.1), value: draggingIDs.isEmpty)
     }
 
     private func previewCard(shift: CGSize, opacity: Double) -> some View {
@@ -731,7 +732,7 @@ struct OrganizeView: View {
         .glassEffect(.regular, in: .capsule)
         // Haarlinie: Glas auf weißer Fläche hat sonst keine Kante.
         .overlay { Capsule().strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5) }
-        .animation(.easeInOut(duration: 0.15), value: vm.selectedPageIDs.isEmpty)
+        .motionSafeAnimation(.easeInOut(duration: 0.15), value: vm.selectedPageIDs.isEmpty)
     }
 
     // MARK: - Ergebnis (Befund S4)
@@ -760,7 +761,7 @@ struct OrganizeView: View {
                         if Double(o.outputBytes) <= Double(o.combinedInputBytes) * 0.995 {
                             Text("\(Int(((1 - Double(o.outputBytes) / Double(max(o.combinedInputBytes, 1))) * 100).rounded())) % kleiner")
                                 .font(Theme.figure)
-                                .foregroundStyle(Theme.savings)
+                                .foregroundStyle(Theme.savingsText)
                             Text("\(CompressionResult.format(o.combinedInputBytes)) → \(CompressionResult.format(o.outputBytes))")
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
@@ -881,7 +882,10 @@ struct PageCellView: View {
     let showLeadingIndicator: Bool
     let showTrailingIndicator: Bool
     let service: ThumbnailService
-    /// „Seite 3 von 12" – Position im Projekt für VoiceOver (Befund S10).
+    /// Anzeigename der Quelle (Dateiname des Originals, auch bei Bildern und
+    /// entsperrten PDFs) – Masterplan F4.
+    var sourceName: String? = nil
+    /// „Position 3 von 12" – Stelle im Projekt für VoiceOver (Befund S10).
     var positionLabel: String? = nil
     var onRotate: ((Int) -> Void)? = nil
     var onDelete: (() -> Void)? = nil
@@ -892,10 +896,15 @@ struct PageCellView: View {
         item.rotation == 0 ? nil : String(localized: "um \(item.rotation)° gedreht")
     }
 
+    /// Masterplan F4: „Seite 3, enc-owner-only.pdf“ – die Seite IN ihrer
+    /// Quelle und deren Name; die Projektposition folgt als Zusatz. Vorher
+    /// nannte das Label die Position über alle Quellen und den Namen der
+    /// Arbeitsdatei (bei Bildern eine UUID).
     private var accessibilityDescription: String {
-        var parts = [positionLabel ?? String(localized: "Seite \(item.sourcePageIndex + 1)")]
-        parts.append(String(localized: "aus \(item.sourceURL.lastPathComponent)"))
-        return parts.joined(separator: " ")
+        let name = sourceName ?? item.sourceURL.lastPathComponent
+        var text = String(localized: "Seite \(item.sourcePageIndex + 1), \(name)")
+        if let positionLabel { text += ", " + positionLabel }
+        return text
     }
 
     var body: some View {

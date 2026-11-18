@@ -60,7 +60,7 @@ struct RejectedDocumentView: View {
                             .disabled(password.isEmpty || isUnlocking)
                     }
                     if let passwordError {
-                        Text(passwordError).font(.callout).foregroundStyle(.orange)
+                        Text(passwordError).font(.callout).foregroundStyle(Theme.warningText)
                     }
                 }
                 HStack(spacing: 12) {
