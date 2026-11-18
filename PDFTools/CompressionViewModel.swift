@@ -136,6 +136,8 @@ final class CompressionViewModel: ObservableObject {
     @Published private(set) var singleOutcome: SingleOutcome = .none
     @Published var errorMessage: String?
     @Published var hasSignature = false
+    /// Masterplan E4: PDF/A-Teil der gewählten Datei (0 = keine Kennzeichnung).
+    @Published var pdfaPart = 0
     /// Fortschritt des laufenden Laufs; nach einem Stapellauf trägt
     /// `progressLabel` die Zusammenfassung („3 von 4 komprimiert").
     @Published var progressValue: Double = 0
@@ -461,6 +463,7 @@ final class CompressionViewModel: ObservableObject {
         selectedPage = 0
         errorMessage = nil
         hasSignature = false
+        pdfaPart = 0
         estimate = nil
         targetAssessment = nil
         targetSizeText = ""
@@ -502,9 +505,11 @@ final class CompressionViewModel: ObservableObject {
         }
         Task.detached(priority: .utility) {
             let signature = Compressor.containsDigitalSignature(at: currentURL)
+            let pdfa = (try? PDFCoreDocument(path: currentURL.path))?.pdfaPart ?? 0
             await MainActor.run {
                 guard self.inputURL == currentURL else { return }
                 self.hasSignature = signature
+                self.pdfaPart = pdfa
             }
         }
         refreshEstimate()
@@ -547,6 +552,7 @@ final class CompressionViewModel: ObservableObject {
         inputURL = nil
         errorMessage = nil
         hasSignature = false
+        pdfaPart = 0
         estimate = nil
         estimateRefreshing = false
         targetAssessment = nil

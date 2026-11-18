@@ -4834,6 +4834,22 @@
         }
       }
     },
+    "PDF/A-Dokument: Die Kennzeichnung geht beim Komprimieren verloren.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PDF/A-Dokument: Die Kennzeichnung geht beim Komprimieren verloren."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PDF/A document: the PDF/A label is removed when compressing."
+          }
+        }
+      }
+    },
     "PDFdownsize": {
       "localizations": {
         "de": {

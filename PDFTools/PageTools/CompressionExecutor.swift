@@ -580,6 +580,12 @@ enum CompressionExecutor {
             try activeDocument.stripMetadata(keepProducer: true)
         }
 
+        // Masterplan E4: Die Ausgabe ist neu geschrieben und erfüllt PDF/A
+        // nicht mehr verlässlich (Bilder umkodiert, Strukturen entfernt) –
+        // die Behauptung im XMP fällt weg. Unverändert durchgereichte
+        // Originale (returnedOriginal) behalten sie.
+        try activeDocument.withdrawPDFAClaim()
+
         // Producer als LETZTER Schritt, damit er auch nach dem Strippen steht.
         activeDocument.setProducer(Compressor.producerName)
 

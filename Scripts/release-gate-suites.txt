@@ -27,3 +27,4 @@ SingleSourceAssemblyE2ETests
 MultiSourceCatalogE2ETests
 SaveOverSourceTests
 LocalizationHygieneTests
+PDFAClaimE2ETests

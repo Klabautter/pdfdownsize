@@ -138,6 +138,14 @@ int pdfcore_named_destination_count(pdfcore_document_t *doc);
 /// Embedded-Files-Einträge im Names-Baum. -1=Fehler.
 int pdfcore_attachment_count(pdfcore_document_t *doc);
 
+/// Masterplan E4: PDF/A-Teil laut XMP (pdfaid:part), 0 = keine Behauptung.
+int pdfcore_pdfa_part(pdfcore_document_t *doc);
+
+/// Masterplan E4: Entfernt die PDF/A-Behauptung (alle pdfaid:-Angaben) aus
+/// dem XMP. Eine Datei, die fälschlich PDF/A behauptet, ist schlechter als
+/// eine ohne Kennzeichnung. 1 = entfernt, 0 = keine vorhanden, -1 = Fehler.
+int pdfcore_withdraw_pdfa_claim(pdfcore_document_t *doc);
+
 /// 1 wenn Katalog /PageLabels existiert, sonst 0. -1=Fehler.
 int pdfcore_has_page_labels(pdfcore_document_t *doc);
 

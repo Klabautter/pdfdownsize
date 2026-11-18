@@ -2014,6 +2014,100 @@ int pdfcore_attachment_count(pdfcore_document_t *doc)
     PDFCORE_GUARD_END(-1)
 }
 
+// ============================================================================
+// Masterplan E4 – PDF/A-Kennzeichnung
+// ============================================================================
+
+namespace {
+
+/// XMP-Paket aus /Root/Metadata (entpackt), leer ohne Metadaten.
+std::string read_catalog_xmp(QPDF& qpdf)
+{
+    QPDFObjectHandle meta = qpdf.getRoot().getKey("/Metadata");
+    if (!meta.isStream()) { return {}; }
+    std::shared_ptr<Buffer> data = meta.getStreamData(qpdf_dl_generalized);
+    return std::string(reinterpret_cast<char const*>(data->getBuffer()), data->getSize());
+}
+
+/// PDF/A-Teil aus dem XMP (Attribut- oder Elementform), 0 = keine Behauptung.
+int pdfa_part_in_xmp(std::string const& xmp)
+{
+    size_t at = xmp.find("pdfaid:part");
+    while (at != std::string::npos) {
+        size_t i = at + std::strlen("pdfaid:part");
+        while (i < xmp.size() && (xmp[i] == ' ' || xmp[i] == '=' || xmp[i] == '"'
+                                  || xmp[i] == '\'' || xmp[i] == '>')) { ++i; }
+        if (i < xmp.size() && std::isdigit(static_cast<unsigned char>(xmp[i]))) {
+            return xmp[i] - '0';
+        }
+        at = xmp.find("pdfaid:part", at + 1);
+    }
+    return 0;
+}
+
+/// Entfernt jede pdfaid:-Angabe: Attribute `pdfaid:x="…"` (samt führendem
+/// Leerraum) und Elemente `<pdfaid:x>…</pdfaid:x>`. Der Namensraum-Eintrag
+/// xmlns:pdfaid bleibt (unschädlich, und die XML bleibt wohlgeformt).
+std::string strip_pdfaid(std::string xmp)
+{
+    for (;;) {
+        size_t open = xmp.find("<pdfaid:");
+        if (open == std::string::npos) { break; }
+        size_t nameEnd = xmp.find_first_of(" >/", open + 8);
+        if (nameEnd == std::string::npos) { break; }
+        std::string name = xmp.substr(open + 1, nameEnd - open - 1);
+        size_t close = xmp.find("</" + name + ">", nameEnd);
+        size_t selfClose = xmp.find("/>", nameEnd);
+        size_t end;
+        if (close != std::string::npos && (selfClose == std::string::npos || close < selfClose)) {
+            end = close + name.size() + 3;
+        } else if (selfClose != std::string::npos) {
+            end = selfClose + 2;
+        } else { break; }
+        xmp.erase(open, end - open);
+    }
+    for (;;) {
+        size_t at = xmp.find("pdfaid:");
+        while (at != std::string::npos && at >= 6 && xmp.compare(at - 6, 6, "xmlns:") == 0) {
+            at = xmp.find("pdfaid:", at + 1);
+        }
+        if (at == std::string::npos) { break; }
+        size_t eq = xmp.find('=', at);
+        if (eq == std::string::npos || eq + 1 >= xmp.size()) { break; }
+        char quote = xmp[eq + 1];
+        if (quote != '"' && quote != '\'') { break; }
+        size_t endQuote = xmp.find(quote, eq + 2);
+        if (endQuote == std::string::npos) { break; }
+        size_t start = at;
+        while (start > 0 && std::isspace(static_cast<unsigned char>(xmp[start - 1]))) { --start; }
+        xmp.erase(start, endQuote + 1 - start);
+    }
+    return xmp;
+}
+
+} // namespace
+
+int pdfcore_pdfa_part(pdfcore_document_t *doc)
+{
+    PDFCORE_GUARD_BEGIN
+    if (!doc) { return -1; }
+    return pdfa_part_in_xmp(read_catalog_xmp(doc->qpdf));
+    PDFCORE_GUARD_END(-1)
+}
+
+int pdfcore_withdraw_pdfa_claim(pdfcore_document_t *doc)
+{
+    PDFCORE_GUARD_BEGIN
+    if (!doc) { return -1; }
+    std::string xmp = read_catalog_xmp(doc->qpdf);
+    if (pdfa_part_in_xmp(xmp) == 0) { return 0; }
+    QPDFObjectHandle meta = doc->qpdf.getRoot().getKey("/Metadata");
+    // Unkomprimiert zurück: XMP soll ohne PDF-Kenntnis lesbar bleiben.
+    meta.replaceStreamData(strip_pdfaid(xmp), QPDFObjectHandle::newNull(), QPDFObjectHandle::newNull());
+    return 1;
+    PDFCORE_GUARD_END(-1)
+}
+
 int pdfcore_has_page_labels(pdfcore_document_t *doc)
 {
     PDFCORE_GUARD_BEGIN

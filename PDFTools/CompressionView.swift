@@ -326,6 +326,13 @@ private struct ControlPanel: View {
                     .font(.callout)
                     .foregroundStyle(.orange)
             }
+            if viewModel.pdfaPart > 0 {
+                Label("PDF/A-Dokument: Die Kennzeichnung geht beim Komprimieren verloren.",
+                      systemImage: "info.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 

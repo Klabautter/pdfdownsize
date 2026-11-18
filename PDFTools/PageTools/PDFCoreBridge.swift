@@ -1618,6 +1618,21 @@ extension PDFCoreDocument {
         let rc = pdfcore_strip_metadata(handle, keepProducer ? 1 : 0)
         guard rc == PDFCORE_OK.rawValue else { throw PDFCoreError.internalError }
     }
+
+    /// Masterplan E4: PDF/A-Teil laut XMP, 0 = keine Behauptung.
+    var pdfaPart: Int {
+        gate.lock(); defer { gate.unlock() }
+        return max(0, Int(pdfcore_pdfa_part(handle)))
+    }
+
+    /// Masterplan E4: PDF/A-Behauptung aus dem XMP nehmen. true = entfernt.
+    @discardableResult
+    func withdrawPDFAClaim() throws -> Bool {
+        gate.lock(); defer { gate.unlock() }
+        let rc = pdfcore_withdraw_pdfa_claim(handle)
+        guard rc >= 0 else { throw PDFCoreError.internalError }
+        return rc == 1
+    }
 }
 
 // MARK: - Phase 5a – Font-Attribution, Font-Dedup, Unused-Font-GC
