@@ -378,7 +378,9 @@ enum CompressionExecutor {
             // ist dieselbe.
             let candidates = resources.filter { resource in
                 resource.terminalFilter == .dct && resource.unknownFilters.isEmpty
-                    && resource.filters == [.dct]
+                    // Masterplan B5: auch hinter Transportfiltern – die fallen
+                    // beim Zurückschreiben weg.
+                    && resource.filters.dropLast().allSatisfy(LibQPDFPixelSource.transportFilters.contains)
                     && plan.action(for: resource.objectID)?.transformsImage != true
                     // Der Repack hält alle Koeffizienten im Speicher; eine
                     // absurde Quelle bliebe sonst nur für die Dekodierung gesperrt.
@@ -392,15 +394,21 @@ enum CompressionExecutor {
                     if let isCancelled, isCancelled() { throw CancellationError() }
                     let resource = candidates[next]
                     next += 1
-                    guard let original = document.imageStreamData(objectID: resource.objectID,
-                                                                  decoded: false) else { continue }
+                    guard let original = resource.filters == [.dct]
+                            ? document.imageStreamData(objectID: resource.objectID, decoded: false)
+                            : document.imageTransportDecodedData(objectID: resource.objectID)
+                    else { continue }
                     pending.append((resource, original))
                     windowBytes += original.count
                 }
                 let results: [Data?] = ParallelWork.map(count: pending.count) { index in
                     if let isCancelled, isCancelled() { return nil }
                     guard case .repacked(let data) = JPEGEncoder.repack(
-                        pending[index].original, progressive: repackProgressive) else { return nil }
+                        pending[index].original, progressive: repackProgressive) else {
+                        // Ohne Repack-Gewinn bleibt bei Vorfiltern das nackte
+                        // JPEG – schon das spart die Transporthülle.
+                        return pending[index].resource.filters == [.dct] ? nil : pending[index].original
+                    }
                     return data
                 }
                 if let isCancelled, isCancelled() { throw CancellationError() }
@@ -413,7 +421,8 @@ enum CompressionExecutor {
                                                              data: data)
                         repacked += 1
                         // Gemessenes Stream-Delta – nie negativ (Never-Grow).
-                        savedRepack += max(0, entry.original.count - data.count)
+                        savedRepack += max(0, max(entry.original.count,
+                                                  entry.resource.encodedByteCount) - data.count)
                     } catch PDFCoreError.checkFailed, PDFCoreError.internalError {
                         continue
                     }
@@ -925,6 +934,9 @@ enum CompressionExecutor {
 /// Was nicht vollständig dekodiert werden kann, liefert `nil`. Es wird
 /// niemals ersatzweise die Seite gerendert (Masterplan Finding 15).
 struct LibQPDFPixelSource: ImagePixelSource {
+    /// Reine Transportkodierungen vor einem Bildfilter (Masterplan B5).
+    static let transportFilters: Set<PDFImageFilter> = [.ascii85, .asciiHex, .flate, .lzw, .runLength]
+
     let document: PDFCoreDocument
 
     /// Masterplan A4: Das /ICCBased-Profil (drei Kanäle) aus dem PDF. Die
@@ -949,8 +961,7 @@ struct LibQPDFPixelSource: ImagePixelSource {
     func decodedImage(for resource: PDFImageResource) -> CGImage? {
         switch resource.terminalFilter {
         case .dct:
-            guard let data = document.imageStreamData(objectID: resource.objectID,
-                                                      decoded: false) else { return nil }
+            guard let data = jpegData(for: resource) else { return nil }
             return ImageResampler.decodeJPEG(data, pdfProfile: pdfProfile(for: resource))
         case .flate, .lzw, .runLength, nil:
             guard let data = document.imageStreamData(objectID: resource.objectID,
@@ -987,6 +998,17 @@ struct LibQPDFPixelSource: ImagePixelSource {
 
     /// Phase 6C – rohe Stream-Bytes (bei DCTDecode: JPEG) für die
     /// Größenbarriere der CMYK-Race.
+    /// Masterplan B5: Die JPEG-Bytes eines DCT-Bildes, auch hinter einem
+    /// Transportfilter (ASCII85, Flate). Vorher kamen dort die ASCII85-Bytes
+    /// beim JPEG-Dekoder an, das Bild blieb unberührt – die Schätzung rechnete
+    /// trotzdem mit dem Ersatz (geschätzt 78 %, real 1,6 %).
+    func jpegData(for resource: PDFImageResource) -> Data? {
+        guard resource.terminalFilter == .dct else { return nil }
+        return resource.filters == [.dct]
+            ? document.imageStreamData(objectID: resource.objectID, decoded: false)
+            : document.imageTransportDecodedData(objectID: resource.objectID)
+    }
+
     func rawImageData(for resource: PDFImageResource) -> Data? {
         document.imageStreamData(objectID: resource.objectID, decoded: false)
     }
@@ -1100,8 +1122,7 @@ struct LibQPDFPixelSource: ImagePixelSource {
     /// mehr Pixel nennt, bleibt unangetastet.
     func decodedImage(for resource: PDFImageResource, target: PixelSize) -> CGImage? {
         if resource.terminalFilter == .dct, target.width > 0, target.height > 0 {
-            guard let data = document.imageStreamData(objectID: resource.objectID,
-                                                      decoded: false) else { return nil }
+            guard let data = jpegData(for: resource) else { return nil }
             return ImageResampler.decodeJPEG(
                 data, level: Self.dctLevel(resource: resource, target: target),
                 maximumPixels: CompressionPlanner.maximumDecodablePixels,

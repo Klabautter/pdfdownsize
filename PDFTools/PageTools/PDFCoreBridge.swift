@@ -1193,12 +1193,22 @@ extension PDFCoreDocument {
     private static let srgbICC: Data? = CGColorSpace(name: CGColorSpace.sRGB)?.copyICCData() as Data?
 
     func imageStreamData(objectID: PDFObjectID, decoded: Bool) -> Data? {
+        imageStreamData(objectID: objectID, level: decoded ? 1 : 0)
+    }
+
+    /// Masterplan B5: Nur Transportfilter aufgelöst – das JPEG hinter einem
+    /// ASCII85- oder Flate-Vorfilter.
+    func imageTransportDecodedData(objectID: PDFObjectID) -> Data? {
+        imageStreamData(objectID: objectID, level: 2)
+    }
+
+    private func imageStreamData(objectID: PDFObjectID, level: Int32) -> Data? {
         gate.lock(); defer { gate.unlock() }
         var ptr: UnsafeMutablePointer<CChar>?
         var len: Int = 0
         let rc = pdfcore_get_image_object_data(
             handle, Int32(objectID.objectNumber), Int32(objectID.generation),
-            decoded ? 1 : 0, &ptr, &len)
+            level, &ptr, &len)
         guard rc == PDFCORE_OK.rawValue, let base = ptr, len > 0 else {
             if let base = ptr { free(base) }
             return nil

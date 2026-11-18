@@ -742,6 +742,8 @@ int pdfcore_flate_compress(const unsigned char *data, size_t data_len, int level
  * decoded = 1 → von libqpdf dekodierte Bytes (Flate/LZW/RunLength aufgelöst,
  *               inkl. Predictor). Für Filter, die libqpdf nicht auflösen kann,
  *               wird PDFCORE_ERR_CHECK_FAILED gemeldet – NIE Ersatzdaten.
+ * decoded = 2 → nur Transportfilter aufgelöst (ASCII85/Hex, Flate, LZW,
+ *               RunLength); DCT/JPX/CCITT/JBIG2 bleiben kodiert (Masterplan B5).
  * Gibt malloc'd Buffer zurück; Freigabe mit free(). */
 int pdfcore_get_image_object_data(pdfcore_document_t *doc,
                                   int obj_number, int generation,

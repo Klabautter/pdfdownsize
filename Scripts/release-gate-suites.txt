@@ -31,3 +31,4 @@ PDFAClaimE2ETests
 OCRScriptCoverageTests
 MultiPageTIFFImportTests
 ICCProfileReplacementE2ETests
+TransportFilteredJPEGTests

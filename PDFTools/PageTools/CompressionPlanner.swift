@@ -1086,6 +1086,20 @@ enum CompressionPlanner {
 
     /// Die Stufe, wenn der Lauf adaptiv entscheidet; nil bei fester Qualität
     /// oder Graustufen-Wandlung. Für die Schnellschätzung.
+    /// Masterplan B5: Modelloptionen. Feste Qualität bekommt die Leiter der
+    /// höchsten Stufe, deren Untergrenze sie erreicht (0,9 → Qualität,
+    /// 0,75 → Smart, darunter Klein) – Zielauflösung, Kantenlimit, Graustufen
+    /// und Bilevel-Politik bleiben die eigenen. Gemessen am Smoke-Satz liefert
+    /// Eigene 0,9 dieselbe Ersparnis wie Qualität (±1 Punkt).
+    static func estimateModelOptions(_ options: ImageCompressionOptions) -> ImageCompressionOptions {
+        guard case .fixed(let quality) = options.qualityPolicy else { return options }
+        let presets: [ImageCompressionOptions] = [.quality, .smart, .small]
+        let preset = presets.first { ($0.qualityLadder.min() ?? 1) <= quality + 1e-9 } ?? .small
+        var modeled = options
+        modeled.qualityPolicy = preset.qualityPolicy
+        return modeled
+    }
+
     static func adaptivePreset(for options: ImageCompressionOptions) -> QualityGatePreset? {
         guard case .adaptive = options.qualityPolicy, !options.forceGrayscale else { return nil }
         return QualityGatePreset(ssimThreshold: options.ssimThreshold)

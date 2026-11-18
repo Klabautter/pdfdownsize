@@ -347,23 +347,25 @@ enum CompressionEstimator {
             if neutralVotes.count >= QuickModel.neutralChromaSamples {
                 return neutralVotes.filter { $0 }.count * 2 > neutralVotes.count
             }
-            let verdict = pixels.rawImageData(for: resource)
+            let verdict = pixels.jpegData(for: resource)
                 .flatMap(NeutralChromaProbe.isNeutral(jpeg:)) ?? false
             neutralVotes.append(verdict)
             return verdict
         }
-        let isFixedQualityPolicy: Bool = {
-            if case .fixed = options.image.qualityPolicy { return true }
-            return false
-        }()
-        let floor = CompressionPlanner.qualityFloor(for: options.image)
+        // Masterplan B5: Feste Qualität (Eigene) läuft im Generator durch
+        // dieselbe Suche wie die Stufen, nur ungegated mit einer Stufe. Das
+        // Modell nimmt das Verhalten der Stufe, deren Leiter diese Qualität
+        // trägt (`CompressionPlanner.estimateModelOptions`); vorher galt ein pauschales „bleibt“
+        // (Eigene 0,9 geschätzt 15 %, geliefert 51 %).
+        let modelOptions = CompressionPlanner.estimateModelOptions(options.image)
+        let floor = CompressionPlanner.qualityFloor(for: modelOptions)
         // Dieselbe Frage wie `isDocumentScanForSmart` im Lauf, nur auf einem
         // Vorschaubild und höchstens dreimal je Dokument.
         func looksLikePaper(_ resource: PDFImageResource) -> Bool {
             if paperVotes.count >= QuickModel.neutralChromaSamples {
                 return paperVotes.filter { $0 }.count * 2 > paperVotes.count
             }
-            let verdict = pixels.rawImageData(for: resource)
+            let verdict = pixels.jpegData(for: resource)
                 .flatMap(PaperScanProbe.isPaper(jpeg:)) ?? false
             paperVotes.append(verdict)
             return verdict
@@ -371,28 +373,31 @@ enum CompressionEstimator {
         for resource in resources {
             let bytes = Double(max(resource.encodedByteCount, 0))
             let target = CompressionPlanner.plannedSize(for: resource, options: options.image)
+            // Masterplan B5: Ein JPEG hinter ASCII85/ASCIIHex verliert die
+            // Transporthülle in jedem Fall (Ersatz oder Repack).
+            let hull = resource.terminalFilter == .dct ? Self.transportHullRatio(resource) : 1
             let ratio = target.map {
                 Double($0.width * $0.height) / Double(max(resource.pixelCount, 1))
             } ?? 1.0
             if ratio < 0.999, resource.transformCapability.isSafe { oversized += 1 }
             if let retention = quickBehaviorRetention(
-                resource: resource, options: options.image, target: target,
+                resource: resource, options: modelOptions, target: target,
+                allowsPaperScanRule: CompressionPlanner.adaptivePreset(for: options.image) != nil,
                 pageHasVisibleText: pageHasVisibleText, looksLikePaper: looksLikePaper) {
-                imagesOut += bytes * retention
+                imagesOut += bytes * retention * hull
                 continue
             }
             // Das MRC-Scan-Modell gilt nicht für feste Nutzerparameter
             // (Custom fährt kein MRC, `CompressionOptions.make`) – vorher
             // schätzte es modusblind (Befund B5, Review 2026-10-09).
-            let scanRetention = !isFixedQualityPolicy
+            let scanRetention = options.featureFlags.mrc
                 && !CompressionPlanner.dpiRuleExcludesMRC(resource: resource, options: options)
                 ? quickScanRetention(resource: resource, qualityFloor: floor,
                                      pageHasVisibleText: pageHasVisibleText,
                                      contentIsNeutral: contentIsNeutral)
                 : nil
             imagesOut += bytes * (scanRetention
-                ?? quickRetention(resource: resource, ratio: ratio, qualityFloor: floor,
-                                  fixedQuality: isFixedQualityPolicy))
+                ?? quickRetention(resource: resource, ratio: ratio, qualityFloor: floor) * hull)
         }
 
         let modeled = Int64(max(structural + imagesOut, 1).rounded())
@@ -430,19 +435,21 @@ enum CompressionEstimator {
     static func quickBehaviorRetention(resource: PDFImageResource,
                                        options: ImageCompressionOptions,
                                        target: PixelSize?,
+                                       allowsPaperScanRule: Bool = true,
                                        pageHasVisibleText: (Int) -> Bool,
                                        looksLikePaper: (PDFImageResource) -> Bool) -> Double? {
-        guard let preset = CompressionPlanner.adaptivePreset(for: options) else { return nil }
+        // Das Bilevel-Race läuft in jeder Stufe, auch bei fester Qualität.
         if CompressionPlanner.planBilevelKind(resource: resource) == .trueBilevel {
             return options.bilevelPolicy == .auto
                 ? quickBilevelRetention(resource: resource, options: options) : nil
         }
+        guard let preset = CompressionPlanner.adaptivePreset(for: options) else { return nil }
         guard resource.terminalFilter == .dct, resource.transformCapability.isSafe,
               !resource.isImageMask, resource.pixelCount > 0 else { return nil }
         let bitsPerPixel = Double(max(resource.encodedByteCount, 0)) * 8 / Double(resource.pixelCount)
         guard bitsPerPixel > 0 else { return nil }
 
-        if preset == .small || preset == .smart,
+        if allowsPaperScanRule, preset == .small || preset == .smart,
            isFullPageScanRaster(resource, pageHasVisibleText: pageHasVisibleText),
            looksLikePaper(resource) {
             let scaled = CompressionPlanner.paperScanSize(for: resource, options: options)
@@ -467,6 +474,18 @@ enum CompressionEstimator {
         }
         return bitsPerPixel >= QuickModel.dctKeptDenseBitsPerPixel
             ? QuickModel.dctKeptDenseRetention : QuickModel.dctKeptSparseRetention
+    }
+
+    /// Masterplan B5: JPEG-Bytes je Rohbyte bei Transportfiltern vor dem
+    /// DCT-Filter – ASCII85 kodiert 4 Byte in 5 Zeichen, ASCIIHex 1 in 2.
+    static func transportHullRatio(_ resource: PDFImageResource) -> Double {
+        resource.filters.dropLast().reduce(1.0) { ratio, filter in
+            switch filter {
+            case .ascii85: return ratio * 0.8
+            case .asciiHex: return ratio * 0.5
+            default: return ratio
+            }
+        }
     }
 
     /// Bilevel läuft vor der Capability-Prüfung durch das Race; ein Schwarzweiß-
@@ -540,14 +559,12 @@ enum CompressionEstimator {
 
     /// Erwarteter Anteil der Bildbytes nach dem Lauf.
     ///
-    /// `fixedQuality` (Eigene): JPEGs innerhalb der Zielauflösung bleiben
-    /// dort unverändert (keine Leiter, kein Gate, das sie neu kodiert) –
-    /// der Stufenterm der Presets gilt für sie nicht. Ohne diese Regel
-    /// schätzte Eigene mit den Smart-Werten (220 DPI, 90 %) MEHR Ersparnis
-    /// als Smart, weil der Term bei hoher Stufe stärker schrumpft
-    /// (Rundgang 2026-10-19).
+    /// Feste Qualität (Eigene) kommt mit den Modelloptionen ihrer Stufe an
+    /// (`CompressionPlanner.estimateModelOptions`, Masterplan B5). Die frühere Sonderregel „JPEGs
+    /// im Budget bleiben“ stimmte nicht: Der Generator kodiert sie ungegated
+    /// neu und behält das Kleinere (Eigene 0,9 geschätzt 15 %, geliefert 51 %).
     static func quickRetention(resource: PDFImageResource, ratio: Double,
-                               qualityFloor: Double, fixedQuality: Bool = false) -> Double {
+                               qualityFloor: Double) -> Double {
         guard resource.transformCapability.isSafe, !resource.isImageMask else { return 1 }
         if resource.bitsPerComponent == 1 { return QuickModel.bilevelRetention }
         let resized = ratio < 0.999
@@ -556,9 +573,7 @@ enum CompressionEstimator {
         let level = qualityFloor / QuickModel.referenceFloor
         switch resource.terminalFilter {
         case .dct:
-            let kept = fixedQuality
-                ? QuickModel.dctKeptRetention
-                : min(1, QuickModel.dctKeptRetention * pow(level, QuickModel.dctKeptFloorExponent))
+            let kept = min(1, QuickModel.dctKeptRetention * pow(level, QuickModel.dctKeptFloorExponent))
             guard resized else { return kept }
             if bitsPerSample >= QuickModel.dctPhotoBitsPerSample
                 || resource.pixelCount >= QuickModel.dctPhotoMinimumPixels {
@@ -566,7 +581,7 @@ enum CompressionEstimator {
                     * pow(level, QuickModel.dctPhotoFloorExponent)
                 let bitsPerPixel = Double(max(resource.encodedByteCount, 0)) * 8
                     / Double(max(resource.pixelCount, 1))
-                let budget = fixedQuality || bitsPerPixel <= 0 ? curve
+                let budget = bitsPerPixel <= 0 ? curve
                     : ratio * QuickModel.dctResizedMaximumBits * level / bitsPerPixel
                 return min(kept, curve, budget)
             }

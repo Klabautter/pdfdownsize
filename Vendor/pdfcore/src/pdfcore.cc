@@ -4357,13 +4357,54 @@ int pdfcore_get_image_object_data(pdfcore_document_t *doc,
         if (target.isNull()) { return PDFCORE_ERR_CHECK_FAILED; }
 
         std::shared_ptr<Buffer> buf;
-        if (decoded) {
+        if (decoded == 2) {
+            // Masterplan B5: Nur die Transportfilter VOR dem letzten Filter
+            // auflösen. qpdf filtert eine Kette nur, wenn es alle Glieder auf
+            // der verlangten Stufe kann – bei [ASCII85 DCT] kämen sonst die
+            // Rohdaten. Deshalb: Rohbytes in ein Hilfsdokument, dort mit der
+            // um das letzte Glied gekürzten Kette.
+            QPDFObjectHandle dict = target.getDict();
+            QPDFObjectHandle filters = dict.getKey("/Filter");
+            QPDFObjectHandle parms = dict.getKey("/DecodeParms");
+            if (!filters.isArray() || filters.getArrayNItems() < 2) {
+                buf = target.getRawStreamData();
+            } else {
+                QPDF scratch;
+                scratch.emptyPDF();
+                QPDFObjectHandle prefix = QPDFObjectHandle::newArray();
+                QPDFObjectHandle prefixParms = QPDFObjectHandle::newArray();
+                int const n = filters.getArrayNItems() - 1;
+                for (int i = 0; i < n; ++i) {
+                    prefix.appendItem(filters.getArrayItem(i).shallowCopy());
+                    QPDFObjectHandle p = parms.isArray() && i < parms.getArrayNItems()
+                        ? parms.getArrayItem(i) : QPDFObjectHandle::newNull();
+                    prefixParms.appendItem(p.isDictionary()
+                        ? QPDFObjectHandle::parse(p.unparseResolved()) : QPDFObjectHandle::newNull());
+                }
+                std::shared_ptr<Buffer> raw = target.getRawStreamData();
+                QPDFObjectHandle tmp = QPDFObjectHandle::newStream(
+                    &scratch, std::string(reinterpret_cast<char const*>(raw->getBuffer()), raw->getSize()));
+                tmp.replaceDict(QPDFObjectHandle::newDictionary());
+                tmp.getDict().replaceKey("/Filter", prefix);
+                tmp.getDict().replaceKey("/DecodeParms", prefixParms);
+                Pl_Buffer collector("image-transport");
+                Pl_Limit collector_limit("decode-limit", &collector, pdfcore_decode_limit(target));
+                if (!tmp.pipeStreamData(&collector_limit, nullptr, 0, qpdf_dl_generalized, false, false)) {
+                    return PDFCORE_ERR_CHECK_FAILED;
+                }
+                buf = std::shared_ptr<Buffer>(collector.getBuffer());
+            }
+        } else if (decoded) {
             // pipeStreamData meldet über den Rückgabewert, ob ALLE Filter
             // aufgelöst werden konnten. Nur dann sind die Bytes echte Pixel.
             Pl_Buffer collector("image");
             Pl_Limit collector_limit("decode-limit", &collector, pdfcore_decode_limit(target));
+            // decoded == 2 (Masterplan B5): nur allgemeine Filter (ASCII85,
+            // ASCIIHex, Flate, LZW, RunLength) auflösen – ein JPEG hinter
+            // ASCII85 kommt so als JPEG an. Sonst alles bis zu den Pixeln.
             bool filtered = target.pipeStreamData(
-                &collector_limit, nullptr, 0, qpdf_dl_all, false, false);
+                &collector_limit, nullptr, 0,
+                decoded == 2 ? qpdf_dl_generalized : qpdf_dl_all, false, false);
             if (!filtered) { return PDFCORE_ERR_CHECK_FAILED; }
             buf = std::shared_ptr<Buffer>(collector.getBuffer());
         } else {
@@ -5047,27 +5088,41 @@ int pdfcore_replace_image_stream_bytes(pdfcore_document_t *doc,
         QPDFObjectHandle target = find_image_object(doc->qpdf, obj_number, generation);
         if (target.isNull()) { return PDFCORE_ERR_CHECK_FAILED; }
 
-        // Nur ein rein DCTDecode-kodierter Stream trägt rohe JPEG-Bytes;
-        // alles andere wird nicht angefasst (gleiche Politik wie der
-        // JPEG-Passthrough beim Lesen).
+        // Ein DCTDecode-Stream, höchstens mit Transportfiltern davor
+        // (ASCII85/Hex, Flate, LZW, RunLength). Die übergebenen Bytes sind
+        // ein JPEG; Vorfilter fallen weg (Masterplan B5: ASCII85 kostet ein
+        // Viertel mehr Bytes und ist nur Transportkodierung).
         QPDFObjectHandle f = dict_of(target).getKey("/Filter");
-        bool dctOnly = false;
-        if (f.isName()) {
-            dctOnly = (f.getName() == "/DCTDecode");
-        } else if (f.isArray()) {
-            auto fv = f.getArrayAsVector();
-            dctOnly = (fv.size() == 1 && fv[0].isName()
-                       && fv[0].getName() == "/DCTDecode");
+        QPDFObjectHandle parms = dict_of(target).getKey("/DecodeParms");
+        std::vector<QPDFObjectHandle> fv;
+        if (f.isName()) { fv.push_back(f); }
+        else if (f.isArray()) { fv = f.getArrayAsVector(); }
+        auto isName = [](QPDFObjectHandle h, std::initializer_list<char const*> names) {
+            if (!h.isName()) { return false; }
+            for (char const* n : names) { if (h.getName() == n) { return true; } }
+            return false;
+        };
+        if (fv.empty() || !isName(fv.back(), {"/DCTDecode", "/DCT"})) { return PDFCORE_ERR_CHECK_FAILED; }
+        for (size_t i = 0; i + 1 < fv.size(); ++i) {
+            if (!isName(fv[i], {"/ASCII85Decode", "/A85", "/ASCIIHexDecode", "/AHx", "/FlateDecode",
+                                "/Fl", "/LZWDecode", "/LZW", "/RunLengthDecode", "/RL"})) {
+                return PDFCORE_ERR_CHECK_FAILED;
+            }
         }
-        if (!dctOnly) { return PDFCORE_ERR_CHECK_FAILED; }
 
-        // replaceStreamData erhält den BISHERIGEN Filter und DecodeParms
-        // zurück: Ein leeres Handle würde /Filter durch null ERSETZEN – der
-        // Key fiele beim Schreiben weg und der JPEG-Strom verlöre seinen
-        // Filter. So bleibt das Wörterbuch exakt, wie es war, bis auf /Length.
         std::string data(reinterpret_cast<const char *>(bytes), len);
-        target.replaceStreamData(data, dict_of(target).getKey("/Filter"),
-                                 dict_of(target).getKey("/DecodeParms"));
+        if (fv.size() == 1) {
+            // replaceStreamData erhält den BISHERIGEN Filter und DecodeParms
+            // zurück: Ein leeres Handle würde /Filter durch null ERSETZEN – der
+            // Key fiele beim Schreiben weg und der JPEG-Strom verlöre seinen
+            // Filter. So bleibt das Wörterbuch exakt, wie es war, bis auf /Length.
+            target.replaceStreamData(data, f, parms);
+        } else {
+            QPDFObjectHandle dctParms = parms.isArray() && parms.getArrayNItems() == static_cast<int>(fv.size())
+                ? parms.getArrayItem(static_cast<int>(fv.size()) - 1) : QPDFObjectHandle::newNull();
+            target.replaceStreamData(data, QPDFObjectHandle::newName("/DCTDecode"),
+                                     dctParms.isDictionary() ? dctParms : QPDFObjectHandle::newNull());
+        }
         return PDFCORE_OK;
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
@@ -5318,8 +5373,12 @@ int pdfcore_get_object_stream_bytes(pdfcore_document_t *doc,
             // niemals Ersatzdaten liefern.
             Pl_Buffer collector("object-stream");
             Pl_Limit collector_limit("decode-limit", &collector, pdfcore_decode_limit(target));
+            // decoded == 2 (Masterplan B5): nur allgemeine Filter (ASCII85,
+            // ASCIIHex, Flate, LZW, RunLength) auflösen – ein JPEG hinter
+            // ASCII85 kommt so als JPEG an. Sonst alles bis zu den Pixeln.
             bool filtered = target.pipeStreamData(
-                &collector_limit, nullptr, 0, qpdf_dl_all, false, false);
+                &collector_limit, nullptr, 0,
+                decoded == 2 ? qpdf_dl_generalized : qpdf_dl_all, false, false);
             if (!filtered) { return PDFCORE_ERR_CHECK_FAILED; }
             buf = std::shared_ptr<Buffer>(collector.getBuffer());
         } else {
