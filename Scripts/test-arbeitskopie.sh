@@ -81,9 +81,15 @@ for pair in \
     export "TEST_RUNNER_$name=$value"
 done
 
+# UI-Tests (G3) brauchen die Bedienungshilfen-Freigabe für den Test-Runner –
+# beim ersten Mal fragt macOS. Sie laufen nur über Scripts/ui-tests.sh
+# (PDFDOWNSIZE_UI_TESTS=1), nie nebenbei in einem Unit-Lauf.
+SKIP_UI=(-skip-testing:PDFToolsUITests)
+[ "${PDFDOWNSIZE_UI_TESTS:-0}" = 1 ] && SKIP_UI=()
+
 status=0
 (cd "$ARBEITSKOPIE" && xcodebuild test -scheme PDFTools -destination 'platform=macOS' \
-    -parallel-testing-enabled NO "$@") || status=$?
+    -parallel-testing-enabled NO "${SKIP_UI[@]}" "$@") || status=$?
 
 # Artefakte zurück; im Projekt wird nichts gelöscht.
 rsync -a --exclude '**/outputs' "$ARBEITSKOPIE/benchmark/" "$ROOT/benchmark/"

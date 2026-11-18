@@ -83,6 +83,12 @@ struct RootView: View {
         .frame(minWidth: minWidth, minHeight: 640)
         // Dateien öffnen (Finder/Dock/Open With) – immer ins aktive Tool routen.
         .onOpenURL { url in receive([url]) }
+        // Masterplan G3: `--open <pfad> [<pfad> …]` beim Start – für UI-Tests,
+        // damit kein Dateidialog nötig ist. Derselbe Weg wie „Öffnen mit“.
+        .task {
+            if let tool = Self.launchArgumentTool() { selectedTool = tool }
+            receive(Self.launchArgumentFiles())
+        }
         .onReceive(NotificationCenter.default.publisher(for: OpenFilesDelegate.didReceiveFiles)) { note in
             receive(note.object as? [URL] ?? [])
         }
@@ -241,6 +247,19 @@ struct RootView: View {
         case .ocr:
             return ocrVM.pdfURL?.lastPathComponent
         }
+    }
+
+    /// `--tool compress|organize|convert|ocr` beim Start (G3).
+    static func launchArgumentTool(_ arguments: [String] = CommandLine.arguments) -> AppTool? {
+        guard let index = arguments.firstIndex(of: "--tool"), index + 1 < arguments.count else { return nil }
+        return AppTool(rawValue: arguments[index + 1])
+    }
+
+    /// Pfade hinter `--open` bis zum nächsten `--`-Argument.
+    static func launchArgumentFiles(_ arguments: [String] = CommandLine.arguments) -> [URL] {
+        guard let index = arguments.firstIndex(of: "--open") else { return [] }
+        return arguments[(index + 1)...].prefix { !$0.hasPrefix("--") }
+            .map { URL(fileURLWithPath: $0) }
     }
 
     /// Sammelt eingehende Dateien kurz und routet sie als einen Stapel.
