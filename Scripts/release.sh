@@ -173,6 +173,8 @@ xcodebuild build -project PDFTools.xcodeproj -scheme PDFTools \
 BUILD_STATUS="${PIPESTATUS[0]}"
 set -e
 [ "$BUILD_STATUS" -eq 0 ] || { echo "Build fehlgeschlagen (Status $BUILD_STATUS)" >&2; exit 1; }
+# Die Abnahme steckt jetzt im Bundle; die versionierte Vorgabe zurück.
+git checkout -- Scripts/release-acceptance.plist
 
 APP="$DERIVED/Build/Products/Release/PDFdownsize.app"
 [ -d "$APP" ] || { echo "Build fehlgeschlagen: $APP fehlt" >&2; exit 1; }

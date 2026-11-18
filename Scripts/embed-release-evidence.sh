@@ -14,15 +14,7 @@ for path in \
     test -s "$ROOT/$path"
     cp -f "$ROOT/$path" "$DEST/"
 done
-# Die Abnahme schreibt Scripts/gate.sh (G1). Ohne Gate-Lauf – jeder
-# Entwicklungsbuild – trägt das Bundle ausdrücklich „nicht abgenommen“.
-ACCEPTANCE="$ROOT/Scripts/release-acceptance.plist"
-if [ -f "$ACCEPTANCE" ]; then
-    /usr/bin/plutil -lint "$ACCEPTANCE" >/dev/null
-    cp -f "$ACCEPTANCE" "$DEST/release-acceptance.plist"
-else
-    rm -f "$DEST/release-acceptance.plist"
-    /usr/bin/plutil -create xml1 "$DEST/release-acceptance.plist"
-    /usr/bin/plutil -insert accepted -bool false "$DEST/release-acceptance.plist"
-    /usr/bin/plutil -insert reason -string "Scripts/gate.sh ist für diesen Build nicht gelaufen" "$DEST/release-acceptance.plist"
-fi
+# Die Abnahme schreibt Scripts/gate.sh (G1) über die versionierte Vorgabe
+# (accepted = false). release.sh stellt die Vorgabe nach dem Build wieder her.
+/usr/bin/plutil -lint "$ROOT/Scripts/release-acceptance.plist" >/dev/null
+cp -f "$ROOT/Scripts/release-acceptance.plist" "$DEST/"

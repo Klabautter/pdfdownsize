@@ -39,7 +39,5 @@ REVIEW_2026-09-26.md
 REVIEW_2026-10-09.md
 *.profraw
 
-# Vom Gate geschrieben (Scripts/gate.sh), nie versioniert
-Scripts/release-acceptance.plist
 # Lokale Release-Kennungen (Team-ID, Notar-Profil)
 Scripts/release.local.env

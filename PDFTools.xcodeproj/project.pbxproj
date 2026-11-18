@@ -195,6 +195,7 @@
 			);
 			inputPaths = (
 				"$(SRCROOT)/Scripts/embed-release-evidence.sh",
+				"$(SRCROOT)/Scripts/release-acceptance.plist",
 				"$(SRCROOT)/Vendor/qpdf/qpdf",
 				"$(SRCROOT)/Vendor/qpdf/LICENSE-qpdf.txt",
 				"$(SRCROOT)/Vendor/qpdf/NOTICE-qpdf.md",

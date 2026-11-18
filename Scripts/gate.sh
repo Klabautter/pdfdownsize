@@ -24,7 +24,6 @@ for arg in "$@"; do
 done
 
 ACCEPTANCE="$ROOT/Scripts/release-acceptance.plist"
-rm -f "$ACCEPTANCE"   # Ein altes „bestanden“ gilt nie für einen neuen Lauf.
 
 [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] || { echo "✗ Nicht auf main" >&2; exit 1; }
 if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
@@ -33,6 +32,8 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     exit 1
 fi
 COMMIT="$(git rev-parse HEAD)"
+# Die versionierte Vorgabe sagt „nicht abgenommen“; erst ein grüner Lauf
+# überschreibt sie (nach der Sauberkeitsprüfung oben).
 LOGDIR="${TMPDIR:-/tmp}"; LOGDIR="${LOGDIR%/}/pdfdownsize-gate-${COMMIT:0:12}"
 mkdir -p "$LOGDIR"
 echo "→ Gate für ${COMMIT:0:12}, Protokolle: $LOGDIR"
@@ -70,6 +71,7 @@ if [ "$FULL" -eq 1 ]; then
     [ "$STATUS" -eq 0 ] || { echo "✗ Volle Suite rot" >&2; exit 1; }
 fi
 
+rm -f "$ACCEPTANCE"
 /usr/bin/plutil -create xml1 "$ACCEPTANCE"
 /usr/bin/plutil -insert accepted -bool true "$ACCEPTANCE"
 /usr/bin/plutil -insert commit -string "$COMMIT" "$ACCEPTANCE"
