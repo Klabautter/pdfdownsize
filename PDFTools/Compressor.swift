@@ -428,6 +428,7 @@ struct Compressor {
 
         // Validierung eines Struktur-Outputs; der Test-Seam (V2-5) ersetzt
         // den Standard-Validator, nil heißt Produktverhalten.
+        var referenceUnreadable: String?
         var referenceSnapshot: PDFSemanticSnapshot?
         func validate(_ url: URL) -> PDFValidator.Report {
             // Masterplan C2, Schritt 1: Größe zuerst. Ist die Ausgabe nicht
@@ -449,8 +450,25 @@ struct Compressor {
                 if let hooked = qaValidationHook?(url) { return hooked }
                 // C2, Schritt 2: Die Referenz einmal je Operation erfassen und
                 // an alle Validierungen (Erstlauf, Re-Plans) weiterreichen.
+                // Masterplan D5: Ist die Referenz nicht messbar (Textextraktion
+                // im Zeitlimit), gilt das für jede weitere Validierung auch –
+                // sofort ablehnen statt bei jedem Re-Plan erneut zu warten.
+                if let unreadable = referenceUnreadable {
+                    var failed = PDFValidator.Report()
+                    failed.fail(unreadable, ValidationFinding(kind: .text, severity: .error,
+                                                              pages: [], message: unreadable))
+                    return failed
+                }
                 if referenceSnapshot == nil {
-                    referenceSnapshot = try? PDFSemanticSnapshot.capture(inputURL)
+                    do {
+                        referenceSnapshot = try PDFSemanticSnapshot.capture(inputURL)
+                    } catch let timeout as PDFSemanticSnapshot.SnapshotError {
+                        referenceUnreadable = timeout.localizedDescription
+                        return validate(url)
+                    } catch {
+                        // Andere Fehler: der Validator erfasst die Referenz selbst
+                        // und meldet sie dort (unverändertes Verhalten).
+                    }
                 }
                 return PDFValidator.validate(
                     outputURL: url, referenceURL: inputURL,
@@ -553,7 +571,10 @@ struct Compressor {
             var overrides = DecisionOverrides()
             var replans = 0
 
-            while !report.isValid, replans < RollbackPlanner.maximumReplanAttempts {
+            // Masterplan D5: Ist die Referenz selbst nicht messbar, kann kein
+            // Re-Plan helfen – die Kette entfällt (fail-closed wie bisher).
+            while !report.isValid, referenceUnreadable == nil,
+                  replans < RollbackPlanner.maximumReplanAttempts {
                 if let isCancelled, isCancelled() { throw CancellationError() }
                 // Kostenkontrolle (§11.5): kein Re-Plan ohne Zeitbudget.
                 let elapsed = stageMs(since: chainStart) / 1000.0
@@ -584,7 +605,7 @@ struct Compressor {
             // Endstufe (§11.5): safe lossless plan – JEDE transformierte
             // Ressource auf ihre konservativste lossless Stufe bzw. KEEP.
             // Gelingt auch das nicht, fail-closed wie bisher (Original).
-            if !report.isValid {
+            if !report.isValid, referenceUnreadable == nil {
                 if let isCancelled, isCancelled() { throw CancellationError() }
                 let elapsed = stageMs(since: chainStart) / 1000.0
                 let safe = RollbackPlanner.forcedLosslessOverrides(plan: outcome.plan)

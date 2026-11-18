@@ -280,6 +280,14 @@ enum PDFValidator {
                 snapshotError = error
             }
         }
+        // Masterplan D5: Lief die Textextraktion ins Zeitlimit, darf keine
+        // zweite, ungeschützte Extraktion folgen (sie hinge genauso). Die
+        // Prüfung gilt als nicht bestanden – das Original bleibt.
+        if let timeout = snapshotError as? PDFSemanticSnapshot.SnapshotError {
+            let message = timeout.localizedDescription
+            report.fail(message, ValidationFinding(kind: .text, severity: .error, pages: [], message: message))
+            return report
+        }
 
         validateStructure(outDoc,
                           expectedPageCount: policy.expectedPageCount,

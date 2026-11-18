@@ -176,14 +176,14 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
             guard let doc = PDFDocument(url: url), !doc.isLocked else {
                 throw CocoaError(.fileReadCorruptFile)
             }
-            return capture(doc, pages: parallelPages(url: url, pageCount: doc.pageCount))
+            return try capture(doc, pages: Self.collectedPages(doc, url: url))
         case .libQPDF:
             return try captureViaLibQPDF(url)
         case .merged:
             guard let doc = PDFDocument(url: url), !doc.isLocked else {
                 throw CocoaError(.fileReadCorruptFile)
             }
-            var snapshot = capture(doc, pages: parallelPages(url: url, pageCount: doc.pageCount))
+            var snapshot = capture(doc, pages: try Self.collectedPages(doc, url: url))
             snapshot.backend = .merged
             // Dokumentstrukturen kommen von libqpdf: PDFKit meldet Named
             // Destinations, Page Labels, Attachments und Feldwerte nicht
@@ -222,6 +222,41 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
         var pages: [PageSnapshot] = []
         var fields: [FormSnapshot.Field] = []
         var externalURLs: [String] = []
+        /// Masterplan D5: Die Textextraktion einer Seite lief ins Zeitlimit;
+        /// danach wird das Dokument nicht weiter angefasst.
+        var textTimedOut = false
+        var timedOutPage = 0
+    }
+
+    enum SnapshotError: LocalizedError {
+        case textExtractionTimedOut(page: Int)
+        var errorDescription: String? {
+            switch self {
+            case .textExtractionTimedOut(let page):
+                return String(localized: "Der Text von Seite \(page + 1) ließ sich nicht in angemessener Zeit lesen.")
+            }
+        }
+    }
+
+    /// Masterplan D5 (Fuzz-Fund): PDFKits `PDFPage.string` kam bei einer
+    /// mutierten Seite nicht mehr zurück (Textlayout in CoreGraphics, > 300 s;
+    /// das Original brauchte 5 s für alles). Der Aufruf lässt sich nicht
+    /// abbrechen – also mit Zeitlimit auf einem eigenen Thread. Läuft es ab,
+    /// gilt die Seite als nicht messbar und das Dokument wird nicht weiter
+    /// benutzt; der stehengebliebene Thread hält seine eigene Referenz.
+    static let pageTextTimeout: Double = 15
+
+    static func boundedText(_ page: PDFPage) -> String? {
+        final class Box: @unchecked Sendable { var text: String? }
+        let box = Box()
+        let done = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) let page = page
+        Thread.detachNewThread {
+            box.text = page.string ?? ""
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + pageTextTimeout) == .success else { return nil }
+        return box.text
     }
 
     /// Masterplan C2: Ab `parallelPageThreshold` Seiten wird der Seitenteil
@@ -237,7 +272,7 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
             let range = (w * chunk)..<min(pageCount, (w + 1) * chunk)
             guard let doc = PDFDocument(url: url), !doc.isLocked else { return nil }
             var part = PagePart()
-            for i in range { collectPage(doc, index: i, into: &part) }
+            for i in range where !part.textTimedOut { collectPage(doc, index: i, into: &part) }
             return part
         }
         var merged = PagePart()
@@ -246,15 +281,30 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
             merged.pages += part.pages
             merged.fields += part.fields
             merged.externalURLs += part.externalURLs
+            merged.textTimedOut = merged.textTimedOut || part.textTimedOut
         }
         return merged
+    }
+
+    /// Seitenteil (parallel ab der Schwelle, sonst seriell); wirft, wenn die
+    /// Textextraktion einer Seite ins Zeitlimit lief (D5).
+    static func collectedPages(_ doc: PDFDocument, url: URL) throws -> PagePart {
+        var part: PagePart
+        if let parallel = parallelPages(url: url, pageCount: doc.pageCount) {
+            part = parallel
+        } else {
+            part = PagePart()
+            for i in 0..<doc.pageCount where !part.textTimedOut { collectPage(doc, index: i, into: &part) }
+        }
+        if part.textTimedOut { throw SnapshotError.textExtractionTimedOut(page: part.timedOutPage) }
+        return part
     }
 
     static func capture(_ doc: PDFDocument, pages precomputed: PagePart? = nil) -> PDFSemanticSnapshot {
         autoreleasepool {
         var part = precomputed ?? PagePart()
         if precomputed == nil {
-            for i in 0..<doc.pageCount { collectPage(doc, index: i, into: &part) }
+            for i in 0..<doc.pageCount where !part.textTimedOut { collectPage(doc, index: i, into: &part) }
         }
         let pages = part.pages
         let fields = part.fields
@@ -285,7 +335,11 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
                 if let url = a.url?.absoluteString { part.externalURLs.append(url) }
             }
 
-            let text = page.string ?? ""
+            guard let text = Self.boundedText(page) else {
+                part.textTimedOut = true
+                part.timedOutPage = i
+                return
+            }
             part.pages.append(PageSnapshot(
                 index: i,
                 mediaBox: [media.minX, media.minY, media.maxX, media.maxY],

@@ -35,3 +35,4 @@ TransportFilteredJPEGTests
 PasswordUnlockToolsE2ETests
 LinearizedInputTests
 LowPotentialNoteTests
+FuzzFindingsTests
