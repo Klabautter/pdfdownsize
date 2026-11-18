@@ -1,4 +1,5 @@
 import Foundation
+import pdfcore
 import AppKit
 import PDFKit
 import Combine
@@ -29,6 +30,15 @@ final class OCRViewModel: ObservableObject {
 
     @Published var stage: Stage = .choose
     @Published var pdfURL: URL?
+
+    /// Masterplan B2: entsperrte PDF (Passwort nur im Speicher). Erhebung und
+    /// Lauf arbeiten auf der Arbeitskopie; gesichert wird mit der
+    /// Verschlüsselung des Originals.
+    @Published private(set) var unlocked: UnlockedDocument?
+    @Published private(set) var passwordError: String?
+    @Published private(set) var isUnlocking = false
+    /// Die Datei, die gelesen wird.
+    var workingURL: URL? { unlocked?.workingCopy ?? pdfURL }
     @Published var languagePreset: OCREngine.OCRLanguagePreset = .germanEnglish
 
     var isWorking: Bool {
@@ -316,6 +326,7 @@ final class OCRViewModel: ObservableObject {
             surveyTask?.cancel()
             survey = nil
             pageCount = 0
+            discardUnlocked()
             pdfURL = first
             errorMessage = nil
             stage = .ready
@@ -342,32 +353,79 @@ final class OCRViewModel: ObservableObject {
                     self.hasSignature = signed
                 }
             }
-            surveyTask = Task { @MainActor in
-                // Kein `try?` mehr (B1): Ein Fehler hier ist eine Auskunft.
-                // Eine gesperrte oder kaputte Datei meldet die Vorprüfung
-                // selbst; alles andere steht als Hinweis im Pult.
-                let result: OCREngine.TextSurvey
-                do {
-                    result = try await OCREngine.surveyExistingText(sourceURL: first)
-                } catch is CancellationError {
-                    return
-                } catch {
-                    guard !Task.isCancelled, pdfURL == first, stage == .ready else { return }
-                    errorMessage = error.localizedDescription
-                    return
-                }
-                guard !Task.isCancelled, pdfURL == first, stage == .ready else { return }
-                survey = result
-                if result.allHaveText {
-                    // Der vorhandene Text steht sofort in der Spalte.
-                    pageResults = result.pagesWithText
-                }
-            }
+            startSurvey(source: first, reading: first)
         } else if !images.isEmpty {
             errorMessage = String(localized: "Bilder bitte zuerst unter „Konvertieren“ als PDF sichern.")
         } else if !urls.isEmpty {
             errorMessage = String(localized: "OCR braucht eine PDF-Datei.")
         }
+    }
+
+    /// Erhebung des vorhandenen Texts. `reading` ist bei einer entsperrten
+    /// Datei die Arbeitskopie.
+    private func startSurvey(source: URL, reading: URL) {
+        surveyTask?.cancel()
+        surveyTask = Task { @MainActor in
+            // Kein `try?` mehr (B1): Ein Fehler hier ist eine Auskunft.
+            // Eine gesperrte oder kaputte Datei meldet die Vorprüfung
+            // selbst; alles andere steht als Hinweis im Pult.
+            let result: OCREngine.TextSurvey
+            do {
+                result = try await OCREngine.surveyExistingText(sourceURL: reading)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled, pdfURL == source, stage == .ready else { return }
+                errorMessage = error.localizedDescription
+                return
+            }
+            guard !Task.isCancelled, pdfURL == source, stage == .ready else { return }
+            survey = result
+            if result.allHaveText {
+                // Der vorhandene Text steht sofort in der Spalte.
+                pageResults = result.pagesWithText
+            }
+        }
+    }
+
+    /// B2: Passwort prüfen, Arbeitskopie anlegen, Erhebung darauf starten.
+    func unlock(password: String) {
+        guard stage == .rejected(.locked), let url = pdfURL, !password.isEmpty, !isUnlocking else { return }
+        isUnlocking = true
+        passwordError = nil
+        Task.detached(priority: .userInitiated) {
+            let outcome: Result<(UnlockedDocument, Int), Error>
+            do {
+                guard case .ok(let pages) = DocumentProbe.inspect(url, password: password) else {
+                    throw PDFCoreError.openFailed(code: PDFCORE_ERR_PASSWORD.rawValue)
+                }
+                outcome = .success((try UnlockedDocument.unlock(url, password: password), pages))
+            } catch {
+                outcome = .failure(error)
+            }
+            await MainActor.run {
+                self.isUnlocking = false
+                guard self.pdfURL == url, self.stage == .rejected(.locked) else {
+                    if case .success(let done) = outcome { done.0.discard() }
+                    return
+                }
+                switch outcome {
+                case .success(let (unlocked, pages)):
+                    self.unlocked = unlocked
+                    self.pageCount = pages
+                    self.stage = .ready
+                    self.startSurvey(source: url, reading: unlocked.workingCopy)
+                case .failure:
+                    self.passwordError = String(localized: "Das Passwort stimmt nicht.")
+                }
+            }
+        }
+    }
+
+    private func discardUnlocked() {
+        unlocked?.discard()
+        unlocked = nil
+        passwordError = nil
     }
 
     func reset() {
@@ -380,6 +438,7 @@ final class OCRViewModel: ObservableObject {
         discardUnsavedOutput()
         stage = .choose
         pdfURL = nil
+        discardUnlocked()
         progress = 0
         statusLabel = ""
         pageResults = []
@@ -402,7 +461,7 @@ final class OCRViewModel: ObservableObject {
     // MARK: Lauf
 
     func runOCR() {
-        guard stage == .ready, let url = pdfURL, !isWorking, !needsNoRecognition else { return }
+        guard stage == .ready, let url = workingURL, !isWorking, !needsNoRecognition else { return }
         discardUnsavedOutput()
         let runID = UUID()
         operationID = runID
@@ -536,23 +595,33 @@ final class OCRViewModel: ObservableObject {
         let guardian = SourceNameGuard(sources: pdfURL.map { [$0] } ?? [])
         panel.delegate = guardian
         guard panel.runModal() == .OK, let dest = panel.url else { return }
-        // „Das Original bleibt unverändert" – also auch nicht überschreiben
-        // (Befund B12, Review 2026-10-09).
-        if let source = pdfURL, SourceOverwrite.isSource(dest, among: [source]) {
-            errorMessage = SourceOverwrite.message
-            return
-        }
         do {
-            if FileManager.default.fileExists(atPath: dest.path) {
-                _ = try FileManager.default.replaceItemAt(dest, withItemAt: temp)
-            } else {
-                try FileManager.default.moveItem(at: temp, to: dest)
-            }
-            outputURL = nil
-            savedURL = dest
+            try saveOutcome(to: dest)
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Sichert das Ergebnis an ein gegebenes Ziel (ohne Dialog).
+    func saveOutcome(to dest: URL) throws {
+        guard canSaveSearchablePDF, let temp = outputURL else { return }
+        // „Das Original bleibt unverändert" – also auch nicht überschreiben
+        // (Befund B12, Review 2026-10-09; Masterplan E3).
+        try SourceOverwrite.check(dest, sources: pdfURL.map { [$0] } ?? [])
+        // B2: Eine entsperrte Datei geht mit ihrem Passwort zurück.
+        var payload = temp
+        if let unlocked {
+            payload = SessionScratch.makeURL(prefix: "locked-")
+            try unlocked.reencrypt(temp, to: payload)
+        }
+        if FileManager.default.fileExists(atPath: dest.path) {
+            _ = try FileManager.default.replaceItemAt(dest, withItemAt: payload)
+        } else {
+            try FileManager.default.moveItem(at: payload, to: dest)
+        }
+        if payload != temp { try? FileManager.default.removeItem(at: temp) }
+        outputURL = nil
+        savedURL = dest
     }
 
     // MARK: - Intern

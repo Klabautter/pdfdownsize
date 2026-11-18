@@ -24,7 +24,10 @@ struct ConvertView: View {
                 RejectedDocumentView(fileName: vm.pdfURL?.lastPathComponent ?? "",
                                      verdict: verdict,
                                      onChooseOther: { vm.wantsFiles = true },
-                                     onClose: { vm.reset() })
+                                     onClose: { vm.reset() },
+                                     onUnlock: { vm.unlock(password: $0) },
+                                     passwordError: vm.passwordError,
+                                     isUnlocking: vm.isUnlocking)
             case .ready, .working, .done:
                 workingState
             }
@@ -118,7 +121,7 @@ struct ConvertView: View {
 
     private var workingState: some View {
         ToolWorkspace {
-            if vm.direction == .pdfToImages, let url = vm.pdfURL {
+            if vm.direction == .pdfToImages, let url = vm.workingURL {
                 DocumentPreview(url: url, scanning: vm.isWorking)
             } else {
                 ImageSheetGrid(urls: vm.imageURLs)

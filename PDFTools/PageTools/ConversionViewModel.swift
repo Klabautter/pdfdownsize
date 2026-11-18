@@ -1,4 +1,5 @@
 import Foundation
+import pdfcore
 import AppKit
 import PDFKit
 import Combine
@@ -32,6 +33,51 @@ final class ConversionViewModel: ObservableObject {
     @Published var direction: Direction?
 
     @Published var pdfURL: URL?
+
+    /// Masterplan B2: entsperrte PDF (Passwort nur im Speicher). Gelesen wird
+    /// die Arbeitskopie; Bilder tragen keine Verschlüsselung.
+    @Published private(set) var unlocked: UnlockedDocument?
+    @Published private(set) var passwordError: String?
+    @Published private(set) var isUnlocking = false
+    var workingURL: URL? { unlocked?.workingCopy ?? pdfURL }
+
+    /// B2: Passwort prüfen, Arbeitskopie anlegen.
+    func unlock(password: String) {
+        guard stage == .rejected(.locked), let url = pdfURL, !password.isEmpty, !isUnlocking else { return }
+        isUnlocking = true
+        passwordError = nil
+        Task.detached(priority: .userInitiated) {
+            let outcome: Result<UnlockedDocument, Error>
+            do {
+                guard DocumentProbe.inspect(url, password: password).isOK else {
+                    throw PDFCoreError.openFailed(code: PDFCORE_ERR_PASSWORD.rawValue)
+                }
+                outcome = .success(try UnlockedDocument.unlock(url, password: password))
+            } catch {
+                outcome = .failure(error)
+            }
+            await MainActor.run {
+                self.isUnlocking = false
+                guard self.pdfURL == url, self.stage == .rejected(.locked) else {
+                    if case .success(let done) = outcome { done.discard() }
+                    return
+                }
+                switch outcome {
+                case .success(let unlocked):
+                    self.unlocked = unlocked
+                    self.stage = .ready
+                case .failure:
+                    self.passwordError = String(localized: "Das Passwort stimmt nicht.")
+                }
+            }
+        }
+    }
+
+    private func discardUnlocked() {
+        unlocked?.discard()
+        unlocked = nil
+        passwordError = nil
+    }
     @Published var imageURLs: [URL] = []
 
     /// Geteilte Export-Einstellungen (Single Source of Truth mit Organize,
@@ -74,6 +120,7 @@ final class ConversionViewModel: ObservableObject {
 
         if let first = pdfs.first {
             direction = .pdfToImages
+            discardUnlocked()
             pdfURL = first
             imageURLs = []
             errorMessage = nil
@@ -92,6 +139,7 @@ final class ConversionViewModel: ObservableObject {
         } else if !images.isEmpty {
             direction = .imagesToPdf
             imageURLs = images
+            discardUnlocked()
             pdfURL = nil
             errorMessage = nil
             stage = .ready
@@ -118,6 +166,7 @@ final class ConversionViewModel: ObservableObject {
         stage = .choose
         direction = nil
         pdfURL = nil
+        discardUnlocked()
         imageURLs = []
         progress = 0
         statusLabel = ""
@@ -164,7 +213,7 @@ final class ConversionViewModel: ObservableObject {
             errorMessage = error.localizedDescription
             return
         }
-        guard !isWorking, direction == .pdfToImages, let url = pdfURL else { return }
+        guard !isWorking, direction == .pdfToImages, let url = workingURL else { return }
         if case .rejected = stage { return }
         let options = exportSettings.options
         let runID = UUID()

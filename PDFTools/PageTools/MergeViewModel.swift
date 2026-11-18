@@ -1,4 +1,5 @@
 import Foundation
+import pdfcore
 import PDFKit
 import AppKit
 import SwiftUI
@@ -216,7 +217,68 @@ final class MergeViewModel: ObservableObject {
     private enum ImportScan: Sendable {
         case pdf(url: URL, pageCount: Int, signed: Bool)
         case image(original: URL, converted: URL, pageCount: Int)
+        case locked(URL)
         case failed(String)
+    }
+
+    // MARK: - Masterplan B2: gesperrte PDFs
+
+    /// Gesperrte PDFs aus dem Import, die auf ihr Passwort warten (die erste
+    /// wird angezeigt).
+    @Published private(set) var lockedPending: [URL] = []
+    @Published private(set) var passwordError: String?
+    @Published private(set) var isUnlocking = false
+    /// Arbeitskopie → entsperrtes Original. Passwort nur im Speicher; die
+    /// Kopien liegen im Sitzungsordner und gehen beim Beenden weg.
+    private(set) var unlockedSources: [URL: UnlockedDocument] = [:]
+
+    /// Die Originale entsperrter Quellen – für die Sichern-Prüfung (E3) und
+    /// den Verlusthinweis (E2).
+    var unlockedOriginalNames: [URL: String] {
+        unlockedSources.mapValues { $0.original.lastPathComponent }
+    }
+
+    func unlockPending(password: String) {
+        guard let url = lockedPending.first, !password.isEmpty, !isUnlocking else { return }
+        isUnlocking = true
+        passwordError = nil
+        Task.detached(priority: .userInitiated) {
+            let outcome: Result<(UnlockedDocument, Int), Error>
+            do {
+                guard case .ok(let pages) = DocumentProbe.inspect(url, password: password) else {
+                    throw PDFCoreError.openFailed(code: PDFCORE_ERR_PASSWORD.rawValue)
+                }
+                outcome = .success((try UnlockedDocument.unlock(url, password: password), pages))
+            } catch {
+                outcome = .failure(error)
+            }
+            await MainActor.run {
+                self.isUnlocking = false
+                guard self.lockedPending.first == url else {
+                    if case .success(let done) = outcome { done.0.discard() }
+                    return
+                }
+                switch outcome {
+                case .success(let (unlocked, pages)):
+                    self.lockedPending.removeFirst()
+                    self.unlockedSources[unlocked.workingCopy] = unlocked
+                    let source = SourceDocument(url: unlocked.workingCopy, pageCount: pages,
+                                                displayFileName: url.lastPathComponent)
+                    self.performEdit(String(localized: "Dokumente hinzufügen"), syncBaseline: true) { p in
+                        p.documents.append(source)
+                        p.pages.append(contentsOf: (0..<pages).map { PageItem(source: source, pageIndex: $0) })
+                    }
+                case .failure:
+                    self.passwordError = String(localized: "Das Passwort stimmt nicht.")
+                }
+            }
+        }
+    }
+
+    func skipPendingLocked() {
+        guard !lockedPending.isEmpty else { return }
+        lockedPending.removeFirst()
+        passwordError = nil
     }
 
     func importDocuments(_ urls: [URL]) {
@@ -243,6 +305,10 @@ final class MergeViewModel: ObservableObject {
                     // Dieselbe Vorprüfung wie in den anderen Werkzeugen (B1):
                     // benannter Grund statt „nicht lesbar oder geschützt“.
                     let verdict = DocumentProbe.inspect(url)
+                    if verdict == .locked {
+                        result.append(.locked(url))
+                        continue
+                    }
                     guard verdict.isOK else {
                         result.append(.failed("\(url.lastPathComponent): \(verdict.title)"))
                         continue
@@ -271,6 +337,8 @@ final class MergeViewModel: ObservableObject {
                 switch entry {
                 case .failed(let message):
                     errorMessage = message
+                case .locked(let url):
+                    if !lockedPending.contains(url) { lockedPending.append(url) }
                 case .pdf(let url, let pageCount, let signed):
                     let source = SourceDocument(url: url, pageCount: pageCount)
                     addedPages.append(contentsOf: (0..<pageCount).map {
@@ -774,7 +842,8 @@ final class MergeViewModel: ObservableObject {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.nameFieldStringValue = suggestedFileName(for: outcome)
-        let guardian = SourceNameGuard(sources: project.documents.map(\.url))
+        let guardian = SourceNameGuard(sources: project.documents.map(\.url)
+                                       + unlockedSources.values.map(\.original))
         panel.delegate = guardian
 
         guard panel.runModal() == .OK, let dest = panel.url else { return nil }
@@ -789,13 +858,25 @@ final class MergeViewModel: ObservableObject {
 
     /// Sichert ein Ergebnis an ein gegebenes Ziel (ohne Dialog).
     func saveOutcome(_ outcome: MergeOutcome, to dest: URL) throws {
-        // E3: Kein Ergebnis über eine der Quellen des Projekts.
-        try SourceOverwrite.check(dest, sources: project.documents.map(\.url))
-        if FileManager.default.fileExists(atPath: dest.path) {
-            _ = try FileManager.default.replaceItemAt(dest, withItemAt: outcome.url)
-        } else {
-            try FileManager.default.moveItem(at: outcome.url, to: dest)
+        // E3: Kein Ergebnis über eine der Quellen des Projekts – auch nicht
+        // über das Original einer entsperrten Quelle.
+        try SourceOverwrite.check(dest, sources: project.documents.map(\.url)
+                                  + unlockedSources.values.map(\.original))
+        // B2: Stammt alles aus EINER entsperrten Quelle, geht das Ergebnis
+        // mit ihrem Passwort zurück. Bei mehreren Quellen nennt der Hinweis
+        // vor „PDF erstellen" den Verlust (E2).
+        var payload = outcome.url
+        let sources = Set(project.pages.map(\.sourceURL))
+        if sources.count == 1, let only = sources.first, let unlocked = unlockedSources[only] {
+            payload = SessionScratch.makeURL(prefix: "locked-")
+            try unlocked.reencrypt(outcome.url, to: payload)
         }
+        if FileManager.default.fileExists(atPath: dest.path) {
+            _ = try FileManager.default.replaceItemAt(dest, withItemAt: payload)
+        } else {
+            try FileManager.default.moveItem(at: payload, to: dest)
+        }
+        if payload != outcome.url { try? FileManager.default.removeItem(at: outcome.url) }
         outcomeState = .saved(outcome, to: dest)
     }
 

@@ -15,6 +15,8 @@ struct RejectedDocumentView: View {
     var onUnlock: ((String) -> Void)? = nil
     var passwordError: String? = nil
     var isUnlocking = false
+    /// Beschriftung des Ausweichknopfs (Organisieren: „Überspringen“).
+    var chooseOtherLabel: String? = nil
 
     @State private var password = ""
     @FocusState private var passwordFocused: Bool
@@ -65,10 +67,10 @@ struct RejectedDocumentView: View {
                     Button("Schließen", action: onClose)
                         .buttonStyle(.bordered)
                     if verdict == .locked && onUnlock != nil {
-                        Button("Andere PDF wählen …", action: onChooseOther)
+                        Button(chooseOtherLabel ?? String(localized: "Andere PDF wählen …"), action: onChooseOther)
                             .buttonStyle(.bordered)
                     } else {
-                        Button("Andere PDF wählen …", action: onChooseOther)
+                        Button(chooseOtherLabel ?? String(localized: "Andere PDF wählen …"), action: onChooseOther)
                             .buttonStyle(.borderedProminent)
                             .keyboardShortcut(.defaultAction)
                     }

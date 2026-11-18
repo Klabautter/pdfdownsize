@@ -252,9 +252,28 @@ struct OrganizeView: View {
             }
         }
         .animation(.easeInOut(duration: 0.18), value: vm.selectedPageIDs.isEmpty)
+        // Masterplan B2: gesperrte PDFs aus dem Import – Passwort oder überspringen.
+        .sheet(isPresented: Binding(get: { !vm.lockedPending.isEmpty },
+                                    set: { if !$0 { vm.skipPendingLocked() } })) {
+            if let url = vm.lockedPending.first {
+                RejectedDocumentView(fileName: url.lastPathComponent,
+                                     verdict: .locked,
+                                     onChooseOther: { vm.skipPendingLocked() },
+                                     onClose: { vm.skipPendingLocked() },
+                                     onUnlock: { vm.unlockPending(password: $0) },
+                                     passwordError: vm.passwordError,
+                                     isUnlocking: vm.isUnlocking,
+                                     chooseOtherLabel: String(localized: "Überspringen"))
+                    .frame(width: 460, height: 380)
+                    .id(url)
+            }
+        }
         .task(id: vm.project.documents.map(\.url)) {
             let urls = vm.project.documents.map(\.url)
-            let losses = await Task.detached(priority: .utility) { MergeLossSummary.losses(for: urls) }.value
+            let unlocked = vm.unlockedOriginalNames
+            let losses = await Task.detached(priority: .utility) {
+                MergeLossSummary.losses(for: urls, unlocked: unlocked)
+            }.value
             if !Task.isCancelled { mergeLosses = losses }
         }
     }

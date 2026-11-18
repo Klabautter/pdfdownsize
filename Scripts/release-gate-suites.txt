@@ -32,3 +32,4 @@ OCRScriptCoverageTests
 MultiPageTIFFImportTests
 ICCProfileReplacementE2ETests
 TransportFilteredJPEGTests
+PasswordUnlockToolsE2ETests

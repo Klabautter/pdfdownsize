@@ -33,7 +33,10 @@ struct OCRView: View {
                 RejectedDocumentView(fileName: vm.pdfURL?.lastPathComponent ?? "",
                                      verdict: verdict,
                                      onChooseOther: { vm.wantsFiles = true },
-                                     onClose: { vm.reset() })
+                                     onClose: { vm.reset() },
+                                     onUnlock: { vm.unlock(password: $0) },
+                                     passwordError: vm.passwordError,
+                                     isUnlocking: vm.isUnlocking)
                     .dropTargetOverlay(isTargeted, inset: 12)
             case .ready, .working, .done:
                 workingState
@@ -129,7 +132,9 @@ struct OCRView: View {
             ZStack(alignment: .topLeading) {
                 Theme.canvas
                 Group {
-                    if let url = vm.outputURL ?? vm.savedURL ?? vm.pdfURL {
+                    // Entsperrt: die gesicherte Datei ist wieder verschlüsselt – die
+                    // Vorschau bleibt auf der Arbeitskopie bzw. dem Ergebnis.
+                    if let url = vm.outputURL ?? (vm.unlocked == nil ? vm.savedURL : nil) ?? vm.workingURL {
                         DocumentPreview(url: url, scanning: vm.isWorking,
                                         page: $vm.currentPage,
                                         highlight: vm.stage == .done ? vm.searchQuery : "",

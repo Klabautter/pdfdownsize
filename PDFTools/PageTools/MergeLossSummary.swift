@@ -28,7 +28,9 @@ enum MergeLossSummary {
 
     /// Verluste je Merkmal, in fester Reihenfolge; leer bei weniger als zwei
     /// Quellen. Aus Bildern erzeugte Quellen haben keinen Katalog.
-    nonisolated static func losses(for urls: [URL]) -> [Loss] {
+    /// `unlocked`: Arbeitskopien entsperrter Quellen → Name des Originals
+    /// (Masterplan B2) – die Kopie ist unverschlüsselt, das Original nicht.
+    nonisolated static func losses(for urls: [URL], unlocked: [URL: String] = [:]) -> [Loss] {
         var unique: [URL] = []
         for url in urls where !unique.contains(where: { $0.standardizedFileURL == url.standardizedFileURL }) {
             unique.append(url)
@@ -36,12 +38,16 @@ enum MergeLossSummary {
         guard unique.count > 1 else { return [] }
         var files: [Feature: [String]] = [:]
         for url in unique where !url.path.hasPrefix(ImageImporter.sessionDirectory.path) {
+            let name = unlocked[url] ?? url.lastPathComponent
+            if unlocked[url] != nil { files[.encryption, default: []].append(name) }
             // Nicht lesbar (z. B. Benutzerpasswort): Das meldet schon der
             // Import; hier gibt es nichts zu zählen.
             guard let doc = try? PDFCoreDocument(path: url.path),
                   let features = try? doc.catalogFeatures() else { continue }
             for raw in features {
-                if let feature = Feature(rawValue: raw) { files[feature, default: []].append(url.lastPathComponent) }
+                if let feature = Feature(rawValue: raw), !(files[feature]?.contains(name) ?? false) {
+                    files[feature, default: []].append(name)
+                }
             }
         }
         return Feature.allCases.compactMap { feature in
