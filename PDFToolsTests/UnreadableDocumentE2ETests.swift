@@ -170,7 +170,17 @@ import PDFKit
 
     @Test(arguments: Kind.allCases) func organisierenNenntDenGrund(_ kind: Kind) async throws {
         let vm = MergeViewModel()
-        vm.importDocuments([try Self.file(kind)])
+        let file = try Self.file(kind)
+        vm.importDocuments([file])
+        // Masterplan B2: Eine gesperrte PDF wird nicht mehr abgewiesen, sondern
+        // fragt nach dem Passwort (Blatt) – kein Rohtext, keine Seiten.
+        if kind.expected == .locked {
+            let asked = await Self.within1s { vm.lockedPending == [file] }
+            #expect(asked, "keine Passwortfrage")
+            #expect(vm.errorMessage == nil, "Zusätzlicher Rohtext: \(vm.errorMessage ?? "")")
+            #expect(vm.project.pages.isEmpty)
+            return
+        }
         let reported = await Self.within1s { vm.errorMessage != nil }
         #expect(reported, "\(kind.rawValue)")
         Self.assertClean(vm.errorMessage ?? "", "Organisieren \(kind.rawValue)")
