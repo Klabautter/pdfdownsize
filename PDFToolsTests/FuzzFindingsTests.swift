@@ -33,4 +33,21 @@ import Foundation
         // derselbe Lauf auch im Release über 300 s.
         #expect(Date().timeIntervalSince(start) < 150, "Dauer \(Date().timeIntervalSince(start)) s")
     }
+
+    /// hang-2724: Eine ToUnicode-Tabelle mit vertikalem Tab (0x0B). Der
+    /// Kern-Parser übersprang am Schleifenanfang nur Leerzeichen/Tab/LF/CR/FF/
+    /// NUL, das Wortlesen stoppte aber an jedem isspace-Zeichen – bei 0x0B
+    /// rückte die Position nie vor (Endlosschleife im Font-Subsetting).
+    @Test(.timeLimit(.minutes(3)), .needsLocalFiles("tmp/fuzz-findings/hang-2724.pdf"))
+    func toUnicodeMitVertikalemTabEndet() throws {
+        let url = LocalTestData.repoRoot.appendingPathComponent("tmp/fuzz-findings/hang-2724.pdf")
+        let start = Date()
+        do {
+            let result = try Compressor().compress(inputURL: url, mode: .smart)
+            if result.outputURL != url { try? FileManager.default.removeItem(at: result.outputURL) }
+        } catch {
+            // Ablehnen ist erlaubt – hängen nicht.
+        }
+        #expect(Date().timeIntervalSince(start) < 150, "Dauer \(Date().timeIntervalSince(start)) s")
+    }
 }

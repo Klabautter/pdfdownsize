@@ -7832,8 +7832,10 @@ std::map<unsigned, uint32_t> font6_parse_tounicode(std::string const& b)
     };
 
     while (i < n) {
-        while (i < n && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n'
-                         || b[i] == '\r' || b[i] == '\f' || b[i] == 0)) { ++i; }
+        // Masterplan D5 (Fuzz-Fund hang-2724): DIESELBE Leerraum-Definition wie
+        // beim Wortlesen unten (isspace + NUL). Vorher fehlte hier der
+        // vertikale Tab – das Wortlesen stoppte an ihm, ohne vorzurücken.
+        while (i < n && (isspace(static_cast<unsigned char>(b[i])) || b[i] == 0)) { ++i; }
         if (i >= n) { break; }
         char c = b[i];
         if (c == '%') {
@@ -7889,6 +7891,9 @@ std::map<unsigned, uint32_t> font6_parse_tounicode(std::string const& b)
         while (i < n && !isspace(static_cast<unsigned char>(b[i]))
                && b[i] != '/' && b[i] != '<' && b[i] != '>' && b[i] != '['
                && b[i] != ']' && b[i] != '%') { ++i; }
+        // Fortschritt garantiert: ein Zeichen, das weder Leerraum noch Token
+        // ist, wird übersprungen statt die Schleife anzuhalten.
+        if (i == start) { ++i; continue; }
         std::string word = b.substr(start, i - start);
         if (word == "beginbfchar") { mode = bfchar; reset_entry(); }
         else if (word == "endbfchar") {
