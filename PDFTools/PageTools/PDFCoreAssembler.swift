@@ -40,10 +40,21 @@ enum PDFCoreAssembler {
         let cPaths: [UnsafeMutablePointer<CChar>?] = plan.pages.map { strdup($0.sourceURL.path) }
         defer { for p in cPaths where p != nil { free(p) } }
 
+        // Masterplan E2: Titel des Quell-Lesezeichens; aus Bildern erzeugte
+        // Seiten (Sitzungsordner) bekommen keinen eigenen Eintrag.
+        let cTitles: [UnsafeMutablePointer<CChar>?] = plan.pages.map {
+            let url = $0.sourceURL
+            let title = url.path.hasPrefix(ImageImporter.sessionDirectory.path)
+                ? "" : url.deletingPathExtension().lastPathComponent
+            return strdup(title)
+        }
+        defer { for p in cTitles where p != nil { free(p) } }
+
         let indices = plan.pages.map { Int32($0.sourcePageIndex) }
         let rotations = plan.pages.map { Int32($0.rotation) }
 
-        let status: Int32 = cPaths.withUnsafeBufferPointer { pathsBuf in
+        let status: Int32 = cTitles.withUnsafeBufferPointer { titlesBuf in
+          cPaths.withUnsafeBufferPointer { pathsBuf in
             indices.withUnsafeBufferPointer { idxBuf in
                 rotations.withUnsafeBufferPointer { rotBuf in
                     // const char *const * → konstante Sicht auf das char*-Array.
@@ -56,6 +67,8 @@ enum PDFCoreAssembler {
                         Int32(plan.pages.count),
                         outputURL.path,
                         removeDanglingLinks ? 1 : 0,
+                        UnsafeRawPointer(titlesBuf.baseAddress!)
+                            .assumingMemoryBound(to: UnsafePointer<CChar>?.self),
                         // C-Callbacks: `box` hält die Swift-Closures am Leben,
                         // solange der Aufruf läuft. Ein Closure-Kontext kann
                         // nicht direkt als void* übergeben werden.
@@ -74,6 +87,7 @@ enum PDFCoreAssembler {
                         Unmanaged.passUnretained(box).toOpaque())
                 }
             }
+          }
         }
 
         switch UInt32(bitPattern: status) {

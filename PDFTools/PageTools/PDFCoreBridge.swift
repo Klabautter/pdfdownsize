@@ -141,6 +141,10 @@ final class PDFCoreDocument {
         /// Zeichengraph der Seiten mit Bildern außerhalb ihres XObject-Baums.
         /// Format siehe PDFCORE_LIST_PAINT_EDGES im C-Header.
         case paintEdges = 11
+        /// Masterplan E2: /Dests-Namen in Baumreihenfolge.
+        case destTreeOrder = 12
+        case acroFormFonts = 13
+        case catalogFeatures = 14
     }
 
     func stringList(_ kind: StringListKind) throws -> [String] {
@@ -175,6 +179,21 @@ final class PDFCoreDocument {
 
     func outlineLabels() throws -> [String] {
         try stringList(.outlineLabels)
+    }
+
+    /// Masterplan E2: Namen des /Dests-Baums, wie sie im Baum stehen.
+    func namedDestinationNames() throws -> [String] {
+        try stringList(.destTreeOrder)
+    }
+
+    /// Masterplan E2: Schriftnamen in /AcroForm/DR/Font.
+    func acroFormResourceFontNames() throws -> [String] {
+        try stringList(.acroFormFonts)
+    }
+
+    /// Masterplan E2: tags, attachments, layers, scripts, encryption.
+    func catalogFeatures() throws -> [String] {
+        try stringList(.catalogFeatures)
     }
 
     var formFieldCount: Int {

@@ -55,7 +55,10 @@ struct OutlinePolicyTests {
         }
     }
 
-    @Test func multiSourceMergeHasNoOutlines() async throws {
+    /// Masterplan E2: Früher fielen bei mehreren Quellen alle Lesezeichen weg.
+    /// Jetzt bekommt jede Quelle einen Eintrag mit ihrem Dateinamen, darunter
+    /// ihre Gliederung (auf die Ausgabeseiten umgerechnet).
+    @Test func multiSourceMergeGroupsOutlinesBySource() async throws {
         let aURL = try PDFFixtures.outlinedWithInternalLinkPDF()
         let bURL = try PDFFixtures.vectorTextPDF(lines: 3)
         defer {
@@ -75,8 +78,11 @@ struct OutlinePolicyTests {
             defer { try? FileManager.default.removeItem(at: out) }
             try await PageAssemblyService.assemble(plan: plan, to: out,
                                               progress: { _ in })
-            #expect(try outlineLabelsAndTargetIndices(out).isEmpty,
-                    "libqpdf: Policy verlangt Drop bei Multi-Source")
+            let entries = try outlineLabelsAndTargetIndices(out)
+            let aName = aURL.deletingPathExtension().lastPathComponent
+            let bName = bURL.deletingPathExtension().lastPathComponent
+            #expect(entries.map(\.0) == [aName, "Kapitel 1", "Kapitel 2", bName])
+            #expect(entries.map(\.1) == [0, 0, 1, 2])
         }
     }
 

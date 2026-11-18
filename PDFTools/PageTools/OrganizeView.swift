@@ -25,6 +25,7 @@ struct OrganizeView: View {
     var onCompress: ((URL) -> Void)? = nil
     @Environment(\.undoManager) private var undoManager
 
+    @State private var mergeLosses: [MergeLossSummary.Loss] = []
     @State private var lastAnchorID: UUID?
     @State private var isTargeted = false
     /// Tastaturfokus des Rasters: Pfeiltasten wandern durch die Auswahl
@@ -203,6 +204,15 @@ struct OrganizeView: View {
                         if vm.signatureWarningDocs.isEmpty == false {
                             warningBanner
                         }
+                        // Masterplan E2: vor „PDF erstellen“ sagen, was aus
+                        // den Quellen nicht übernommen wird.
+                        if let lossText = MergeLossSummary.sentence(for: mergeLosses) {
+                            Label(lossText, systemImage: "info.circle")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                         if let error = vm.errorMessage {
                             InlineNotice(message: error, onDismiss: { vm.errorMessage = nil })
                         }
@@ -242,6 +252,11 @@ struct OrganizeView: View {
             }
         }
         .animation(.easeInOut(duration: 0.18), value: vm.selectedPageIDs.isEmpty)
+        .task(id: vm.project.documents.map(\.url)) {
+            let urls = vm.project.documents.map(\.url)
+            let losses = await Task.detached(priority: .utility) { MergeLossSummary.losses(for: urls) }.value
+            if !Task.isCancelled { mergeLosses = losses }
+        }
     }
 
     /// Kopf: bei EINEM Dokument Name · Seiten · Größe; bei mehreren eine

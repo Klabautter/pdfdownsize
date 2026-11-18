@@ -11,8 +11,8 @@
 #   3. Testartefakte (benchmark/) zurück ins Projekt kopieren – nur Dateien,
 #      nichts wird im Projekt gelöscht.
 #
-# Der Korpus liegt ebenfalls auf dem Schreibtisch. Wer Korpus-Tests fährt,
-# setzt PDFTOOLS_CORPUS_ROOT auf eine Kopie außerhalb (wird durchgereicht).
+# Der Korpus liegt ebenfalls auf dem Schreibtisch. Korpus-Tests lesen
+# Kopien unter ~/Library/Developer/PDFdownsize-Korpus (siehe unten).
 #
 # Aufruf:  Scripts/test-arbeitskopie.sh -only-testing:PDFToolsTests/Suite …
 #          Scripts/test-arbeitskopie.sh --nur-spiegeln
@@ -30,9 +30,26 @@ rsync -a --delete \
 
 [ "${1:-}" = "--nur-spiegeln" ] && { echo "$ARBEITSKOPIE"; exit 0; }
 
-if [ -n "${PDFTOOLS_CORPUS_ROOT:-}" ]; then
-    export TEST_RUNNER_PDFTOOLS_CORPUS_ROOT="$PDFTOOLS_CORPUS_ROOT"
-fi
+# Korpus-Pfade: Ohne Angabe fallen einzelne Tests auf ~/Desktop/PDF_small/…
+# zurück – schon eine Existenzprüfung dort löst bei jedem neu gebauten
+# Test-Host die Schreibtisch-Abfrage aus. Deshalb zeigt JEDER Korpus-Pfad
+# hier auf einen Ort außerhalb (Vorgabe: Kopien unter $KORPUS). Fehlt die
+# Kopie, überspringen die Korpus-Tests sich selbst.
+KORPUS="${PDFDOWNSIZE_KORPUS:-$HOME/Library/Developer/PDFdownsize-Korpus}"
+for pair in \
+    "PDFTOOLS_CORPUS_ROOT=$KORPUS/PDF_Tools-Testcorpus" \
+    "PDFTOOLS_SMOKE_CORPUS=$KORPUS/Smoke_30" \
+    "PDFTOOLS_CLASSIFIER_CORPUS=$KORPUS/Smoke_30" \
+    "PDFTOOLS_ESTIMATE_CORPUS=$KORPUS/Smoke_30" \
+    "PDFTOOLS_MRC_CERT_CORPUS=$KORPUS/Smoke_30" \
+    "PDFTOOLS_V2_CERT_CORPUS=$KORPUS/Smoke_30"; do
+    name="${pair%%=*}"
+    value="${!name:-${pair#*=}}"
+    case "$value" in
+        "$HOME/Desktop"*) echo "✗ $name zeigt auf den Schreibtisch: $value" >&2; exit 2 ;;
+    esac
+    export "TEST_RUNNER_$name=$value"
+done
 
 status=0
 (cd "$ARBEITSKOPIE" && xcodebuild test -scheme PDFTools -destination 'platform=macOS' \

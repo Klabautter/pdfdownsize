@@ -1489,6 +1489,22 @@
         }
       }
     },
+    "Anhänge": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anhänge"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Attachments"
+          }
+        }
+      }
+    },
     "Auf Smart-Werte zurücksetzen": {
       "localizations": {
         "de": {
@@ -1725,6 +1741,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "“Custom” uses your fixed settings; the target cannot go below them and only serves as feedback."
+          }
+        }
+      }
+    },
+    "Beim Zusammenfügen nicht übernommen: %@.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beim Zusammenfügen nicht übernommen: %@."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not carried over when combining: %@."
           }
         }
       }
@@ -2686,6 +2718,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "The searchable PDF could not be written."
+          }
+        }
+      }
+    },
+    "Ebenen": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ebenen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Layers"
           }
         }
       }
@@ -5626,6 +5674,22 @@
         }
       }
     },
+    "Skripte": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Skripte"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scripts"
+          }
+        }
+      }
+    },
     "Smart": {
       "localizations": {
         "de": {
@@ -5718,6 +5782,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "System"
+          }
+        }
+      }
+    },
+    "Tags für Barrierefreiheit": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tags für Barrierefreiheit"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Accessibility tags"
           }
         }
       }
@@ -6079,6 +6159,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Encrypted PDFs are not supported yet."
+          }
+        }
+      }
+    },
+    "Verschlüsselung": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verschlüsselung"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Encryption"
           }
         }
       }

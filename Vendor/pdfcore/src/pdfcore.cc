@@ -1868,6 +1868,38 @@ static std::vector<std::string> const& ensure_list(pdfcore_document_t& doc, int 
             }
             ++pageIndex;
         }
+    } else if (list_id == PDFCORE_LIST_DEST_TREE_ORDER) {
+        // Masterplan E2: Namen in der Reihenfolge des Baums, NICHT sortiert –
+        // so lässt sich prüfen, ob der Baum normgerecht sortiert ist.
+        QPDFObjectHandle namesDict = doc.qpdf.getRoot().getKey("/Names");
+        std::vector<std::pair<std::string, QPDFObjectHandle>> entries;
+        if (namesDict.isDictionary()) {
+            collect_name_tree_entries(namesDict.getKey("/Dests"), 0, entries);
+        }
+        for (auto const& e : entries) { list.push_back(sanitize_list_field(e.first)); }
+    } else if (list_id == PDFCORE_LIST_ACROFORM_DR_FONTS) {
+        QPDFObjectHandle acro = doc.qpdf.getRoot().getKey("/AcroForm");
+        QPDFObjectHandle dr = acro.isDictionary() ? acro.getKey("/DR") : QPDFObjectHandle::newNull();
+        QPDFObjectHandle fonts = dr.isDictionary() ? dr.getKey("/Font") : QPDFObjectHandle::newNull();
+        if (fonts.isDictionary()) {
+            for (auto const& key : fonts.getKeys()) { list.push_back(sanitize_list_field(key.substr(1))); }
+        }
+    } else if (list_id == PDFCORE_LIST_CATALOG_FEATURES) {
+        // Masterplan E2: Was ein Neuaufbau aus mehreren Quellen NICHT
+        // übernimmt – nur, was diese Datei tatsächlich hat.
+        QPDFObjectHandle root = doc.qpdf.getRoot();
+        QPDFObjectHandle names = root.getKey("/Names");
+        if (root.getKey("/StructTreeRoot").isDictionary()) { list.push_back("tags"); }
+        if (names.isDictionary() && count_name_tree_entries(names.getKey("/EmbeddedFiles"), 0) > 0) {
+            list.push_back("attachments");
+        }
+        if (root.getKey("/OCProperties").isDictionary()) { list.push_back("layers"); }
+        QPDFObjectHandle open = root.getKey("/OpenAction");
+        bool scripts = (names.isDictionary() && count_name_tree_entries(names.getKey("/JavaScript"), 0) > 0)
+            || root.getKey("/AA").isDictionary()
+            || (open.isDictionary() && open.getKey("/S").isName() && open.getKey("/S").getName() == "/JavaScript");
+        if (scripts) { list.push_back("scripts"); }
+        if (doc.qpdf.isEncrypted()) { list.push_back("encryption"); }
     } else if (list_id == PDFCORE_LIST_OUTLINE_LABELS) {
         QPDFOutlineDocumentHelper oh(doc.qpdf);
         if (oh.hasOutlines()) {
@@ -2006,6 +2038,7 @@ static int write_pages_impl(const char *const *source_paths,
                             int count,
                             const char *output_path,
                             int remove_dangling_links,
+                            const char *const *source_titles,
                             void (*on_page)(void *, int, int),
                             int (*should_continue)(void *),
                             void *context);
@@ -2020,7 +2053,7 @@ int pdfcore_write_pages(const char *const *source_paths,
     PDFCORE_GUARD_BEGIN
     return write_pages_impl(source_paths, page_indices, rotations, count,
                             output_path, remove_dangling_links,
-                            nullptr, nullptr, nullptr);
+                            nullptr, nullptr, nullptr, nullptr);
     PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
@@ -2036,7 +2069,7 @@ int pdfcore_write_pages_progress(const char *const *source_paths,
     PDFCORE_GUARD_BEGIN
     return write_pages_impl(source_paths, page_indices, rotations, count,
                             output_path, remove_dangling_links,
-                            on_page, nullptr, context);
+                            nullptr, on_page, nullptr, context);
     PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
@@ -2046,6 +2079,7 @@ int pdfcore_write_pages_cancellable(const char *const *source_paths,
                                     int count,
                                     const char *output_path,
                                     int remove_dangling_links,
+                                    const char *const *source_titles,
                                     void (*on_page)(void *context, int done, int total),
                                     int (*should_continue)(void *context),
                                     void *context)
@@ -2053,7 +2087,7 @@ int pdfcore_write_pages_cancellable(const char *const *source_paths,
     PDFCORE_GUARD_BEGIN
     return write_pages_impl(source_paths, page_indices, rotations, count,
                             output_path, remove_dangling_links,
-                            on_page, should_continue, context);
+                            source_titles, on_page, should_continue, context);
     PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
@@ -2340,6 +2374,7 @@ static int write_pages_impl(const char *const *source_paths,
                             int count,
                             const char *output_path,
                             int remove_dangling_links,
+                            const char *const *source_titles,
                             void (*on_page)(void *, int, int),
                             int (*should_continue)(void *),
                             void *context)
@@ -2359,8 +2394,15 @@ static int write_pages_impl(const char *const *source_paths,
         std::vector<std::unique_ptr<QPDF>> sources;
         std::map<std::string, size_t> byPath;
         std::map<std::string, int> byPathTotals;
-        // Quelle-Seiten-ObjGen → kopiertes Handle im Ausgabedokument (Phase 11).
-        std::map<QPDFObjGen, QPDFObjectHandle> copiedBySourceObjGen;
+        // (Quelle, Seiten-ObjGen) → kopiertes Handle im Ausgabedokument
+        // (Phase 11). Masterplan E2: Der Schlüssel enthält die Quelle – zwei
+        // gleich aufgebaute Quellen haben dieselben Objektnummern, und ein
+        // Ziel aus B landete sonst auf der Seite aus A.
+        std::map<std::pair<size_t, QPDFObjGen>, QPDFObjectHandle> copiedBySource;
+        // Ausgabeseite → Quelle; je Quelle Titel und erste Ausgabeseite.
+        std::map<QPDFObjGen, size_t> sourceOfOutputPage;
+        std::vector<std::string> sourceTitles;
+        std::vector<QPDFObjectHandle> firstOutputPageOfSource;
 
         auto sourceFor = [&](std::string const& path) -> QPDF& {
             auto it = byPath.find(path);
@@ -2389,6 +2431,20 @@ static int write_pages_impl(const char *const *source_paths,
 
             std::string path(source_paths[i]);
             QPDF& src = sourceFor(path);
+            size_t const srcIndex = byPath[path];
+            if (sourceTitles.size() <= srcIndex) {
+                std::string title;
+                if (source_titles && source_titles[i]) {
+                    title = source_titles[i];
+                } else {
+                    title = path.substr(path.find_last_of('/') + 1);
+                    if (title.size() > 4 && title.compare(title.size() - 4, 4, ".pdf") == 0) {
+                        title.erase(title.size() - 4);
+                    }
+                }
+                sourceTitles.push_back(title);
+                firstOutputPageOfSource.push_back(QPDFObjectHandle::newNull());
+            }
             auto const& srcPages = src.getAllPages();
             int idx = page_indices[i];
             if (idx < 0 || idx >= static_cast<int>(srcPages.size())) {
@@ -2420,7 +2476,9 @@ static int write_pages_impl(const char *const *source_paths,
             // (Befund 15).
             outHelper.addPage(QPDFPageObjectHelper(original), false);
             QPDFObjectHandle copied = out.getAllPages().back();
-            copiedBySourceObjGen[original.getObjGen()] = copied;
+            copiedBySource[{srcIndex, original.getObjGen()}] = copied;
+            sourceOfOutputPage[copied.getObjGen()] = srcIndex;
+            if (firstOutputPageOfSource[srcIndex].isNull()) { firstOutputPageOfSource[srcIndex] = copied; }
 
             // Effektive Basis-Rotation der Quelle + Plan-Rotation.
             int base = 0;
@@ -2522,29 +2580,50 @@ static int write_pages_impl(const char *const *source_paths,
                 for (auto const& f : fields) { fieldArray.appendItem(f); }
                 acro.replaceKey("/Fields", fieldArray);
 
-                // /DR und /DA aus der ersten Quelle übernehmen – ohne
-                // Ressourcen und Default-Appearance rendern Felder nicht.
+                // copyForeignObject verlangt ein INDIREKTES Objekt. /DA, /Q
+                // und /DR-Unterwörterbücher stehen oft direkt im Dictionary –
+                // sie werden über ein indirektes Hilfsobjekt übertragen.
+                auto copyIn = [&](QPDF& src, QPDFObjectHandle v) {
+                    return v.isIndirect() ? out.copyForeignObject(v)
+                                          : out.copyForeignObject(src.makeIndirectObject(v));
+                };
+                // /DA, /Q, /NeedAppearances, /SigFlags: der erste Wert gilt.
+                // /DR (Masterplan E2): aus ALLEN Quellen vereinigt – Felder
+                // der zweiten Quelle verloren sonst ihre Schrift. Gleichnamige
+                // Einträge: der erste gilt.
+                QPDFObjectHandle mergedDR = QPDFObjectHandle::newDictionary();
                 for (auto const& src : sources) {
                     QPDFObjectHandle srcAcro = src->getRoot().getKey("/AcroForm");
                     if (srcAcro.isNull() || !srcAcro.isDictionary()) { continue; }
-                    for (char const* key : {"/DR", "/DA", "/Q", "/NeedAppearances",
-                                            "/SigFlags"}) {
+                    for (char const* key : {"/DA", "/Q", "/NeedAppearances", "/SigFlags"}) {
                         QPDFObjectHandle v = srcAcro.getKey(key);
                         if (v.isNull() || acro.hasKey(key)) { continue; }
-                        // copyForeignObject verlangt ein INDIREKTES Objekt.
-                        // /DA und /Q stehen fast immer direkt im Dictionary –
-                        // sie werden deshalb über ein indirektes Hilfsobjekt
-                        // übertragen statt direkt kopiert.
-                        if (v.isIndirect()) {
-                            acro.replaceKey(key, out.copyForeignObject(v));
-                        } else {
-                            QPDFObjectHandle wrapper =
-                                src->makeIndirectObject(v);
-                            acro.replaceKey(key, out.copyForeignObject(wrapper));
+                        acro.replaceKey(key, copyIn(*src, v));
+                    }
+                    QPDFObjectHandle dr = srcAcro.getKey("/DR");
+                    if (!dr.isDictionary()) { continue; }
+                    for (auto const& category : dr.getKeys()) {
+                        QPDFObjectHandle srcSub = dr.getKey(category);
+                        if (!srcSub.isDictionary()) {
+                            if (!mergedDR.hasKey(category) && !srcSub.isNull()) {
+                                mergedDR.replaceKey(category, copyIn(*src, srcSub));
+                            }
+                            continue;
+                        }
+                        QPDFObjectHandle outSub = mergedDR.getKey(category);
+                        if (!outSub.isDictionary()) {
+                            outSub = QPDFObjectHandle::newDictionary();
+                            mergedDR.replaceKey(category, outSub);
+                        }
+                        for (auto const& entry : srcSub.getKeys()) {
+                            if (outSub.hasKey(entry)) { continue; }
+                            QPDFObjectHandle v = srcSub.getKey(entry);
+                            if (v.isNull()) { continue; }
+                            outSub.replaceKey(entry, copyIn(*src, v));
                         }
                     }
-                    break;
                 }
+                if (!mergedDR.getKeys().empty()) { acro.replaceKey("/DR", mergedDR); }
                 out.getRoot().replaceKey("/AcroForm", out.makeIndirectObject(acro));
             }
         }
@@ -2559,95 +2638,104 @@ static int write_pages_impl(const char *const *source_paths,
         // alle 187.
         //
         // Übernommen wird ein Ziel nur, wenn die Seite, auf die es zeigt,
-        // auch im Ausgabedokument liegt. Ein Ziel auf eine nicht kopierte
-        // Seite wäre selbst dangling und würde den Verweis nur scheinbar
-        // retten.
+        // auch im Ausgabedokument liegt.
+        //
+        // Masterplan E2: Bei mehreren Quellen bekommt jeder Name die Vorsilbe
+        // seiner Quelle („s2:sec“), und die Verweise dieser Quelle ziehen mit
+        // – sonst sprang ein Verweis aus B auf das gleichnamige Ziel in A.
+        // Der Baum wird sortiert geschrieben (PDF 32000-1, 7.9.6).
+        bool const multiSource = sources.size() > 1;
+        auto prefixFor = [&](size_t k) {
+            return multiSource ? "s" + std::to_string(k + 1) + ":" : std::string();
+        };
+        if (multiSource) {
+            std::set<QPDFObjGen> renamed;
+            auto prefixed = [&](QPDFObjectHandle target, size_t k) -> QPDFObjectHandle {
+                if (!(target.isString() || target.isName())) { return QPDFObjectHandle::newNull(); }
+                std::string name = target.isName() ? target.getName() : target.getStringValue();
+                if (target.isName() && !name.empty() && name.front() == '/') { name.erase(name.begin()); }
+                return QPDFObjectHandle::newString(prefixFor(k) + name);
+            };
+            for (auto const& page : out.getAllPages()) {
+                auto owner = sourceOfOutputPage.find(page.getObjGen());
+                if (owner == sourceOfOutputPage.end()) { continue; }
+                QPDFObjectHandle annots = page.getKey("/Annots");
+                if (!annots.isArray()) { continue; }
+                for (auto a : annots.getArrayAsVector()) {
+                    if (!a.isDictionary()) { continue; }
+                    if (a.isIndirect() && !renamed.insert(a.getObjGen()).second) { continue; }
+                    QPDFObjectHandle st = a.getKey("/Subtype");
+                    if (!(st.isName() && st.getName() == "/Link")) { continue; }
+                    QPDFObjectHandle renamedDest = prefixed(a.getKey("/Dest"), owner->second);
+                    if (!renamedDest.isNull()) { a.replaceKey("/Dest", renamedDest); continue; }
+                    QPDFObjectHandle action = a.getKey("/A");
+                    if (action.isDictionary() && action.getKey("/S").isName()
+                        && action.getKey("/S").getName() == "/GoTo") {
+                        QPDFObjectHandle d = prefixed(action.getKey("/D"), owner->second);
+                        if (!d.isNull()) { action.replaceKey("/D", d); }
+                    }
+                }
+            }
+        }
         {
             std::set<QPDFObjGen> outputPageGens;
             for (auto const& op : out.getAllPages()) {
                 outputPageGens.insert(op.getObjGen());
             }
+            // Sortiert nach Bytes (std::string vergleicht wie memcmp).
+            std::map<std::string, QPDFObjectHandle> destsByName;
 
-            QPDFObjectHandle destNames = QPDFObjectHandle::newArray();
-            std::set<std::string> seenNames;
-
-            // Rekursiv durch den Namensbaum der Quelle.
-            std::function<void(QPDF&, QPDFObjectHandle, int)> collect =
-                [&](QPDF& src, QPDFObjectHandle node, int depth) {
-                if (node.isNull() || !node.isDictionary() || depth > 32) { return; }
-                QPDFObjectHandle arr = node.getKey("/Names");
-                if (arr.isArray()) {
-                    auto v = arr.getArrayAsVector();
-                    for (size_t i = 0; i + 1 < v.size(); i += 2) {
-                        if (!v[i].isString()) { continue; }
-                        std::string name = v[i].getStringValue();
-                        QPDFObjectHandle dest = v[i + 1];
-                        // Ein /D-Wrapper ist zulässig: <</D [page /XYZ …]>>
-                        if (dest.isDictionary() && dest.hasKey("/D")) {
-                            dest = dest.getKey("/D");
-                        }
-                        if (!dest.isArray()) { continue; }
-                        auto dv = dest.getArrayAsVector();
-                        if (dv.empty() || !dv[0].isIndirect()) { continue; }
-
-                        // Zeigt das Ziel auf eine kopierte Seite?
-                        auto it = copiedBySourceObjGen.find(dv[0].getObjGen());
-                        if (it == copiedBySourceObjGen.end()) { continue; }
-                        if (!outputPageGens.count(it->second.getObjGen())) { continue; }
-                        if (!seenNames.insert(name).second) { continue; }
-
-                        // Zielarray im AUSGABE-Dokument neu aufbauen: Das
-                        // erste Element ist die kopierte Seite, der Rest
-                        // (Zoomangabe) wird übernommen.
-                        QPDFObjectHandle newDest = QPDFObjectHandle::newArray();
-                        newDest.appendItem(it->second);
-                        for (size_t k = 1; k < dv.size(); ++k) {
-                            newDest.appendItem(dv[k].isIndirect()
-                                ? out.copyForeignObject(dv[k])
-                                : dv[k].shallowCopy());
-                        }
-                        destNames.appendItem(QPDFObjectHandle::newString(name));
-                        destNames.appendItem(newDest);
-                    }
-                }
-                QPDFObjectHandle kids = node.getKey("/Kids");
-                if (kids.isArray()) {
-                    for (auto const& kid : kids.getArrayAsVector()) {
-                        collect(src, kid, depth + 1);
-                    }
-                }
-            };
-
-            // Ein Ziel aus einem /Dests-Eintrag übernehmen (beide Formate
-            // teilen sich diese Logik).
-            auto takeDest = [&](std::string const& name, QPDFObjectHandle dest) {
+            // Ein Ziel aus Quelle k übernehmen (Namensbaum und /Dests-Wörterbuch).
+            auto takeDest = [&](size_t k, std::string const& name, QPDFObjectHandle dest) {
                 if (dest.isDictionary() && dest.hasKey("/D")) {
                     dest = dest.getKey("/D");
                 }
                 if (!dest.isArray()) { return; }
                 auto dv = dest.getArrayAsVector();
                 if (dv.empty() || !dv[0].isIndirect()) { return; }
-                auto it = copiedBySourceObjGen.find(dv[0].getObjGen());
-                if (it == copiedBySourceObjGen.end()) { return; }
+                auto it = copiedBySource.find({k, dv[0].getObjGen()});
+                if (it == copiedBySource.end()) { return; }
                 if (!outputPageGens.count(it->second.getObjGen())) { return; }
-                if (!seenNames.insert(name).second) { return; }
+                std::string const outName = prefixFor(k) + name;
+                if (destsByName.count(outName)) { return; }
 
+                // Zielarray im AUSGABE-Dokument neu aufbauen: Das erste
+                // Element ist die kopierte Seite, der Rest (Zoom) wird übernommen.
                 QPDFObjectHandle newDest = QPDFObjectHandle::newArray();
                 newDest.appendItem(it->second);
-                for (size_t k = 1; k < dv.size(); ++k) {
-                    newDest.appendItem(dv[k].isIndirect()
-                        ? out.copyForeignObject(dv[k])
-                        : dv[k].shallowCopy());
+                for (size_t j = 1; j < dv.size(); ++j) {
+                    newDest.appendItem(dv[j].isIndirect()
+                        ? out.copyForeignObject(dv[j])
+                        : dv[j].shallowCopy());
                 }
-                destNames.appendItem(QPDFObjectHandle::newString(name));
-                destNames.appendItem(newDest);
+                destsByName.emplace(outName, newDest);
             };
 
-            for (auto const& src : sources) {
+            for (size_t k = 0; k < sources.size(); ++k) {
+                QPDF& src = *sources[k];
                 // Form 1 (PDF 1.2+): /Root /Names /Dests – ein Namensbaum.
-                QPDFObjectHandle names = src->getRoot().getKey("/Names");
-                if (!names.isNull() && names.isDictionary()) {
-                    collect(*src, names.getKey("/Dests"), 0);
+                // Iterativ (Masterplan D1); Rohbytes der Namen bleiben.
+                QPDFObjectHandle names = src.getRoot().getKey("/Names");
+                if (names.isDictionary()) {
+                    std::vector<std::pair<QPDFObjectHandle, int>> stack{{names.getKey("/Dests"), 0}};
+                    std::set<QPDFObjGen> seenNodes;
+                    while (!stack.empty()) {
+                        auto [node, depth] = stack.back();
+                        stack.pop_back();
+                        if (!node.isDictionary() || depth > 32) { continue; }
+                        if (node.isIndirect() && !seenNodes.insert(node.getObjGen()).second) { continue; }
+                        QPDFObjectHandle arr = node.getKey("/Names");
+                        if (arr.isArray()) {
+                            auto v = arr.getArrayAsVector();
+                            for (size_t i = 0; i + 1 < v.size(); i += 2) {
+                                if (v[i].isString()) { takeDest(k, v[i].getStringValue(), v[i + 1]); }
+                            }
+                        }
+                        QPDFObjectHandle kids = node.getKey("/Kids");
+                        if (kids.isArray()) {
+                            for (auto const& kid : kids.getArrayAsVector()) { stack.emplace_back(kid, depth + 1); }
+                        }
+                    }
                 }
 
                 // Form 2 (PDF 1.1): /Root /Dests – ein flaches Wörterbuch.
@@ -2655,22 +2743,25 @@ static int write_pages_impl(const char *const *source_paths,
                 // Ohne diesen Zweig blieben die Ziele solcher Dokumente
                 // zurück, jeder interne Verweis wurde unauflösbar, und die
                 // dangling-Politik entfernte ihn folgerichtig: An
-                // `1409.1556.pdf` überlebten von 275 Link-Annotationen ganze
-                // 3. `lookup_named_dest` kennt beide Formate seit jeher – die
-                // Übertragung tat es nicht.
-                QPDFObjectHandle legacy = src->getRoot().getKey("/Dests");
+                // `1409.1556.pdf` überlebten von 275 Link-Annotationen ganze 3.
+                QPDFObjectHandle legacy = src.getRoot().getKey("/Dests");
                 if (!legacy.isNull() && legacy.isDictionary()) {
                     for (auto const& key : legacy.getKeys()) {
                         std::string name = key;
                         if (!name.empty() && name.front() == '/') {
                             name.erase(name.begin());
                         }
-                        takeDest(name, legacy.getKey(key));
+                        takeDest(k, name, legacy.getKey(key));
                     }
                 }
             }
 
-            if (destNames.getArrayNItems() > 0) {
+            if (!destsByName.empty()) {
+                QPDFObjectHandle destNames = QPDFObjectHandle::newArray();
+                for (auto const& [name, dest] : destsByName) {
+                    destNames.appendItem(QPDFObjectHandle::newString(name));
+                    destNames.appendItem(dest);
+                }
                 QPDFObjectHandle destsNode = QPDFObjectHandle::newDictionary();
                 destsNode.replaceKey("/Names", destNames);
                 QPDFObjectHandle namesDict = out.getRoot().getKey("/Names");
@@ -2679,6 +2770,145 @@ static int write_pages_impl(const char *const *source_paths,
                 }
                 namesDict.replaceKey("/Dests", out.makeIndirectObject(destsNode));
                 out.getRoot().replaceKey("/Names", out.makeIndirectObject(namesDict));
+            }
+        }
+
+        // --- Lesezeichen aller Quellen (Masterplan E2) -----------------------
+        //
+        // Je Quelle ein Eintrag mit dem Dateinamen (zeigt auf ihre erste
+        // Seite), darunter ihre Gliederung. Einträge, deren Zielseite nicht
+        // übernommen wurde, entfallen – außer sie tragen noch Unterpunkte.
+        // Nur, wenn mindestens eine Quelle Lesezeichen hat.
+        if (multiSource) {
+            struct Node {
+                std::string title;           // Rohbytes des PDF-Strings
+                bool unicodeTitle = false;
+                QPDFObjectHandle dest;       // Ausgabe-Ziel oder null
+                int parent = -1;
+                std::vector<int> children;
+                bool kept = false;
+            };
+            std::vector<Node> nodes;
+            std::vector<int> groups;
+            bool anyOutlines = false;
+            for (size_t k = 0; k < sources.size(); ++k) {
+                QPDFObjectHandle outlines = sources[k]->getRoot().getKey("/Outlines");
+                if (outlines.isDictionary() && outlines.getKey("/First").isDictionary()) { anyOutlines = true; }
+            }
+            if (anyOutlines) {
+                for (size_t k = 0; k < sources.size(); ++k) {
+                    QPDF& src = *sources[k];
+                    QPDFObjectHandle outlines = src.getRoot().getKey("/Outlines");
+                    bool const hasOwn = outlines.isDictionary() && outlines.getKey("/First").isDictionary();
+                    if (sourceTitles[k].empty() && !hasOwn) { continue; }
+                    Node group;
+                    group.title = sourceTitles[k];
+                    group.unicodeTitle = true;
+                    if (!firstOutputPageOfSource[k].isNull()) {
+                        QPDFObjectHandle d = QPDFObjectHandle::newArray();
+                        d.appendItem(firstOutputPageOfSource[k]);
+                        d.appendItem(QPDFObjectHandle::newName("/XYZ"));
+                        d.appendItem(QPDFObjectHandle::newNull());
+                        d.appendItem(QPDFObjectHandle::newNull());
+                        d.appendItem(QPDFObjectHandle::newNull());
+                        group.dest = d;
+                    }
+                    int const groupIndex = static_cast<int>(nodes.size());
+                    nodes.push_back(group);
+                    groups.push_back(groupIndex);
+                    if (!hasOwn) { continue; }
+
+                    // Iterativ: (erstes Kind der Kette, Elternknoten).
+                    std::vector<std::pair<QPDFObjectHandle, int>> work{{outlines.getKey("/First"), groupIndex}};
+                    std::set<QPDFObjGen> visited;
+                    while (!work.empty()) {
+                        auto [item, parent] = work.back();
+                        work.pop_back();
+                        for (; item.isDictionary(); item = item.getKey("/Next")) {
+                            if (item.isIndirect() && !visited.insert(item.getObjGen()).second) { break; }
+                            if (nodes.size() > 100000) { break; }
+                            Node n;
+                            QPDFObjectHandle t = item.getKey("/Title");
+                            if (t.isString()) { n.title = t.getUTF8Value(); n.unicodeTitle = true; }
+                            QPDFObjectHandle dest = item.getKey("/Dest");
+                            if (dest.isNull()) {
+                                QPDFObjectHandle action = item.getKey("/A");
+                                if (action.isDictionary() && action.getKey("/S").isName()
+                                    && action.getKey("/S").getName() == "/GoTo") {
+                                    dest = action.getKey("/D");
+                                }
+                            }
+                            if (dest.isName() || dest.isString()) {
+                                std::string name = dest.isName() ? dest.getName() : dest.getStringValue();
+                                if (dest.isName() && !name.empty() && name.front() == '/') { name.erase(name.begin()); }
+                                dest = lookup_named_dest(src, name);
+                            }
+                            if (dest.isDictionary() && dest.hasKey("/D")) { dest = dest.getKey("/D"); }
+                            if (dest.isArray() && dest.getArrayNItems() > 0 && dest.getArrayItem(0).isIndirect()) {
+                                auto it = copiedBySource.find({k, dest.getArrayItem(0).getObjGen()});
+                                if (it != copiedBySource.end()) {
+                                    QPDFObjectHandle d = QPDFObjectHandle::newArray();
+                                    d.appendItem(it->second);
+                                    auto dv = dest.getArrayAsVector();
+                                    for (size_t j = 1; j < dv.size(); ++j) {
+                                        d.appendItem(dv[j].isIndirect() ? QPDFObjectHandle::newNull() : dv[j].shallowCopy());
+                                    }
+                                    n.dest = d;
+                                }
+                            }
+                            n.parent = parent;
+                            int const index = static_cast<int>(nodes.size());
+                            nodes.push_back(n);
+                            nodes[static_cast<size_t>(parent)].children.push_back(index);
+                            if (item.getKey("/First").isDictionary()) {
+                                work.emplace_back(item.getKey("/First"), index);
+                            }
+                        }
+                    }
+                }
+                // Kinder entstehen nach ihren Eltern: rückwärts entscheiden.
+                for (size_t i = nodes.size(); i-- > 0;) {
+                    Node& n = nodes[i];
+                    bool keptChild = false;
+                    for (int c : n.children) { keptChild = keptChild || nodes[static_cast<size_t>(c)].kept; }
+                    n.kept = !n.dest.isNull() || keptChild || n.parent < 0;
+                }
+                std::vector<QPDFObjectHandle> made(nodes.size());
+                for (size_t i = 0; i < nodes.size(); ++i) {
+                    if (!nodes[i].kept) { continue; }
+                    QPDFObjectHandle item = QPDFObjectHandle::newDictionary();
+                    item.replaceKey("/Title", QPDFObjectHandle::newUnicodeString(nodes[i].title));
+                    if (!nodes[i].dest.isNull()) { item.replaceKey("/Dest", nodes[i].dest); }
+                    made[i] = out.makeIndirectObject(item);
+                }
+                QPDFObjectHandle root = QPDFObjectHandle::newDictionary();
+                root.replaceKey("/Type", QPDFObjectHandle::newName("/Outlines"));
+                QPDFObjectHandle rootRef = out.makeIndirectObject(root);
+                auto link = [&](QPDFObjectHandle parent, std::vector<int> const& kids, bool closed) {
+                    std::vector<QPDFObjectHandle> kept;
+                    for (int c : kids) {
+                        if (nodes[static_cast<size_t>(c)].kept) { kept.push_back(made[static_cast<size_t>(c)]); }
+                    }
+                    for (size_t j = 0; j < kept.size(); ++j) {
+                        kept[j].replaceKey("/Parent", parent);
+                        if (j > 0) { kept[j].replaceKey("/Prev", kept[j - 1]); }
+                        if (j + 1 < kept.size()) { kept[j].replaceKey("/Next", kept[j + 1]); }
+                    }
+                    if (kept.empty()) { return; }
+                    parent.replaceKey("/First", kept.front());
+                    parent.replaceKey("/Last", kept.back());
+                    long long const n = static_cast<long long>(kept.size());
+                    parent.replaceKey("/Count", QPDFObjectHandle::newInteger(closed ? -n : n));
+                };
+                link(rootRef, groups, false);
+                for (size_t i = 0; i < nodes.size(); ++i) {
+                    if (nodes[i].kept && !nodes[i].children.empty()) {
+                        link(made[i], nodes[i].children, true);
+                    }
+                }
+                if (rootRef.getKey("/First").isDictionary()) {
+                    out.getRoot().replaceKey("/Outlines", rootRef);
+                }
             }
         }
 

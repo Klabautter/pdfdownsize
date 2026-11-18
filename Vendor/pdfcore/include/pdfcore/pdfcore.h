@@ -103,6 +103,13 @@ int pdfcore_page_annotation_counts(pdfcore_document_t *doc, int page_index,
  * Matrix "-" = Geometrie nicht verlässlich bestimmbar. Bei annot ist sie die
  * fertige Abbildung Appearance → Seite (PDF 32000-1, Algorithmus 8.1). */
 #define PDFCORE_LIST_PAINT_EDGES     11
+/* Masterplan E2: Namen im /Dests-Baum in Baumreihenfolge (unsortiert). */
+#define PDFCORE_LIST_DEST_TREE_ORDER 12
+/* Masterplan E2: Schriftnamen in /AcroForm/DR/Font (ohne Schrägstrich). */
+#define PDFCORE_LIST_ACROFORM_DR_FONTS 13
+/* Masterplan E2: Katalog-Merkmale, die ein Mehr-Quellen-Neuaufbau nicht
+ * übernimmt: tags, attachments, layers, scripts, encryption. */
+#define PDFCORE_LIST_CATALOG_FEATURES 14
 
 /// list_id gemäß Konstanten oben.
 int pdfcore_string_list_count(pdfcore_document_t *doc, int list_id, int *count);
@@ -176,6 +183,9 @@ int pdfcore_write_pages_progress(const char *const *source_paths,
 /// Streams. Ein Abbruch, der nur zwischen den Seiten greift, käme bei einem
 /// grossen Dokument erst an, wenn die Datei ohnehin fertig ist.
 ///
+/// `source_titles` (je Planeintrag, darf NULL sein): Titel des Lesezeichens
+/// der Quelle bei mehreren Quellen (Masterplan E2); NULL = Dateiname, ""
+/// = kein eigener Eintrag, solange die Quelle keine Lesezeichen hat.
 /// Beide Callbacks dürfen NULL sein; ohne `should_continue` verhält sich die
 /// Funktion wie `pdfcore_write_pages_progress`.
 int pdfcore_write_pages_cancellable(const char *const *source_paths,
@@ -184,6 +194,7 @@ int pdfcore_write_pages_cancellable(const char *const *source_paths,
                                     int count,
                                     const char *output_path,
                                     int remove_dangling_links,
+                                    const char *const *source_titles,
                                     void (*on_page)(void *context, int done, int total),
                                     int (*should_continue)(void *context),
                                     void *context);

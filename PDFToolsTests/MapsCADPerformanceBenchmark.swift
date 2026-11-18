@@ -23,9 +23,12 @@ import Foundation
 @Suite struct MapsCADPerformanceBenchmark {
 
     private static func fixtures() throws -> [URL] {
-        let corpus = URL(fileURLWithPath: FileManager.default.homeDirectoryForCurrentUser.path)
-            .appendingPathComponent("Desktop/PDF_small/PDF_Corpus_System/"
-                + "Compression_Benchmark/Smoke_30/11_Maps_CAD_Technical")
+        // Über PDFTOOLS_SMOKE_CORPUS (Scripts/test-arbeitskopie.sh setzt es auf
+        // eine Kopie außerhalb des Schreibtischs); sonst der alte Ort.
+        let smoke = ProcessInfo.processInfo.environment["PDFTOOLS_SMOKE_CORPUS"]
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Desktop/PDF_small/PDF_Corpus_System/Compression_Benchmark/Smoke_30").path
+        let corpus = URL(fileURLWithPath: smoke).appendingPathComponent("11_Maps_CAD_Technical")
         let files = ((try? FileManager.default.contentsOfDirectory(
             at: corpus, includingPropertiesForKeys: nil)) ?? [])
             .filter { $0.pathExtension.lowercased() == "pdf" && !$0.lastPathComponent.hasPrefix(".") }
