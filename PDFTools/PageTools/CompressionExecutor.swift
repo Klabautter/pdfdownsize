@@ -634,13 +634,30 @@ enum CompressionExecutor {
                         compressionLevel: 9,
                         linearize: linearize))
                 }
-                try write(linearize: plan.linearizationPolicy != .none)
-                // Masterplan B7: Eine von der Quelle übernommene Linearisierung
-                // darf die Ersparnis nicht kosten – dann ohne schreiben.
-                if plan.linearizationPolicy == .preserveFromSource,
-                   Compressor.fileSize(of: outputURL)
-                    >= Compressor.fileSize(of: URL(fileURLWithPath: document.sourcePath)) {
+                switch plan.linearizationPolicy {
+                case .none: try write(linearize: false)
+                case .fastWebView: try write(linearize: true)
+                case .preserveFromSource:
+                    // Masterplan B7: Erst ohne schreiben. Linearisieren kostet
+                    // bis zu ein Viertel (Objektströme fallen weg; statab
+                    // 30,1 → 37,3 MB) und dauert länger – versucht wird es
+                    // nur mit genug Abstand zur Quelle und behalten nur, wenn
+                    // das Ergebnis kleiner als die Quelle bleibt.
                     try write(linearize: false)
+                    let source = Compressor.fileSize(of: URL(fileURLWithPath: document.sourcePath))
+                    let plain = Compressor.fileSize(of: outputURL)
+                    if Double(plain) < Double(source) * Compressor.linearizationHeadroom {
+                        let kept = outputURL.deletingLastPathComponent()
+                            .appendingPathComponent("plain-\(UUID().uuidString).pdf")
+                        try FileManager.default.moveItem(at: outputURL, to: kept)
+                        try write(linearize: true)
+                        if Compressor.fileSize(of: outputURL) >= source {
+                            try FileManager.default.removeItem(at: outputURL)
+                            try FileManager.default.moveItem(at: kept, to: outputURL)
+                        } else {
+                            try FileManager.default.removeItem(at: kept)
+                        }
+                    }
                 }
                 singleWriteUsed = true
             } else {

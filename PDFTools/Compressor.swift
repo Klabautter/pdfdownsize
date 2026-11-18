@@ -938,6 +938,11 @@ struct Compressor {
     /// Schreibwege. Bis 1.0.2 „PDFTools" (der Arbeitsname des Projekts).
     static let producerName = "PDFdownsize"
 
+    /// Masterplan B7: Eine übernommene Linearisierung wird nur versucht, wenn
+    /// die nicht linearisierte Ausgabe darunter liegt – Linearisieren kostete
+    /// gemessen bis zu ein Viertel der Größe (statab +24 %).
+    static let linearizationHeadroom = 0.8
+
     static func suggestedOutputName(for inputURL: URL?,
                                       mode: CompressionMode = .small) -> String {
         guard let inputURL else { return "\(String(localized: "Dokument"))_\(CompressionMode.small.filenameSuffix).pdf" }
