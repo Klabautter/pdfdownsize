@@ -53,6 +53,27 @@ struct RootView: View {
     /// wer eine Datei schließt, wird nicht mit ihr verfolgt.
     @State private var lastOpenedPDF: URL?
 
+    /// Masterplan B3: Nach „Beenden“ in der Rückfrage fragt das Beenden, das
+    /// dem Schließen des letzten Fensters folgt, nicht ein zweites Mal.
+    @State private var quitConfirmed = false
+
+    /// Was beim Beenden oder Schließen verloren ginge – über alle Werkzeuge.
+    private var pendingWork: PendingWork {
+        guard !quitConfirmed else { return PendingWork() }
+        return PendingWork(
+            unsavedResult: compressionVM.hasUnsavedResult || ocrVM.hasUnsavedResult
+                || organizeVM.hasUnsavedResult,
+            running: compressionVM.isWorking || ocrVM.isWorking
+                || conversionVM.isWorking || organizeVM.isProcessing)
+    }
+
+    private func askBeforeQuit(_ work: PendingWork, reply: @escaping (Bool) -> Void) {
+        discardGuard.confirmQuit(work) { confirmed in
+            if confirmed { quitConfirmed = true }
+            reply(confirmed)
+        }
+    }
+
     /// Mit offenem Inspector (Modus „Eigene") liegen Pult und Inspector
     /// nebeneinander – dafür braucht das Fenster mehr Breite (Befund S5).
     private var minWidth: CGFloat { 940 }
@@ -68,6 +89,22 @@ struct RootView: View {
         .focusedSceneObject(discardGuard)
         .environmentObject(discardGuard)
         .discardConfirmation(discardGuard)
+        // B3: ⌘Q fragt über den App-Delegate, ⌘W über den Fenster-Proxy –
+        // beide mit demselben Dialog.
+        .background(WindowCloseGuard { window in
+            let work = pendingWork
+            guard work.needsConfirmation else { return true }
+            askBeforeQuit(work) { confirmed in
+                if confirmed { window.close() }
+            }
+            return false
+        })
+        .onAppear {
+            OpenFilesDelegate.current?.pendingWork = { pendingWork }
+            OpenFilesDelegate.current?.confirmQuit = { work, reply in
+                askBeforeQuit(work, reply: reply)
+            }
+        }
     }
 
     private var classic: some View {
@@ -122,10 +159,16 @@ struct RootView: View {
         .onChange(of: compressionVM.inputURL) { old, new in remember(new, closing: old) }
         .onChange(of: ocrVM.pdfURL) { old, new in remember(new, closing: old) }
         .onChange(of: conversionVM.pdfURL) { old, new in remember(new, closing: old) }
-        .onChange(of: organizeVM.project.documents.count) { _, _ in
-            if let last = organizeVM.project.documents.last,
-               last.url.pathExtension.lowercased() == "pdf" {
-                lastOpenedPDF = last.url
+        // B6: Die Merkstelle folgt dem ABGESCHLOSSENEN Import (die Liste
+        // ändert sich erst danach), ignoriert konvertierte Bilder und wird
+        // gelöscht, wenn das Dokument in Organisieren entfernt wird.
+        .onChange(of: organizeVM.project.documents.map(\.url)) { old, new in
+            if let last = lastOpenedPDF, old.contains(last), !new.contains(last) {
+                lastOpenedPDF = nil
+            }
+            if let added = organizeVM.project.documents.last(where: { !$0.isConvertedImage }),
+               !old.contains(added.url) {
+                lastOpenedPDF = added.url
             }
         }
     }
@@ -140,25 +183,30 @@ struct RootView: View {
         }
     }
 
-    /// Beim Werkzeugwechsel: Ein leeres Werkzeug bekommt die zuletzt
-    /// geöffnete PDF. Laufende Arbeit und eigener Inhalt bleiben unberührt.
+    /// Beim Werkzeugwechsel (Masterplan B6), EINE Regel für alle:
+    /// Organisieren SAMMELT – die zuletzt geöffnete PDF kommt dazu, falls sie
+    /// noch nicht drin ist. Die anderen drei ZEIGEN die zuletzt geöffnete PDF.
+    /// Laufende Arbeit, ein ungesichertes Ergebnis und ein Stapel werden nie
+    /// überschrieben.
     private func handOver(to tool: AppTool) {
         guard let url = lastOpenedPDF,
               FileManager.default.fileExists(atPath: url.path) else { return }
         switch tool {
         case .compress:
-            guard compressionVM.inputURL == nil, compressionVM.bulkInputs.isEmpty,
-                  !compressionVM.isWorking else { return }
+            guard compressionVM.inputURL != url, compressionVM.bulkInputs.isEmpty,
+                  !compressionVM.isWorking, !compressionVM.hasUnsavedResult else { return }
             compressionVM.select(url)
         case .organize:
-            guard organizeVM.project.documents.isEmpty, organizeVM.outcome == nil,
-                  !organizeVM.isProcessing else { return }
+            guard !organizeVM.project.documents.contains(where: { $0.url == url }),
+                  organizeVM.outcome == nil, !organizeVM.isProcessing else { return }
             organizeVM.importDocuments([url])
         case .convert:
-            guard !conversionVM.hasSource, !conversionVM.isWorking else { return }
+            guard conversionVM.pdfURL != url, conversionVM.imageURLs.isEmpty,
+                  !conversionVM.isWorking, conversionVM.resultFolder == nil,
+                  conversionVM.savedPDF == nil else { return }
             conversionVM.accept([url])
         case .ocr:
-            guard ocrVM.pdfURL == nil, !ocrVM.isWorking else { return }
+            guard ocrVM.pdfURL != url, !ocrVM.isWorking, !ocrVM.hasUnsavedResult else { return }
             ocrVM.accept([url])
         }
     }

@@ -36,20 +36,37 @@ final class ThumbnailService: @unchecked Sendable {
     static let shared = ThumbnailService()
     let pool = PDFDocumentPool()
 
-    private var cache: [ThumbnailKey: NSImage] = [:]
-    private let lock = NSLock()
+    /// Masterplan C6: begrenzter Cache. Vorher wuchs ein Dictionary ohne
+    /// Grenze – bei 1000 Seiten in drei Rotationen über Hunderte MB. NSCache
+    /// ist threadsicher und gibt unter Speicherdruck selbst frei.
+    static let cacheCostLimit = 200 << 20
+    private let cache: NSCache<KeyBox, NSImage> = {
+        let cache = NSCache<KeyBox, NSImage>()
+        cache.totalCostLimit = ThumbnailService.cacheCostLimit
+        return cache
+    }()
+
+    final class KeyBox: NSObject {
+        let key: ThumbnailKey
+        init(_ key: ThumbnailKey) { self.key = key }
+        override var hash: Int { key.hashValue }
+        override func isEqual(_ object: Any?) -> Bool { (object as? KeyBox)?.key == key }
+    }
 
     func cached(key: ThumbnailKey) -> NSImage? {
-        lock.lock(); defer { lock.unlock() }
-        return cache[key]
+        cache.object(forKey: KeyBox(key))
     }
 
     func store(_ image: NSImage, key: ThumbnailKey) {
-        lock.lock(); defer { lock.unlock() }
-        cache[key] = image
+        // Kosten = Breite × Höhe × 4 Byte.
+        let cost = Int(image.size.width * image.size.height * 4)
+        cache.setObject(image, forKey: KeyBox(key), cost: cost)
     }
 
     /// Liefert das Thumbnail inkl. absoluter Rotation (Quell-Rotation + Nutzer-Drehung).
+    /// Masterplan C6: `@concurrent` – mit SWIFT_APPROACHABLE_CONCURRENCY lief
+    /// das Rendern sonst auf dem Hauptthread des Aufrufers.
+    @concurrent
     func thumbnail(sourceID: UUID, url: URL, pageIndex: Int,
                    additionalRotation: Int, pixelHeight: CGFloat = 320) async -> NSImage? {
 
@@ -61,6 +78,8 @@ final class ThumbnailService: @unchecked Sendable {
                                absoluteRotation: absolute, pixelHeight: pixelHeight)
 
         if let hit = cached(key: key) { return hit }
+        // Weggescrollt, während das Dokument geöffnet wurde: nicht rendern.
+        if Task.isCancelled { return nil }
 
         let pageCopy = page.copy() as! PDFPage
         pageCopy.rotation = absolute

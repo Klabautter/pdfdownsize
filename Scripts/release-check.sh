@@ -52,14 +52,17 @@ done
 # bereits gebaute App nachträglich freigeben kann. Fehlendes Gate blockiert.
 GATE="$APP/Contents/Resources/ReleaseEvidence/release-acceptance.plist"
 echo
-echo "Feature Freeze Release Acceptance:"
+echo "Release-Gate (Scripts/gate.sh):"
 ACCEPTED="$(/usr/bin/plutil -extract accepted raw -o - "$GATE" 2>/dev/null || true)"
-PLAN="$(/usr/bin/plutil -extract plan raw -o - "$GATE" 2>/dev/null || true)"
-if [ "$ACCEPTED" = "true" ] && [ "$PLAN" = "FEATURE_FREEZE_PLAN_2026-09-28" ]; then
-    echo "  ✓ Aktuelle Feature-Freeze-Abnahme erfüllt"
+GATE_COMMIT="$(/usr/bin/plutil -extract commit raw -o - "$GATE" 2>/dev/null || true)"
+HEAD_COMMIT="$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD 2>/dev/null || true)"
+if [ "$ACCEPTED" = "true" ] && [ -n "$GATE_COMMIT" ] && [ "$GATE_COMMIT" = "$HEAD_COMMIT" ]; then
+    echo "  ✓ Gate grün für ${GATE_COMMIT:0:12}"
 else
-    echo "  ✗ Aktuelle Feature-Freeze-Abnahme offen – Release blockiert"
-    /usr/bin/plutil -extract blockers json -o - "$GATE" 2>/dev/null || true
+    echo "  ✗ Kein grünes Gate für diesen Stand – Release blockiert"
+    /usr/bin/plutil -extract reason raw -o - "$GATE" 2>/dev/null || true
+    [ -n "$GATE_COMMIT" ] && [ "$GATE_COMMIT" != "$HEAD_COMMIT" ] \
+        && echo "    Gate lief für ${GATE_COMMIT:0:12}, HEAD ist ${HEAD_COMMIT:0:12}"
     fail=1
 fi
 

@@ -109,6 +109,9 @@ enum CompressionConcurrency {
             }
             while let (index, result) = try await group.next() {
                 results[index] = result
+                // Globaler Abbruch (B4): nichts Neues mehr starten. Laufende
+                // Dateien sehen den Abbruch selbst und enden als Abbruch.
+                if isCancelled?() == true || Task.isCancelled { continue }
                 if let (nextIndex, url) = iterator.next() {
                     group.addTask {
                         (nextIndex, try compressOne(url, index: nextIndex, mode: mode,
@@ -157,6 +160,9 @@ enum CompressionConcurrency {
             }
             while let (index, result) = try await group.next() {
                 results[index] = result
+                // Globaler Abbruch (B4): nichts Neues mehr starten. Laufende
+                // Dateien sehen den Abbruch selbst und enden als Abbruch.
+                if isCancelled?() == true || Task.isCancelled { continue }
                 if let (nextIndex, url) = iterator.next() {
                     group.addTask {
                         (nextIndex, collectOne(url, index: nextIndex, options: options,
@@ -166,10 +172,9 @@ enum CompressionConcurrency {
                 }
             }
         }
-        // Globaler Abbruch bleibt ein Abbruch (kein Teilergebnis-Erfolg).
-        try Task.checkCancellation()
-        if isCancelled?() == true { throw CancellationError() }
-        return results.map { $0 ?? .failure(CompressionError.loadFailed) }
+        // Masterplan B4: Ein globaler Abbruch behält, was fertig ist. Nie
+        // gestartete Dateien zählen als abgebrochen, nicht als Fehler.
+        return results.map { $0 ?? .failure(CancellationError()) }
     }
 
     /// Ein Dokument für die sammelnde Variante: wirft nie, sondern fängt

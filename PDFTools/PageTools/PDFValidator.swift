@@ -73,6 +73,12 @@ enum PDFValidator {
         /// misst etwas anderes, als er zu messen vorgibt.
         var pageMapping: [Int: Int]?
 
+        /// Masterplan A3: Seiten (0-basiert), die gegen das Original gerendert
+        /// werden. Gesetzt von der Kompression aus ihrem Plan
+        /// (`renderSamplePages(pageCount:changedBytesByPage:)`); nil = keine
+        /// Render-Stichprobe.
+        var renderSamplePages: [Int]?
+
         /// Verlustfreie Strukturoptimierung desselben Dokuments: alles muss
         /// bleiben. Masterplan Schritt 8 verlangt hier die volle Liste:
         /// qpdf-check, Seitenzahl, Geometrie, Text, Annotationen, Links,
@@ -203,12 +209,23 @@ enum PDFValidator {
 
     // MARK: API
 
+    /// Masterplan C6: dieselbe Prüfung abseits des Main Actors. OCR und
+    /// „PDF erstellen“ prüften bisher in `Task { @MainActor }` – bei einem
+    /// 1000-Seiten-Dokument stand die Oberfläche dabei.
+    static func validateOffMain(outputURL: URL, referenceURL: URL? = nil,
+                                policy: Policy) async -> Report {
+        await Task.detached(priority: .userInitiated) {
+            validate(outputURL: outputURL, referenceURL: referenceURL, policy: policy)
+        }.value
+    }
+
     /// Validiert `output` gegen die Policy. Die Referenz kann als URL oder als
     /// bereits geladenes Dokument übergeben werden (z. B. Originaldaten aus dem RAM).
     @discardableResult
     static func validate(outputURL: URL,
                          referenceURL: URL? = nil,
                          referenceDocument: PDFDocument? = nil,
+                         referenceSnapshot: PDFSemanticSnapshot? = nil,
                          policy: Policy) -> Report {
         // Die Validierung öffnet Dokumente, liest jede Seite und erzeugt bei
         // Bedarf zwei vollständige Snapshots. Alles davon ist autoreleased;
@@ -247,10 +264,32 @@ enum PDFValidator {
             refDoc = referenceURL.flatMap { PDFDocument(url: $0) }
         }
 
+        // Masterplan C2: Die Snapshots entstehen VOR der Strukturprüfung –
+        // deren Textvergleich liest dann die Zeichenzahlen aus ihnen, statt
+        // den Text aller Seiten ein drittes und viertes Mal zu extrahieren.
+        // Die Referenz kommt, wenn vorhanden, vom Aufrufer (einmal je Lauf,
+        // auch über Re-Plans hinweg).
+        var snapshots: (before: PDFSemanticSnapshot, after: PDFSemanticSnapshot)?
+        var snapshotError: Error?
+        if policy.failsOnSemanticSeverity != nil, let referenceURL {
+            do {
+                let before = try referenceSnapshot ?? PDFSemanticSnapshot.capture(referenceURL)
+                let after = try PDFSemanticSnapshot.capture(outputURL)
+                snapshots = (before, after)
+            } catch {
+                snapshotError = error
+            }
+        }
+
         validateStructure(outDoc,
                           expectedPageCount: policy.expectedPageCount,
                           reference: refDoc,
                           policy: policy,
+                          textCounts: snapshots.map {
+                              ($0.before.pages.reduce(0) { $0 + $1.textCharacterCount },
+                               $0.after.pages.reduce(0) { $0 + $1.textCharacterCount },
+                               $0.before.pages.reduce(0) { $0 + $1.wordCount })
+                          },
                           report: &report)
 
         // Masterplan Schritt 8 – unabhängige Strukturprüfung über libqpdf.
@@ -279,10 +318,10 @@ enum PDFValidator {
                 + "\(threshold.rawValue))")
         }
         if let threshold = policy.failsOnSemanticSeverity,
-           let referenceURL {
+           referenceURL != nil {
             do {
-                let before = try PDFSemanticSnapshot.capture(referenceURL)
-                let after = try PDFSemanticSnapshot.capture(outputURL)
+                if let snapshotError { throw snapshotError }
+                guard let (before, after) = snapshots else { throw CocoaError(.fileReadUnknown) }
                 for difference in PDFSemanticSnapshot.differences(
                         before, after, expecting: policy.expectedDifferences) {
                     // V2-5 (§11.2) – jede Abweichung wird zusätzlich als
@@ -312,6 +351,15 @@ enum PDFValidator {
             validateGeometry(outDoc, reference: refDoc, report: &report)
         }
 
+        if let pages = policy.renderSamplePages, !pages.isEmpty {
+            if let referenceURL {
+                validateRenderSample(outputURL: outputURL, referenceURL: referenceURL,
+                                     pages: pages, report: &report)
+            } else {
+                report.warnings.append("Render-Stichprobe übersprungen: keine Referenzdatei")
+            }
+        }
+
         if policy.reportsSignatures,
            Compressor.containsDigitalSignature(at: outputURL) {
             report.signatureDetected = true
@@ -322,6 +370,113 @@ enum PDFValidator {
 
         return report
         }
+    }
+
+    // MARK: Render-Stichprobe (Masterplan A3)
+
+    /// Höchstens so viele Seiten werden gerendert (erste, letzte und die mit
+    /// den meisten veränderten Bildbytes). Kosten je Seite rund 60 ms.
+    static let maximumRenderSamplePages = 6
+    static let renderSampleDPI = 110.0
+    /// Strukturkollaps: dieselbe Grenze wie der Katastrophen-Floor der
+    /// Bildgates – darunter ist eine Seite kaputt, nicht nur komprimiert.
+    static let renderSampleMinimumSSIM = QualityGatePolicy.catastrophicGlobalFloor
+    /// Farbverlust. Die Stichprobe ist ein Katastrophennetz wie die SSIM-
+    /// Grenze darüber (0,70, weit unter den Stufengrenzen), keine zweite
+    /// Qualitätsentscheidung: Doppelte Bild-Gate-Grenze. Gemessen am
+    /// Review-Brief: Eine blaue Unterschrift nach JPEG-Farbunterabtastung
+    /// (sichtbar blau, nur blasser) misst 13,2; dieselbe Seite grau gemacht
+    /// liegt weit darüber (RenderSampleValidationTests).
+    static let renderSampleMaximumPeakDeltaE = 2 * QualityGatePolicy.peakDeltaE76Floor
+
+    /// Stichprobenseiten (0-basiert, sortiert): erste und letzte Seite plus die
+    /// Seiten mit den meisten veränderten Bildbytes.
+    static func renderSamplePages(pageCount: Int, changedBytesByPage: [Int: Int]) -> [Int] {
+        guard pageCount > 0 else { return [] }
+        var pages: Set<Int> = [0, pageCount - 1]
+        let ranked = changedBytesByPage
+            .filter { $0.key >= 0 && $0.key < pageCount && $0.value > 0 }
+            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+        for (page, _) in ranked where pages.count < maximumRenderSamplePages {
+            pages.insert(page)
+        }
+        return pages.sorted()
+    }
+
+    /// Rendert jede Stichprobenseite von Original und Ausgabe und meldet
+    /// Strukturkollaps (`.render`) oder Farbverlust (`.color`) mit Seite.
+    /// Die Befunde sind `.error`: Sie lösen den vorhandenen Re-Plan aus
+    /// (RollbackPlanner stuft die Ressourcen dieser Seiten zurück) – keine
+    /// zweite Entscheidungslogik.
+    private static func validateRenderSample(outputURL: URL, referenceURL: URL,
+                                             pages: [Int], report: inout Report) {
+        guard let source = CGPDFDocument(referenceURL as CFURL),
+              let output = CGPDFDocument(outputURL as CFURL) else {
+            report.fail("Render-Stichprobe nicht möglich", ValidationFinding(
+                kind: .render, severity: .error, pages: [],
+                message: "Render-Stichprobe nicht möglich"))
+            return
+        }
+        for index in pages where index < source.numberOfPages && index < output.numberOfPages {
+            autoreleasepool {
+                guard let reference = renderPage(source, index: index),
+                      let candidate = renderPage(output, index: index),
+                      reference.width == candidate.width, reference.height == candidate.height
+                else {
+                    report.fail("Seite \(index + 1): nicht vergleichbar gerendert", ValidationFinding(
+                        kind: .render, severity: .error, pages: [index + 1],
+                        message: "Seite \(index + 1): nicht vergleichbar gerendert"))
+                    return
+                }
+                let census = ChromaCensus.of(reference)
+                let edge = max(reference.width, reference.height)
+                guard let refSample = QualityGates.sample(reference, maxEdge: edge, census: census),
+                      let outSample = QualityGates.sample(candidate, maxEdge: edge),
+                      let measurement = QualityGates.measure(reference: refSample, candidate: outSample)
+                else { return }
+                if measurement.globalSSIM < renderSampleMinimumSSIM {
+                    let message = String(format: "Seite %d: Darstellung weicht vom Original ab (SSIM %.3f)",
+                                         index + 1, measurement.globalSSIM)
+                    report.fail(message, ValidationFinding(
+                        kind: .render, severity: .error, pages: [index + 1], message: message))
+                }
+                if let peak = measurement.peakDeltaE76, peak > renderSampleMaximumPeakDeltaE {
+                    let message = String(format: "Seite %d: Farbe geht verloren (ΔE %.1f im farbigsten Prozent)",
+                                         index + 1, peak)
+                    report.fail(message, ValidationFinding(
+                        kind: .color, severity: .error, pages: [index + 1], message: message))
+                }
+            }
+        }
+    }
+
+    /// Seite bei `renderSampleDPI` auf Weiß, Rotation über die Zeichenmatrix.
+    private static func renderPage(_ document: CGPDFDocument, index: Int) -> CGImage? {
+        guard let page = document.page(at: index + 1) else { return nil }
+        let box = page.getBoxRect(.cropBox)
+        let rotated = page.rotationAngle % 180 != 0
+        let scale = renderSampleDPI / 72.0
+        let w = max(8, Int(((rotated ? box.height : box.width) * scale).rounded()))
+        let h = max(8, Int(((rotated ? box.width : box.height) * scale).rounded()))
+        guard w * h <= 40_000_000,
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { return nil }
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.interpolationQuality = .high
+        // getDrawingTransform skaliert nie hoch: erst auf DPI skalieren, dann
+        // die Transformation in Punkten (Rotation, Box-Ursprung) anwenden.
+        ctx.scaleBy(x: CGFloat(w) / ((rotated ? box.height : box.width)),
+                    y: CGFloat(h) / ((rotated ? box.width : box.height)))
+        ctx.concatenate(page.getDrawingTransform(
+            .cropBox,
+            rect: CGRect(x: 0, y: 0, width: rotated ? box.height : box.width,
+                         height: rotated ? box.width : box.height),
+            rotate: 0, preserveAspectRatio: true))
+        ctx.drawPDFPage(page)
+        return ctx.makeImage()
     }
 
     /// Seitengeometrie muss Punkt für Punkt der Referenz entsprechen.
@@ -404,6 +559,7 @@ enum PDFValidator {
                                           expectedPageCount: Int?,
                                           reference: PDFDocument?,
                                           policy: Policy,
+                                          textCounts: (input: Int, output: Int, inputWords: Int)? = nil,
                                           report: inout Report) {
         if let expected = expectedPageCount, doc.pageCount != expected {
             report.fail("Seitenzahl \(doc.pageCount) ≠ erwartet \(expected)",
@@ -452,7 +608,22 @@ enum PDFValidator {
             // Mangel.
             let inputText: String
             let outputText: String
-            if let mapping = policy.pageMapping {
+            if policy.pageMapping == nil, let textCounts {
+                // C2: Zeichenzahlen aus den Snapshots – derselbe Vergleich
+                // (Summe der Seitentexte), ohne erneute Extraktion.
+                // Wie bisher: Eingaben ohne sichtbaren Text (nur Leerraum)
+                // prüfen nichts.
+                if textCounts.inputWords > 0, textCounts.input > 0 {
+                    let ratio = Double(textCounts.output) / Double(textCounts.input)
+                    if ratio < policy.textSimilarityThreshold {
+                        let message = String(format: "Textverlust: %.0f %% erhalten", ratio * 100)
+                        report.fail(message, ValidationFinding(
+                            kind: .text, severity: .error, pages: [], message: message))
+                    }
+                }
+                inputText = ""
+                outputText = ""
+            } else if let mapping = policy.pageMapping {
                 let pairs = mapping.sorted { $0.key < $1.key }
                 inputText = pairs.compactMap { ref.page(at: $0.value)?.string }.joined()
                 outputText = pairs.compactMap { doc.page(at: $0.key)?.string }.joined()

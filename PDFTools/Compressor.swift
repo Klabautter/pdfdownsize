@@ -68,9 +68,11 @@ enum CompressionMode: String, CaseIterable, Identifiable {
 }
 
 struct CompressionResult {
-    let outputURL: URL
-    let inputBytes: Int64
-    let outputBytes: Int64
+    // var (Masterplan B2): Das Ergebnis einer entsperrten Arbeitskopie wird
+    // auf die neu verschlüsselte Datei umgeschrieben (UnlockedDocument).
+    var outputURL: URL
+    var inputBytes: Int64
+    var outputBytes: Int64
     var alreadyOptimized: Bool = false
 
     /// Die Ausgabe IST die Eingabe – unverändert durchgereicht, weil die
@@ -409,10 +411,33 @@ struct Compressor {
 
         // Validierung eines Struktur-Outputs; der Test-Seam (V2-5) ersetzt
         // den Standard-Validator, nil heißt Produktverhalten.
+        var referenceSnapshot: PDFSemanticSnapshot?
         func validate(_ url: URL) -> PDFValidator.Report {
-            StageTimer.run(stageTimer, .semanticValidationMs) {
-                qaValidationHook?(url) ?? PDFValidator.validate(
-                    outputURL: url, referenceURL: inputURL, policy: policy)
+            // Masterplan C2, Schritt 1: Größe zuerst. Ist die Ausgabe nicht
+            // kleiner, liefert der Never-Grow-Zweig unten das byte-identische
+            // Original – eine Prüfung dieser Ausgabe wäre verlorene Zeit
+            // (statab: 54 von 71 s Validierung für ein verworfenes Ergebnis).
+            if qaValidationHook == nil, Self.fileSize(of: url) >= inputBytes {
+                var skipped = PDFValidator.Report()
+                skipped.warnings.append("Nicht validiert: Ausgabe nicht kleiner – das Original wird geliefert")
+                return skipped
+            }
+            // Render-Stichprobe gegen das Original (Masterplan A3): die
+            // Seiten des aktuellen Plans – nach einem Re-Plan neu bestimmt.
+            var runPolicy = policy
+            runPolicy.renderSamplePages = PDFValidator.renderSamplePages(
+                pageCount: policy.expectedPageCount ?? 0,
+                changedBytesByPage: outcome.plan.changedImageBytesByPage)
+            return StageTimer.run(stageTimer, .semanticValidationMs) {
+                if let hooked = qaValidationHook?(url) { return hooked }
+                // C2, Schritt 2: Die Referenz einmal je Operation erfassen und
+                // an alle Validierungen (Erstlauf, Re-Plans) weiterreichen.
+                if referenceSnapshot == nil {
+                    referenceSnapshot = try? PDFSemanticSnapshot.capture(inputURL)
+                }
+                return PDFValidator.validate(
+                    outputURL: url, referenceURL: inputURL,
+                    referenceSnapshot: referenceSnapshot, policy: runPolicy)
             }
         }
 

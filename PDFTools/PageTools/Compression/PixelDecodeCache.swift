@@ -40,13 +40,15 @@ import CoreGraphics
 //               die Dekodierung selbst geschieht außerhalb (im Ruf des Job).
 //
 // Das Budget ist konfigurierbar (PDFTOOLS_DECODE_CACHE_BUDGET in Bytes,
-// Muster wie PDFTOOLS_PIXEL_BUDGET des Schedulers). Default 192 MB – groß
-// genug für zwei volle Kartenraster, klein genug, um den Scheduler nicht
-// zu verdoppeln.
+// Muster wie PDFTOOLS_PIXEL_BUDGET des Schedulers). Default: ein Viertel
+// des Scheduler-Budgets (Masterplan C5).
 final class PixelDecodeCache: @unchecked Sendable {
 
     struct Config: Sendable {
-        var budgetBytes: Int64 = 192 * 1024 * 1024
+        /// Masterplan C5: ein Viertel des Pixel-Budgets statt fest 192 MB –
+        /// auf 8 GB kleiner (128 MB), auf großen Macs mehr Treffer. Vorher lag
+        /// der Cache unabhängig neben einem Scheduler mit bis zu 2 GB.
+        var budgetBytes: Int64 = PixelWorkScheduler.resolvedBudget() / 4
 
         /// Env-Überschreibung (Bytes) – Muster der Scheduler-Budgets.
         static func resolved(env: [String: String] = ProcessInfo.processInfo.environment)

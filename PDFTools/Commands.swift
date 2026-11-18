@@ -61,9 +61,19 @@ extension PDFToolsApp {
 
     @CommandsBuilder
     var appCommands: some Commands {
-        // Kein leeres Hilfe-Menü (Befund A6, Review 2026-10-09): Es gibt
-        // keine Hilfeseite; der Eintrag „PDFTools-Hilfe" führte ins Leere.
-        CommandGroup(replacing: .help) { }
+        // Hilfe (Masterplan B7): Die README auf GitHub ist die Hilfeseite,
+        // die Release-Seite sagt, was neu ist, „Lizenzen“ zeigt die
+        // gebündelten Texte.
+        CommandGroup(replacing: .help) {
+            Button("PDFdownsize-Hilfe") {
+                NSWorkspace.shared.open(AppLinks.help)
+            }
+            Button("Neu in dieser Version") {
+                NSWorkspace.shared.open(AppLinks.releaseNotes)
+            }
+            Divider()
+            OpenWindowButton(title: String(localized: "Lizenzen"), windowID: "licenses")
+        }
 
         // App-Menü: Updates über Sparkle. Die Abfrage ist die einzige
         // Netzverbindung der App und hier abschaltbar.
@@ -201,5 +211,29 @@ extension PDFToolsApp {
             }
             .disabled(!hasSelection || !(organizeVM?.canMoveRight() ?? false))
         }
+    }
+}
+
+
+/// Feste Ziele des Hilfe-Menüs.
+enum AppLinks {
+    static let repository = URL(string: "https://github.com/Klabautter/pdfdownsize")!
+    static let help = URL(string: "https://github.com/Klabautter/pdfdownsize#readme")!
+    /// Release-Seite genau dieser Version.
+    static var releaseNotes: URL {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        return version.isEmpty
+            ? repository.appendingPathComponent("releases")
+            : repository.appendingPathComponent("releases/tag/v\(version)")
+    }
+}
+
+/// `openWindow` gibt es nur in Views; Menübefehle brauchen diese Hülle.
+private struct OpenWindowButton: View {
+    let title: String
+    let windowID: String
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        Button(title) { openWindow(id: windowID) }
     }
 }

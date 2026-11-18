@@ -249,7 +249,8 @@ struct OrganizeView: View {
     /// statt jede Kachel mit dem Dateinamen zu beschriften.
     private var statsHeader: some View {
         let documents = vm.project.documents
-        return VStack(alignment: .leading, spacing: 6) {
+        return HStack(alignment: .top, spacing: 12) {
+        VStack(alignment: .leading, spacing: 6) {
             if documents.count == 1, let only = documents.first {
                 Text(verbatim: "\(only.fileName) · \(Counted.pages(vm.project.totalPages)) · \(CompressionResult.format(only.fileSize))")
                     .font(.callout)
@@ -276,6 +277,13 @@ struct OrganizeView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+            // B6: Organisieren sammelt – „Leeren“ setzt die Sammlung zurück.
+            Button("Leeren") { vm.removeAllDocuments() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(vm.isProcessing)
+                .help("Alle Quellen aus Organisieren entfernen")
+        }
     }
 
     private var warningBanner: some View {

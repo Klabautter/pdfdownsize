@@ -11,6 +11,90 @@
 #include <qpdf/Pl_Buffer.hh>
 #include <qpdf/Pl_Discard.hh>
 #include <qpdf/Pl_Flate.hh>   /* Phase V2-9 – compression level des Writers */
+#include <shared_mutex>
+#include <zlib.h>      /* Z_DEFAULT_COMPRESSION für den Flate-Level-Schutz (C7) */
+
+/* Masterplan D4: Keine C++-Ausnahme verlässt die C-Grenze. Jede exportierte
+ * Funktion ist eingehüllt; ein Hygiene-Test zählt Exporte im Header gegen
+ * die Vorkommen von PDFCORE_GUARD_BEGIN. Vorher hatten u. a. jpx_decode,
+ * zlib_inflate, g4_encode und jbig2_encode kein try – ein bad_alloc dort
+ * beendete die App. */
+#define PDFCORE_GUARD_BEGIN try {
+#define PDFCORE_GUARD_END(fail) } catch (...) { return (fail); }
+#define PDFCORE_GUARD_END_VOID } catch (...) { }
+
+namespace {
+/// Masterplan C7: `Pl_Flate::setCompressionLevel` ist prozessweit. Ein
+/// Schreiben mit eigenem Level hält die Sperre exklusiv, jedes andere
+/// Schreiben geteilt – so liest kein paralleler Writer den fremden Level.
+std::shared_mutex& flate_level_mutex()
+{
+    static std::shared_mutex m;
+    return m;
+}
+
+/// Setzt den Level für die Dauer eines Writes und stellt ihn auch bei einer
+/// Ausnahme zurück (vorher blieb Level 9 nach einem Fehlschlag stehen).
+class FlateLevelScope {
+    std::unique_lock<std::shared_mutex> lock_;
+public:
+    explicit FlateLevelScope(int level) : lock_(flate_level_mutex()) {
+        Pl_Flate::setCompressionLevel(level);
+    }
+    ~FlateLevelScope() { Pl_Flate::setCompressionLevel(Z_DEFAULT_COMPRESSION); }
+    FlateLevelScope(FlateLevelScope const&) = delete;
+    FlateLevelScope& operator=(FlateLevelScope const&) = delete;
+};
+
+/// Masterplan D4: Pipeline, die nach `limit` Bytes abbricht. Vorher sammelte
+/// ein Pl_Buffer dekodierter Daten ohne Grenze – ein kleiner Flate-Strom,
+/// der sich zu Gigabytes entpackt (Dekompressionsbombe), füllte den Speicher.
+class Pl_Limit : public Pipeline {
+    size_t seen_ = 0;
+    size_t limit_;
+public:
+    Pl_Limit(char const* id, Pipeline* next, size_t limit)
+        : Pipeline(id, next), limit_(limit) {}
+    void write(unsigned char const* data, size_t len) override {
+        seen_ += len;
+        if (seen_ > limit_) { throw std::length_error("pdfcore decode limit"); }
+        getNext()->write(data, len);
+    }
+    void finish() override { getNext()->finish(); }
+};
+
+/// Obergrenze der dekodierten Bytes eines Streams: Bilder nach ihren Maßen
+/// (plus 1 MB Spielraum für Predictor-Zeilen), alles andere 512 MB.
+size_t pdfcore_decode_limit(QPDFObjectHandle stream)
+{
+    size_t const generic = size_t(512) << 20;
+    if (!stream.isStream()) { return generic; }
+    QPDFObjectHandle d = stream.getDict();
+    QPDFObjectHandle st = d.getKey("/Subtype");
+    if (!(st.isName() && st.getName() == "/Image")) { return generic; }
+    QPDFObjectHandle w = d.getKey("/Width"), h = d.getKey("/Height");
+    if (!w.isInteger() || !h.isInteger() || w.getIntValue() <= 0 || h.getIntValue() <= 0) {
+        return generic;
+    }
+    long long bpc = d.getKey("/BitsPerComponent").isInteger()
+        ? d.getKey("/BitsPerComponent").getIntValue() : 8;
+    if (bpc <= 0 || bpc > 16) { bpc = 16; }
+    long long comps = 4;   // unbekannter Farbraum: großzügig (CMYK)
+    QPDFObjectHandle cs = d.getKey("/ColorSpace");
+    if (d.getKey("/ImageMask").isBool() && d.getKey("/ImageMask").getBoolValue()) {
+        comps = 1; bpc = 1;
+    } else if (cs.isName()) {
+        std::string n = cs.getName();
+        if (n == "/DeviceGray" || n == "/CalGray") { comps = 1; }
+        else if (n == "/DeviceRGB" || n == "/CalRGB" || n == "/Lab") { comps = 3; }
+    }
+    long double bytes = (long double)w.getIntValue() * (long double)h.getIntValue()
+        * (long double)comps * (long double)((bpc + 7) / 8) + (1 << 20);
+    if (bytes > (long double)generic * 8) { return generic * 8; }
+    return static_cast<size_t>(bytes);
+}
+
+} // namespace
 #include <qpdf/Pl_StdioFile.hh> /* Befund B11 – abbrechbarer Writer-Output */
 #include <qpdf/Pipeline.hh>
 #include <qpdf/QUtil.hh>
@@ -112,7 +196,10 @@ static pdfcore_status map_exception(const std::exception& e)
     return PDFCORE_ERR_OPEN;
 }
 
-pdfcore_document_t *pdfcore_open(const char *path, pdfcore_status *status)
+namespace {
+/// Gemeinsamer Öffnungsweg; `password` darf nullptr sein (Masterplan B2).
+pdfcore_document_t *open_impl(const char *path, const char *password,
+                              pdfcore_status *status)
 {
     if (status) { *status = PDFCORE_OK; }
     if (!path) {
@@ -122,15 +209,17 @@ pdfcore_document_t *pdfcore_open(const char *path, pdfcore_status *status)
     pdfcore_document *doc = nullptr;
     try {
         doc = new pdfcore_document();
-        doc->qpdf.processFile(path);
+        doc->qpdf.processFile(path, password);
     } catch (const QPDFExc& e) {
         delete doc;
         if (status) {
+            // qpdf meldet ein fehlendes oder falsches Passwort mit eigenem
+            // Fehlercode; der Text bleibt als Rückfall für ältere Meldungen.
             std::string w(e.what());
-            *status = (w.find("password") != std::string::npos ||
-                       w.find("encrypt") != std::string::npos)
-                          ? PDFCORE_ERR_PASSWORD
-                          : PDFCORE_ERR_OPEN;
+            bool pw = e.getErrorCode() == qpdf_e_password
+                || w.find("password") != std::string::npos
+                || w.find("encrypt") != std::string::npos;
+            *status = pw ? PDFCORE_ERR_PASSWORD : PDFCORE_ERR_OPEN;
         }
         return nullptr;
     } catch (const std::exception& e) {
@@ -144,9 +233,26 @@ pdfcore_document_t *pdfcore_open(const char *path, pdfcore_status *status)
     }
     return doc;
 }
+} // namespace
+
+pdfcore_document_t *pdfcore_open(const char *path, pdfcore_status *status)
+{
+    PDFCORE_GUARD_BEGIN
+    return open_impl(path, nullptr, status);
+    PDFCORE_GUARD_END(nullptr)
+}
+
+pdfcore_document_t *pdfcore_open_with_password(const char *path, const char *password,
+                                               pdfcore_status *status)
+{
+    PDFCORE_GUARD_BEGIN
+    return open_impl(path, password, status);
+    PDFCORE_GUARD_END(nullptr)
+}
 
 int pdfcore_page_count(pdfcore_document_t *doc)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return -1; }
     try {
         QPDFPageDocumentHelper helper(doc->qpdf);
@@ -154,6 +260,7 @@ int pdfcore_page_count(pdfcore_document_t *doc)
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 /// Bildfilter, deren Ausgabegröße sich nicht aus den Bytes ableiten lässt.
@@ -242,6 +349,7 @@ static std::string describe_color_space(QPDFObjectHandle cs)
 
 int pdfcore_check(pdfcore_document_t *doc)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return PDFCORE_ERR_OPEN; }
     try {
         size_t warningsBefore = doc->qpdf.getWarnings().size();
@@ -274,54 +382,60 @@ int pdfcore_check(pdfcore_document_t *doc)
         std::set<QPDFObjGen> seen;
         bool streamsOK = true;
 
-        std::function<void(QPDFObjectHandle)> readStreams =
-            [&](QPDFObjectHandle obj) {
-            if (obj.isNull()) { return; }
-            if (obj.isIndirect()) {
-                QPDFObjGen og = obj.getObjGen();
-                if (seen.count(og)) { return; }
-                seen.insert(og);
-            }
-            if (obj.isStream()) {
-                Pl_Discard discard;
-                bool attempted = false;
-                if (!obj.pipeStreamData(&discard, &attempted, 0, qpdf_dl_all,
-                                        /*suppress_warnings=*/true,
-                                        /*will_retry=*/false)) {
-                    streamsOK = false;
+        // Masterplan D1: Arbeitsliste statt Rekursion. Ein Besucht-Set
+        // verhinderte Zyklen, nicht Tiefe – eine Verweiskette über 100.000
+        // Annotationen (/Next) sprengte den 512-KB-Stack eines Arbeits-Threads.
+        auto readStreams = [&](QPDFObjectHandle root) {
+            std::vector<QPDFObjectHandle> work{root};
+            while (!work.empty()) {
+                QPDFObjectHandle obj = work.back();
+                work.pop_back();
+                if (obj.isNull()) { continue; }
+                if (obj.isIndirect()) {
+                    QPDFObjGen og = obj.getObjGen();
+                    if (seen.count(og)) { continue; }
+                    seen.insert(og);
                 }
-                // Der /Length-Eintrag muss zu dem passen, was wirklich da
-                // ist – sonst liest jeder andere Betrachter über das Ende
-                // hinaus.
-                //
-                // Nicht bei verschlüsselten Dokumenten: Dort nennt /Length die
-                // Länge der VERSCHLÜSSELTEN Bytes, während hier die
-                // entschlüsselten ankommen. Bei AES unterscheiden die sich
-                // immer (Initialisierungsvektor plus Auffüllung) – die Prüfung
-                // würde jedes verschlüsselte PDF für beschädigt erklären.
-                QPDFObjectHandle dict = obj.getDict();
-                QPDFObjectHandle length = dict.getKey("/Length");
-                if (length.isInteger() && !doc->qpdf.isEncrypted()) {
-                    Pl_Buffer raw("raw");
-                    bool rawAttempted = false;
-                    if (obj.pipeStreamData(&raw, &rawAttempted, 0, qpdf_dl_none,
-                                           true, false)) {
-                        std::unique_ptr<Buffer> b(raw.getBuffer());
-                        if (b && static_cast<long long>(b->getSize())
-                                != length.getIntValue()) {
-                            streamsOK = false;
+                if (obj.isStream()) {
+                    Pl_Discard discard;
+                    bool attempted = false;
+                    if (!obj.pipeStreamData(&discard, &attempted, 0, qpdf_dl_all,
+                                            /*suppress_warnings=*/true,
+                                            /*will_retry=*/false)) {
+                        streamsOK = false;
+                    }
+                    // Der /Length-Eintrag muss zu dem passen, was wirklich da
+                    // ist – sonst liest jeder andere Betrachter über das Ende
+                    // hinaus.
+                    //
+                    // Nicht bei verschlüsselten Dokumenten: Dort nennt /Length
+                    // die Länge der VERSCHLÜSSELTEN Bytes, während hier die
+                    // entschlüsselten ankommen. Bei AES unterscheiden die sich
+                    // immer (Initialisierungsvektor plus Auffüllung).
+                    QPDFObjectHandle dict = obj.getDict();
+                    QPDFObjectHandle length = dict.getKey("/Length");
+                    if (length.isInteger() && !doc->qpdf.isEncrypted()) {
+                        Pl_Buffer raw("raw");
+                        bool rawAttempted = false;
+                        if (obj.pipeStreamData(&raw, &rawAttempted, 0, qpdf_dl_none,
+                                               true, false)) {
+                            std::unique_ptr<Buffer> b(raw.getBuffer());
+                            if (b && static_cast<long long>(b->getSize())
+                                    != length.getIntValue()) {
+                                streamsOK = false;
+                            }
                         }
                     }
-                }
-                readStreams(dict);
-            } else if (obj.isDictionary()) {
-                for (auto const& key : obj.getKeys()) {
-                    readStreams(obj.getKey(key));
-                }
-            } else if (obj.isArray()) {
-                int n = obj.getArrayNItems();
-                for (int i = 0; i < n; ++i) {
-                    readStreams(obj.getArrayItem(i));
+                    work.push_back(dict);
+                } else if (obj.isDictionary()) {
+                    for (auto const& key : obj.getKeys()) {
+                        work.push_back(obj.getKey(key));
+                    }
+                } else if (obj.isArray()) {
+                    int n = obj.getArrayNItems();
+                    for (int i = 0; i < n; ++i) {
+                        work.push_back(obj.getArrayItem(i));
+                    }
                 }
             }
         };
@@ -381,8 +495,9 @@ int pdfcore_check(pdfcore_document_t *doc)
                     if (expected <= 0) { continue; }
 
                     Pl_Buffer samples("samples");
+                    Pl_Limit samples_limit("decode-limit", &samples, pdfcore_decode_limit(x));
                     bool attempted = false;
-                    if (!x.pipeStreamData(&samples, &attempted, 0, qpdf_dl_all,
+                    if (!x.pipeStreamData(&samples_limit, &attempted, 0, qpdf_dl_all,
                                           true, false)) {
                         streamsOK = false;
                         continue;
@@ -422,6 +537,7 @@ int pdfcore_check(pdfcore_document_t *doc)
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 #ifndef PDFCORE_SOURCE_HASH
@@ -429,11 +545,14 @@ int pdfcore_check(pdfcore_document_t *doc)
 #endif
 const char *pdfcore_source_hash(void)
 {
+    PDFCORE_GUARD_BEGIN
     return PDFCORE_SOURCE_HASH;
+    PDFCORE_GUARD_END(nullptr)
 }
 
 int pdfcore_version(char *buffer, size_t buffer_size)
 {
+    PDFCORE_GUARD_BEGIN
     try {
         std::string v(QPDF::QPDFVersion());
         if (buffer && buffer_size > 0) {
@@ -445,12 +564,73 @@ int pdfcore_version(char *buffer, size_t buffer_size)
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 void pdfcore_close(pdfcore_document_t *doc)
 {
+    PDFCORE_GUARD_BEGIN
     delete doc;
+    PDFCORE_GUARD_END_VOID
 }
+
+/* Masterplan B2: entschlüsselte Arbeitskopie schreiben. */
+int pdfcore_decrypt_to(const char *path, const char *password, const char *out_path)
+{
+    PDFCORE_GUARD_BEGIN
+    if (!path || !out_path) { return PDFCORE_ERR_OPEN; }
+    pdfcore_status status = PDFCORE_OK;
+    std::unique_ptr<pdfcore_document_t, void (*)(pdfcore_document_t*)> doc(
+        open_impl(path, password, &status), pdfcore_close);
+    if (!doc) { return status; }
+    std::string tmp = std::string(out_path) + ".pdfcore-tmp";
+    {
+        QPDFWriter writer(doc->qpdf);
+        writer.setOutputFilename(tmp.c_str());
+        writer.setPreserveEncryption(false);
+        std::shared_lock<std::shared_mutex> level(flate_level_mutex());
+        writer.write();
+    }
+    std::remove(out_path);
+    if (std::rename(tmp.c_str(), out_path) != 0) {
+        std::remove(tmp.c_str());
+        return PDFCORE_ERR_INTERNAL;
+    }
+    return PDFCORE_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
+}
+
+/* Masterplan B2: `plain_path` mit den Verschlüsselungsparametern des
+ * Originals (gleiche Passwörter, gleiches Verfahren) nach `out_path`. */
+int pdfcore_reencrypt_like(const char *plain_path, const char *original_path,
+                           const char *password, const char *out_path)
+{
+    PDFCORE_GUARD_BEGIN
+    if (!plain_path || !original_path || !out_path) { return PDFCORE_ERR_OPEN; }
+    pdfcore_status status = PDFCORE_OK;
+    std::unique_ptr<pdfcore_document_t, void (*)(pdfcore_document_t*)> original(
+        open_impl(original_path, password, &status), pdfcore_close);
+    if (!original) { return status; }
+    std::unique_ptr<pdfcore_document_t, void (*)(pdfcore_document_t*)> plain(
+        open_impl(plain_path, nullptr, &status), pdfcore_close);
+    if (!plain) { return status; }
+    std::string tmp = std::string(out_path) + ".pdfcore-tmp";
+    {
+        QPDFWriter writer(plain->qpdf);
+        writer.setOutputFilename(tmp.c_str());
+        writer.copyEncryptionParameters(original->qpdf);
+        std::shared_lock<std::shared_mutex> level(flate_level_mutex());
+        writer.write();
+    }
+    std::remove(out_path);
+    if (std::rename(tmp.c_str(), out_path) != 0) {
+        std::remove(tmp.c_str());
+        return PDFCORE_ERR_INTERNAL;
+    }
+    return PDFCORE_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
+}
+
 
 // ============================================================================
 // Epic Phase 7 – read-only semantische Inspection
@@ -478,6 +658,7 @@ QPDFObjectHandle dict_of(QPDFObjectHandle obj)
     if (obj.isStream()) { return obj.getDict(); }
     return obj;
 }
+
 } // namespace
 
 bool box_to_doubles(QPDFObjectHandle box, double out[4])
@@ -609,9 +790,11 @@ std::string sanitize_list_field(std::string s)
 }
 
 /// Serialisiert einen Feldwert deterministisch (String/Name/Zahl/Bool/Array).
-std::string field_value_string(QPDFObjectHandle v)
+/// Masterplan D1: Tiefengrenze – ein Array, das sich selbst enthält, lief
+/// vorher bis zum Stapelüberlauf. Echte Feldwerte sind höchstens zwei tief.
+std::string field_value_string(QPDFObjectHandle v, int depth = 0)
 {
-    if (v.isNull()) { return ""; }
+    if (v.isNull() || depth > 16) { return ""; }
     if (v.isString()) { return v.getUTF8Value(); }
     if (v.isName()) {
         std::string n = v.getName();
@@ -624,7 +807,7 @@ std::string field_value_string(QPDFObjectHandle v)
         std::string joined;
         for (auto const& item : v.getArrayAsVector()) {
             if (!joined.empty()) { joined += ","; }
-            joined += field_value_string(item);
+            joined += field_value_string(item, depth + 1);
         }
         return joined;
     }
@@ -655,6 +838,7 @@ int count_name_tree_entries(QPDFObjectHandle node, int depth)
 int pdfcore_page_info(pdfcore_document_t *doc, int page_index,
                       pdfcore_page_info_t *out)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !out || page_index < 0) { return -1; }
     try {
         QPDFPageDocumentHelper helper(doc->qpdf);
@@ -684,11 +868,13 @@ int pdfcore_page_info(pdfcore_document_t *doc, int page_index,
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 int pdfcore_annotation_counts(pdfcore_document_t *doc,
                               int *total, int *links, int *widgets)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return -1; }
     try {
         int t = 0, l = 0, w = 0;
@@ -713,11 +899,13 @@ int pdfcore_annotation_counts(pdfcore_document_t *doc,
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 int pdfcore_page_annotation_counts(pdfcore_document_t *doc, int page_index,
                                    int *total, int *links, int *widgets)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || page_index < 0) { return -1; }
     try {
         auto pages = doc->qpdf.getAllPages();
@@ -742,6 +930,7 @@ int pdfcore_page_annotation_counts(pdfcore_document_t *doc, int page_index,
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 // ============================================================================
@@ -774,8 +963,13 @@ std::string strip_slash(std::string s)
     return s;
 }
 
+/// Masterplan D1: `ancestors` hält die Formen auf dem aktuellen Pfad. Eine
+/// Form, die sich (über Umwege) selbst enthält, wird nicht erneut betreten –
+/// vorher verzweigte so ein Zyklus bis zur Tiefe 16 exponentiell. Dieselbe
+/// Form an zwei Stellen bleibt zweimal gezählt wie bisher.
 void walk_resources(QPDFObjectHandle res, int pageIdx, int depth,
-                    std::vector<ImagePlacement>& out)
+                    std::vector<ImagePlacement>& out,
+                    std::set<QPDFObjGen>& ancestors)
 {
     if (res.isNull() || !res.isDictionary() || depth > 16) { return; }
     QPDFObjectHandle resDict = dict_of(res);
@@ -872,9 +1066,19 @@ void walk_resources(QPDFObjectHandle res, int pageIdx, int depth,
             // Stream liefert in qpdf 12 null (Warnung „operation for
             // dictionary attempted on object of type stream"). Ohne dict_of
             // wurden Bilder in (verschachtelten) Formen nie gefunden.
-            walk_resources(dict_of(xo).getKey("/Resources"), pageIdx, depth + 1, out);
+            QPDFObjGen form = xo.getObjGen();
+            if (xo.isIndirect() && !ancestors.insert(form).second) { continue; }
+            walk_resources(dict_of(xo).getKey("/Resources"), pageIdx, depth + 1, out, ancestors);
+            if (xo.isIndirect()) { ancestors.erase(form); }
         }
     }
+}
+
+void walk_resources(QPDFObjectHandle res, int pageIdx, int depth,
+                    std::vector<ImagePlacement>& out)
+{
+    std::set<QPDFObjGen> ancestors;
+    walk_resources(res, pageIdx, depth, out, ancestors);
 }
 
 // ============================================================================
@@ -1443,8 +1647,9 @@ static std::vector<std::string> const& ensure_list(pdfcore_document_t& doc, int 
                         // wäre sonst unsichtbar.
                         if (f.isStream()) {
                             Pl_Buffer buf("attachment");
+                            Pl_Limit buf_limit("decode-limit", &buf, pdfcore_decode_limit(f));
                             bool attempted = false;
-                            if (f.pipeStreamData(&buf, &attempted, 0, qpdf_dl_all,
+                            if (f.pipeStreamData(&buf_limit, &attempted, 0, qpdf_dl_all,
                                                  true, false)) {
                                 std::unique_ptr<Buffer> b(buf.getBuffer());
                                 if (b) {
@@ -1673,6 +1878,7 @@ static std::vector<std::string> const& ensure_list(pdfcore_document_t& doc, int 
 
 int pdfcore_string_list_count(pdfcore_document_t *doc, int list_id, int *count)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !count) { return -1; }
     try {
         *count = static_cast<int>(ensure_list(*doc, list_id).size());
@@ -1680,11 +1886,13 @@ int pdfcore_string_list_count(pdfcore_document_t *doc, int list_id, int *count)
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 int pdfcore_string_list_get(pdfcore_document_t *doc, int list_id, int index,
                             char *buf, size_t size)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return -1; }
     try {
         auto const& list = ensure_list(*doc, list_id);
@@ -1699,16 +1907,20 @@ int pdfcore_string_list_get(pdfcore_document_t *doc, int list_id, int index,
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 void pdfcore_string_list_release(pdfcore_document_t *doc, int list_id)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return; }
     doc->stringLists.erase(list_id);
+    PDFCORE_GUARD_END_VOID
 }
 
 int pdfcore_form_field_count(pdfcore_document_t *doc)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return -1; }
     try {
         // Benannte Felder zählen – auch wenn ein Writer das Dokument-Level-
@@ -1729,10 +1941,12 @@ int pdfcore_form_field_count(pdfcore_document_t *doc)
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 int pdfcore_named_destination_count(pdfcore_document_t *doc)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return -1; }
     try {
         QPDFObjectHandle catalog = doc->qpdf.getRoot();
@@ -1749,10 +1963,12 @@ int pdfcore_named_destination_count(pdfcore_document_t *doc)
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 int pdfcore_attachment_count(pdfcore_document_t *doc)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return -1; }
     try {
         QPDFObjectHandle catalog = doc->qpdf.getRoot();
@@ -1762,16 +1978,19 @@ int pdfcore_attachment_count(pdfcore_document_t *doc)
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 int pdfcore_has_page_labels(pdfcore_document_t *doc)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return -1; }
     try {
         return doc->qpdf.getRoot().hasKey("/PageLabels") ? 1 : 0;
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 // ============================================================================
@@ -1797,9 +2016,11 @@ int pdfcore_write_pages(const char *const *source_paths,
                         const char *output_path,
                         int remove_dangling_links)
 {
+    PDFCORE_GUARD_BEGIN
     return write_pages_impl(source_paths, page_indices, rotations, count,
                             output_path, remove_dangling_links,
                             nullptr, nullptr, nullptr);
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_write_pages_progress(const char *const *source_paths,
@@ -1811,9 +2032,11 @@ int pdfcore_write_pages_progress(const char *const *source_paths,
                                  void (*on_page)(void *context, int done, int total),
                                  void *context)
 {
+    PDFCORE_GUARD_BEGIN
     return write_pages_impl(source_paths, page_indices, rotations, count,
                             output_path, remove_dangling_links,
                             on_page, nullptr, context);
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_write_pages_cancellable(const char *const *source_paths,
@@ -1826,9 +2049,11 @@ int pdfcore_write_pages_cancellable(const char *const *source_paths,
                                     int (*should_continue)(void *context),
                                     void *context)
 {
+    PDFCORE_GUARD_BEGIN
     return write_pages_impl(source_paths, page_indices, rotations, count,
                             output_path, remove_dangling_links,
                             on_page, should_continue, context);
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_write_outlines(pdfcore_document_t *doc,
@@ -1836,6 +2061,7 @@ int pdfcore_write_outlines(pdfcore_document_t *doc,
                            const int *page_indices,
                            int count)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || count < 0) { return PDFCORE_ERR_OPEN; }
     try {
         QPDF& qpdf = doc->qpdf;
@@ -1891,10 +2117,12 @@ int pdfcore_write_outlines(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_prototype_available(void)
 {
+    PDFCORE_GUARD_BEGIN
     try {
         QPDF probe;
         probe.emptyPDF();
@@ -1902,6 +2130,7 @@ int pdfcore_prototype_available(void)
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 namespace {
@@ -2369,6 +2598,7 @@ static int write_pages_impl(const char *const *source_paths,
             Pl_CancelCheck cancelCheck(&fileOut, should_continue, context);
             QPDFWriter writer(out);
             writer.setOutputPipeline(&cancelCheck);
+            std::shared_lock<std::shared_mutex> level(flate_level_mutex());
             writer.write();
         } catch (const WritePagesCancelled&) {
             cancelled = true;
@@ -2407,6 +2637,7 @@ namespace {
 int pdfcore_internal_link_targets(pdfcore_document_t *doc,
                                   int **out_indices, int *count)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !out_indices || !count) { return -1; }
     *count = 0;
     try {
@@ -2484,10 +2715,12 @@ int pdfcore_internal_link_targets(pdfcore_document_t *doc,
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 int pdfcore_remove_dangling_link_annots(pdfcore_document_t *doc, int *removed)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return -1; }
     if (removed) { *removed = 0; }
     try {
@@ -2552,10 +2785,12 @@ int pdfcore_remove_dangling_link_annots(pdfcore_document_t *doc, int *removed)
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 int pdfcore_remove_page_thumbs(pdfcore_document_t *doc, int *removed)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return -1; }
     if (removed) { *removed = 0; }
     try {
@@ -2577,11 +2812,13 @@ int pdfcore_remove_page_thumbs(pdfcore_document_t *doc, int *removed)
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 
 int pdfcore_save(pdfcore_document_t *doc, const char *path)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !path) { return PDFCORE_ERR_OPEN; }
     try {
         // Nie in die Quelldatei schreiben – qpdf liest lazy daraus.
@@ -2589,6 +2826,7 @@ int pdfcore_save(pdfcore_document_t *doc, const char *path)
         {
             QPDFWriter writer(doc->qpdf);
             writer.setOutputFilename(tmp.c_str());
+            std::shared_lock<std::shared_mutex> level(flate_level_mutex());
             writer.write();
         }
         std::remove(path);
@@ -2600,6 +2838,7 @@ int pdfcore_save(pdfcore_document_t *doc, const char *path)
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 /* Phase V2-9 (Masterplan §15.6) – finaler Write mit Writer-Optionen.
@@ -2634,6 +2873,7 @@ int pdfcore_save_with_options(pdfcore_document_t *doc, const char *path,
                               int compression_level,
                               int linearize)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !path) { return PDFCORE_ERR_OPEN; }
     try {
         // Nie in die Quelldatei schreiben – qpdf liest lazy daraus.
@@ -2645,14 +2885,16 @@ int pdfcore_save_with_options(pdfcore_document_t *doc, const char *path,
             writer.setObjectStreamMode(object_streams_generate
                                            ? qpdf_o_generate : qpdf_o_disable);
             if (recompress_flate) { writer.setRecompressFlate(true); }
+            // Level nur für diesen Write (C7): exklusiv und mit Rücksetzen
+            // auch bei Ausnahmen. Sonst erben Folgeläufe im selben Prozess
+            // den Level 9 – gemessen +45 s Kandidatenzeit je Lauf.
             if (compression_level >= 0) {
-                Pl_Flate::setCompressionLevel(compression_level);
+                FlateLevelScope scope(compression_level);
+                writer.write();
+            } else {
+                std::shared_lock<std::shared_mutex> level(flate_level_mutex());
+                writer.write();
             }
-            writer.write();
-            // Level zurücksetzen (prozessglobal!): Sonst erben Folgelaufe im
-            // selben Prozess den Level 9 – gemessen +45 s Kandidatenzeit je
-            // Lauf durch langsamere Flate-Encodes im Scheduler.
-            Pl_Flate::setCompressionLevel(Z_DEFAULT_COMPRESSION);
         }
         std::remove(path);
         if (std::rename(tmp.c_str(), path) != 0) {
@@ -2663,11 +2905,13 @@ int pdfcore_save_with_options(pdfcore_document_t *doc, const char *path,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_write_page_labels(pdfcore_document_t *doc,
                               const char *const *encodings, int count)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || count < 0 || (count > 0 && !encodings)) { return PDFCORE_ERR_OPEN; }
     try {
         QPDFObjectHandle nums = QPDFObjectHandle::newArray();
@@ -2707,10 +2951,12 @@ int pdfcore_write_page_labels(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_set_producer(pdfcore_document_t *doc, const char *producer)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !producer) { return PDFCORE_ERR_OPEN; }
     try {
         QPDFObjectHandle trailer = doc->qpdf.getTrailer();
@@ -2727,6 +2973,7 @@ int pdfcore_set_producer(pdfcore_document_t *doc, const char *producer)
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 
@@ -2739,6 +2986,7 @@ int pdfcore_replace_image(pdfcore_document_t *doc,
                           const unsigned char *jpeg, size_t jpeg_len,
                           int new_width, int new_height)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !image_name || !jpeg || jpeg_len == 0) { return PDFCORE_ERR_OPEN; }
     try {
         std::string want = image_name;
@@ -2788,6 +3036,7 @@ int pdfcore_replace_image(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 // ============================================================================
@@ -2799,17 +3048,20 @@ namespace {
 /// Sucht ein Bild-XObject anhand seiner Objektidentität.
 /// Gibt ein Null-Handle zurück, wenn es das Objekt nicht gibt oder es kein
 /// Bild-XObject ist – niemals ein „ähnliches" Objekt.
+///
+/// Masterplan C1: Direkter Zugriff über die Querverweistabelle statt eines
+/// Laufs über `getAllObjects()` je Aufruf. Der Lauf baute bei jedem Zugriff
+/// die Liste ALLER Objekte neu – beim IPCC-Bericht (Tausende Bilder) stand
+/// das JPEG-Umpacken damit über 90 % seiner Zeit in dieser Suche
+/// (sample, 18.11.2026). Ein nicht vorhandenes Objekt liefert qpdf als
+/// Null-Handle – dieselbe Semantik wie bisher.
 QPDFObjectHandle find_image_object(QPDF& qpdf, int objNumber, int generation)
 {
-    QPDFObjGen want(objNumber, generation);
-    for (auto& obj : qpdf.getAllObjects()) {
-        if (obj.getObjGen() != want) { continue; }
-        QPDFObjectHandle d = dict_of(obj);
-        QPDFObjectHandle st = d.getKey("/Subtype");
-        if (st.isName() && st.getName() == "/Image") { return obj; }
-        return QPDFObjectHandle::newNull();
-    }
-    return QPDFObjectHandle::newNull();
+    if (objNumber <= 0 || generation < 0) { return QPDFObjectHandle::newNull(); }
+    QPDFObjectHandle obj = qpdf.getObject(objNumber, generation);
+    if (obj.isNull() || !obj.isStream()) { return QPDFObjectHandle::newNull(); }
+    QPDFObjectHandle st = obj.getDict().getKey("/Subtype");
+    return (st.isName() && st.getName() == "/Image") ? obj : QPDFObjectHandle::newNull();
 }
 
 /// Eigenschaften, die eine JPEG-Ersetzung unzulässig machen.
@@ -2941,7 +3193,8 @@ bool fit_matte_smask(QPDF& qpdf, QPDFObjectHandle newDict,
     if (!bpc.isInteger() || bpc.getIntValue() != 8) { return false; }
 
     Pl_Buffer collector("matte-smask");
-    if (!mask.pipeStreamData(&collector, nullptr, 0, qpdf_dl_all,
+    Pl_Limit collector_limit("decode-limit", &collector, pdfcore_decode_limit(mask));
+    if (!mask.pipeStreamData(&collector_limit, nullptr, 0, qpdf_dl_all,
                              /*suppress_warnings=*/true, false)) {
         return false;
     }
@@ -3112,8 +3365,9 @@ bool reduce_soft_mask(QPDFObjectHandle mask, int needW, int needH)
     if (srcW <= needW && srcH <= needH) { return false; }
 
     Pl_Buffer collector("soft-mask");
+    Pl_Limit collector_limit("decode-limit", &collector, pdfcore_decode_limit(mask));
     bool decoded = false;
-    if (!mask.pipeStreamData(&collector, &decoded, 0, qpdf_dl_all,
+    if (!mask.pipeStreamData(&collector_limit, &decoded, 0, qpdf_dl_all,
                              /*suppress_warnings=*/true, false)
         || !decoded) {
         return false;
@@ -3311,6 +3565,7 @@ int replace_image_stream(pdfcore_document_t *doc,
 
 int pdfcore_fit_soft_masks(pdfcore_document_t *doc, int *fitted)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return PDFCORE_ERR_OPEN; }
     if (fitted) { *fitted = 0; }
     if (doc->shrunkenMaskedImages.empty()) { return PDFCORE_OK; }
@@ -3374,10 +3629,12 @@ int pdfcore_fit_soft_masks(pdfcore_document_t *doc, int *fitted)
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_deduplicate_images(pdfcore_document_t *doc, int *merged)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return PDFCORE_ERR_OPEN; }
     if (merged) { *merged = 0; }
     try {
@@ -3444,6 +3701,7 @@ int pdfcore_deduplicate_images(pdfcore_document_t *doc, int *merged)
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_replace_image_object(pdfcore_document_t *doc,
@@ -3452,6 +3710,7 @@ int pdfcore_replace_image_object(pdfcore_document_t *doc,
                                  int new_width, int new_height,
                                  int grayscale, int decode_applied)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !jpeg || jpeg_len == 0) { return PDFCORE_ERR_OPEN; }
     try {
         return replace_image_stream(doc, obj_number, generation, jpeg, jpeg_len,
@@ -3461,6 +3720,7 @@ int pdfcore_replace_image_object(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_replace_image_object_flate(pdfcore_document_t *doc,
@@ -3470,6 +3730,7 @@ int pdfcore_replace_image_object_flate(pdfcore_document_t *doc,
                                        int components, int png_predictor,
                                        int decode_applied)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !flate || flate_len == 0) { return PDFCORE_ERR_OPEN; }
     try {
         return replace_image_stream(doc, obj_number, generation, flate, flate_len,
@@ -3479,6 +3740,7 @@ int pdfcore_replace_image_object_flate(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_replace_image_object_cmyk(pdfcore_document_t *doc,
@@ -3487,6 +3749,7 @@ int pdfcore_replace_image_object_cmyk(pdfcore_document_t *doc,
                                       int new_width, int new_height,
                                       int decode_applied)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !jpeg || jpeg_len == 0) { return PDFCORE_ERR_OPEN; }
     try {
         // Vier Kanäle, DCTDecode – und der nicht-triviale /ColorSpace der
@@ -3498,6 +3761,7 @@ int pdfcore_replace_image_object_cmyk(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_get_image_object_data(pdfcore_document_t *doc,
@@ -3505,6 +3769,7 @@ int pdfcore_get_image_object_data(pdfcore_document_t *doc,
                                   int decoded,
                                   char **out, size_t *len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !out || !len) { return PDFCORE_ERR_OPEN; }
     *out = nullptr; *len = 0;
     try {
@@ -3516,8 +3781,9 @@ int pdfcore_get_image_object_data(pdfcore_document_t *doc,
             // pipeStreamData meldet über den Rückgabewert, ob ALLE Filter
             // aufgelöst werden konnten. Nur dann sind die Bytes echte Pixel.
             Pl_Buffer collector("image");
+            Pl_Limit collector_limit("decode-limit", &collector, pdfcore_decode_limit(target));
             bool filtered = target.pipeStreamData(
-                &collector, nullptr, 0, qpdf_dl_all, false, false);
+                &collector_limit, nullptr, 0, qpdf_dl_all, false, false);
             if (!filtered) { return PDFCORE_ERR_CHECK_FAILED; }
             buf = std::shared_ptr<Buffer>(collector.getBuffer());
         } else {
@@ -3535,10 +3801,12 @@ int pdfcore_get_image_object_data(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_structure_profile(pdfcore_document_t *doc)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return -1; }
     try {
         int flags = 0;
@@ -3579,10 +3847,12 @@ int pdfcore_structure_profile(pdfcore_document_t *doc)
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 int pdfcore_strip_metadata(pdfcore_document_t *doc, int keep_producer)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return PDFCORE_ERR_OPEN; }
     try {
         QPDFObjectHandle trailer = doc->qpdf.getTrailer();
@@ -3612,6 +3882,7 @@ int pdfcore_strip_metadata(pdfcore_document_t *doc, int keep_producer)
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 // ============================================================================
@@ -3622,6 +3893,7 @@ int pdfcore_get_image_jpeg(pdfcore_document_t *doc, int page_index,
                            const char *image_name,
                            char **out, size_t *len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !image_name || !out || !len) { return PDFCORE_ERR_OPEN; }
     *out = nullptr; *len = 0;
     try {
@@ -3669,11 +3941,13 @@ int pdfcore_get_image_jpeg(pdfcore_document_t *doc, int page_index,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_get_page_content(pdfcore_document_t *doc, int page_index,
                              char **out, size_t *len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !out || !len || page_index < 0) { return PDFCORE_ERR_OPEN; }
     *out = nullptr; *len = 0;
     try {
@@ -3693,8 +3967,13 @@ int pdfcore_get_page_content(pdfcore_document_t *doc, int page_index,
         for (auto& s : streams) {
             if (!s.isStream()) { continue; }
             auto buf = s.getStreamData(qpdf_dl_generalized);
-            if (buf) { combined.append(reinterpret_cast<const char*>(buf->getBuffer()),
-                                       static_cast<size_t>(buf->getSize())); }
+            if (!buf || buf->getSize() == 0) { continue; }
+            // Masterplan D6: Die Grenze zwischen zwei Teilströmen ist nach
+            // der Norm immer eine Token-Grenze. Ohne Trenner verschmolz ein
+            // „Q“ am Ende mit einem „q“ am Anfang zu „Qq“.
+            if (!combined.empty()) { combined.push_back('\n'); }
+            combined.append(reinterpret_cast<const char*>(buf->getBuffer()),
+                            static_cast<size_t>(buf->getSize()));
         }
         char *copy = static_cast<char *>(malloc(combined.size() + 1));
         if (!copy) { return PDFCORE_ERR_INTERNAL; }
@@ -3706,6 +3985,7 @@ int pdfcore_get_page_content(pdfcore_document_t *doc, int page_index,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 // ============================================================================
@@ -3740,6 +4020,7 @@ char *malloc_copy(const unsigned char *src, size_t n)
 int pdfcore_jpeg_repack(const unsigned char *jpeg, size_t jpeg_len,
                         int progressive, unsigned char **out, size_t *out_len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!jpeg || jpeg_len == 0 || !out || !out_len) { return PDFCORE_JPEG_REPACK_ERR; }
     *out = nullptr; *out_len = 0;
 
@@ -3804,12 +4085,14 @@ int pdfcore_jpeg_repack(const unsigned char *jpeg, size_t jpeg_len,
     *out = reinterpret_cast<unsigned char *>(copy);
     *out_len = outsize;
     return PDFCORE_JPEG_REPACK_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_jpeg_encode(const unsigned char *pixels, size_t pixels_len,
                         int width, int height, int components,
                         int quality, unsigned char **out, size_t *out_len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!pixels || !out || !out_len) { return PDFCORE_ERR_INTERNAL; }
     if (width <= 0 || height <= 0 || quality < 1) { return PDFCORE_ERR_INTERNAL; }
     // Grau und RGB direkt; CMYK & Co. bewusst ablehnen – dort entscheidet
@@ -3864,6 +4147,7 @@ int pdfcore_jpeg_encode(const unsigned char *pixels, size_t pixels_len,
     *out = reinterpret_cast<unsigned char *>(copy);
     *out_len = outsize;
     return PDFCORE_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 // MARK: - Phase 6C – verlustbehafteter CMYK-Re-Encode (mozjpeg)
@@ -3872,6 +4156,7 @@ int pdfcore_jpeg_encode_cmyk(const unsigned char *pixels, size_t pixels_len,
                              int width, int height,
                              int quality, unsigned char **out, size_t *out_len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!pixels || !out || !out_len) { return PDFCORE_ERR_INTERNAL; }
     if (width <= 0 || height <= 0 || quality < 1) { return PDFCORE_ERR_INTERNAL; }
     size_t needed = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
@@ -3958,6 +4243,7 @@ int pdfcore_jpeg_encode_cmyk(const unsigned char *pixels, size_t pixels_len,
     *out = reinterpret_cast<unsigned char *>(copy);
     *out_len = outsize;
     return PDFCORE_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 // MARK: - Phase 4b – JPX/JPEG2000-Eingabedekodierung (OpenJPEG)
@@ -4038,6 +4324,7 @@ bool jpx_has_jp2_signature(const unsigned char *data, size_t len)
 int pdfcore_jpx_decode(const unsigned char *data, size_t data_len,
                        int reduce, unsigned char **out, size_t *out_len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!data || data_len == 0 || !out || !out_len) { return PDFCORE_ERR_INTERNAL; }
     *out = nullptr; *out_len = 0;
 
@@ -4167,12 +4454,14 @@ int pdfcore_jpx_decode(const unsigned char *data, size_t data_len,
     *out = reinterpret_cast<unsigned char *>(copy);
     *out_len = buffer.size();
     return PDFCORE_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_replace_image_stream_bytes(pdfcore_document_t *doc,
                                        int obj_number, int generation,
                                        const unsigned char *bytes, size_t len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !bytes || len == 0) { return PDFCORE_ERR_OPEN; }
     try {
         QPDFObjectHandle target = find_image_object(doc->qpdf, obj_number, generation);
@@ -4203,6 +4492,7 @@ int pdfcore_replace_image_stream_bytes(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 // ============================================================================
@@ -4216,14 +4506,12 @@ int pdfcore_replace_image_stream_bytes(pdfcore_document_t *doc,
 namespace {
 
 /* Findet ein beliebiges Stream-Objekt anhand seiner Objektidentität. */
+/* Direkter Zugriff wie find_image_object (Masterplan C1). */
 QPDFObjectHandle find_stream_object(QPDF& qpdf, int objNumber, int generation)
 {
-    QPDFObjGen want(objNumber, generation);
-    for (auto& obj : qpdf.getAllObjects()) {
-        if (obj.getObjGen() != want) { continue; }
-        return obj.isStream() ? obj : QPDFObjectHandle::newNull();
-    }
-    return QPDFObjectHandle::newNull();
+    if (objNumber <= 0 || generation < 0) { return QPDFObjectHandle::newNull(); }
+    QPDFObjectHandle obj = qpdf.getObject(objNumber, generation);
+    return (!obj.isNull() && obj.isStream()) ? obj : QPDFObjectHandle::newNull();
 }
 
 /* true, wenn /Filter EXAKT /FlateDecode ist (Name oder Ein-Element-Array). */
@@ -4245,6 +4533,7 @@ int pdfcore_zlib_inflate(const unsigned char *data, size_t data_len,
                          size_t max_content_bytes,
                          unsigned char **out, size_t *out_len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!data || data_len == 0 || !out || !out_len) { return PDFCORE_ERR_OPEN; }
     *out = nullptr; *out_len = 0;
 
@@ -4284,11 +4573,13 @@ int pdfcore_zlib_inflate(const unsigned char *data, size_t data_len,
     }
     inflateEnd(&stream);
     return PDFCORE_ERR_CHECK_FAILED;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_zopfli_compress(const unsigned char *data, size_t data_len,
                             unsigned char **out, size_t *out_len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!data || data_len == 0 || !out || !out_len) { return PDFCORE_ERR_OPEN; }
     *out = nullptr; *out_len = 0;
 
@@ -4307,11 +4598,13 @@ int pdfcore_zopfli_compress(const unsigned char *data, size_t data_len,
     *out = reinterpret_cast<unsigned char *>(copy);
     *out_len = size;
     return PDFCORE_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_flate_stream_list(pdfcore_document_t *doc, size_t min_raw_bytes,
                               char ***out, int *count)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !out || !count) { return PDFCORE_ERR_OPEN; }
     *out = nullptr; *count = 0;
     try {
@@ -4351,6 +4644,7 @@ int pdfcore_flate_stream_list(pdfcore_document_t *doc, size_t min_raw_bytes,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_get_image_indexed_lookup(pdfcore_document_t *doc,
@@ -4358,6 +4652,7 @@ int pdfcore_get_image_indexed_lookup(pdfcore_document_t *doc,
                                      int *hival,
                                      unsigned char **out, size_t *len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !hival || !out || !len) { return PDFCORE_ERR_OPEN; }
     *out = nullptr; *len = 0; *hival = 0;
     try {
@@ -4396,12 +4691,14 @@ int pdfcore_get_image_indexed_lookup(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_get_stream_bytes(pdfcore_document_t *doc,
                              int obj_number, int generation,
                              unsigned char **out, size_t *len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !out || !len) { return PDFCORE_ERR_OPEN; }
     *out = nullptr; *len = 0;
     try {
@@ -4419,6 +4716,7 @@ int pdfcore_get_stream_bytes(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_get_object_stream_bytes(pdfcore_document_t *doc,
@@ -4426,6 +4724,7 @@ int pdfcore_get_object_stream_bytes(pdfcore_document_t *doc,
                                     int decoded,
                                     char **out, size_t *len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !out || !len) { return PDFCORE_ERR_OPEN; }
     *out = nullptr; *len = 0;
     try {
@@ -4438,8 +4737,9 @@ int pdfcore_get_object_stream_bytes(pdfcore_document_t *doc,
             // aufgelöst werden konnten. Nur dann sind die Bytes der Inhalt –
             // niemals Ersatzdaten liefern.
             Pl_Buffer collector("object-stream");
+            Pl_Limit collector_limit("decode-limit", &collector, pdfcore_decode_limit(target));
             bool filtered = target.pipeStreamData(
-                &collector, nullptr, 0, qpdf_dl_all, false, false);
+                &collector_limit, nullptr, 0, qpdf_dl_all, false, false);
             if (!filtered) { return PDFCORE_ERR_CHECK_FAILED; }
             buf = std::shared_ptr<Buffer>(collector.getBuffer());
         } else {
@@ -4457,12 +4757,14 @@ int pdfcore_get_object_stream_bytes(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_replace_stream_bytes(pdfcore_document_t *doc,
                                  int obj_number, int generation,
                                  const unsigned char *bytes, size_t len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !bytes || len == 0) { return PDFCORE_ERR_OPEN; }
     try {
         QPDFObjectHandle target = find_stream_object(doc->qpdf, obj_number, generation);
@@ -4481,13 +4783,16 @@ int pdfcore_replace_stream_bytes(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 void pdfcore_free_strings(char **arr, int count)
 {
+    PDFCORE_GUARD_BEGIN
     if (!arr) { return; }
     for (int i = 0; i < count; ++i) { free(arr[i]); }
     free(arr);
+    PDFCORE_GUARD_END_VOID
 }
 
 // ============================================================================
@@ -4703,6 +5008,7 @@ int pdfcore_g4_encode(const unsigned char *pixels, size_t pixels_len,
                       int width, int height,
                       unsigned char **out, size_t *out_len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!pixels || !out || !out_len) { return PDFCORE_ERR_INTERNAL; }
     *out = nullptr; *out_len = 0;
     if (width <= 0 || height <= 0) { return PDFCORE_ERR_INTERNAL; }
@@ -4748,6 +5054,7 @@ int pdfcore_g4_encode(const unsigned char *pixels, size_t pixels_len,
         return PDFCORE_ERR_INTERNAL;
     }
     return PDFCORE_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 /* Synthetischer TIFF-Wrapper um einen nackten T6-Strom: libtiff liest
@@ -4800,6 +5107,7 @@ int pdfcore_g4_decode(const unsigned char *g4, size_t g4_len,
                       int width, int height,
                       unsigned char **out, size_t *out_len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!g4 || g4_len == 0 || !out || !out_len) {
         return PDFCORE_ERR_INTERNAL;
     }
@@ -4851,6 +5159,7 @@ int pdfcore_g4_decode(const unsigned char *g4, size_t g4_len,
     *out = rows;
     *out_len = row_bytes * static_cast<size_t>(height);
     return PDFCORE_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 /* V2-3c – synthetischer TIFF-Wrapper für G3-/G4-Ströme: wie
@@ -4907,6 +5216,7 @@ int pdfcore_ccitt_decode(const unsigned char *data, size_t data_len,
                          const pdfcore_ccitt_parms_t *parms,
                          unsigned char **out, size_t *out_len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!data || data_len == 0 || !parms || !out || !out_len) {
         return PDFCORE_ERR_INTERNAL;
     }
@@ -4996,6 +5306,7 @@ int pdfcore_ccitt_decode(const unsigned char *data, size_t data_len,
     *out = rows;
     *out_len = row_bytes * static_cast<size_t>(height);
     return PDFCORE_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 /* Liest /DecodeParms eines Bild-XObjects (V2-3c). Bekannte Schlüssel
@@ -5005,6 +5316,7 @@ int pdfcore_get_image_ccitt_parms(pdfcore_document_t *doc,
                                   int obj_number, int generation,
                                   pdfcore_ccitt_parms_t *out)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !out) { return PDFCORE_ERR_OPEN; }
     try {
         *out = {};
@@ -5084,6 +5396,7 @@ int pdfcore_get_image_ccitt_parms(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_ccitt_encode_fixture(const unsigned char *pixels, size_t pixels_len,
@@ -5091,6 +5404,7 @@ int pdfcore_ccitt_encode_fixture(const unsigned char *pixels, size_t pixels_len,
                                  int k, int end_of_line,
                                  unsigned char **out, size_t *out_len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!pixels || !out || !out_len) { return PDFCORE_ERR_INTERNAL; }
     *out = nullptr; *out_len = 0;
     if (width <= 0 || height <= 0 || k < -1 || k > 64) {
@@ -5155,6 +5469,7 @@ int pdfcore_ccitt_encode_fixture(const unsigned char *pixels, size_t pixels_len,
         return PDFCORE_ERR_INTERNAL;
     }
     return PDFCORE_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_jbig2_encode(const unsigned char *pixels, size_t pixels_len,
@@ -5162,6 +5477,7 @@ int pdfcore_jbig2_encode(const unsigned char *pixels, size_t pixels_len,
                          unsigned char **page_out, size_t *page_len,
                          unsigned char **globals_out, size_t *globals_len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!pixels || !page_out || !page_len) { return PDFCORE_ERR_INTERNAL; }
     *page_out = nullptr; *page_len = 0;
     if (globals_out) { *globals_out = nullptr; *globals_len = 0; }
@@ -5214,12 +5530,14 @@ int pdfcore_jbig2_encode(const unsigned char *pixels, size_t pixels_len,
         return PDFCORE_ERR_INTERNAL;
     }
     return PDFCORE_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_jbig2_encode_generic(const unsigned char *pixels, size_t pixels_len,
                                  int width, int height,
                                  unsigned char **out, size_t *out_len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!pixels || !out || !out_len) { return PDFCORE_ERR_INTERNAL; }
     *out = nullptr; *out_len = 0;
     if (width <= 0 || height <= 0) { return PDFCORE_ERR_INTERNAL; }
@@ -5243,6 +5561,7 @@ int pdfcore_jbig2_encode_generic(const unsigned char *pixels, size_t pixels_len,
     *out = reinterpret_cast<unsigned char *>(copy);
     *out_len = static_cast<size_t>(raw_len);
     return PDFCORE_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_replace_image_object_ccitt(pdfcore_document_t *doc,
@@ -5250,6 +5569,7 @@ int pdfcore_replace_image_object_ccitt(pdfcore_document_t *doc,
                                        const unsigned char *g4, size_t g4_len,
                                        int width, int height)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !g4 || g4_len == 0 || width <= 0 || height <= 0) {
         return PDFCORE_ERR_OPEN;
     }
@@ -5265,6 +5585,7 @@ int pdfcore_replace_image_object_ccitt(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_replace_image_object_jbig2(pdfcore_document_t *doc,
@@ -5273,6 +5594,7 @@ int pdfcore_replace_image_object_jbig2(pdfcore_document_t *doc,
                                        const unsigned char *globals, size_t globals_len,
                                        int width, int height)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !page_data || page_len == 0 || width <= 0 || height <= 0) {
         return PDFCORE_ERR_OPEN;
     }
@@ -5292,6 +5614,7 @@ int pdfcore_replace_image_object_jbig2(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 // ============================================================================
@@ -5491,7 +5814,8 @@ dedup_stream_fingerprint dedup_fingerprint_stream(QPDFObjectHandle stream)
             fp.rawSize = static_cast<long long>(raw->getSize());
         }
         Pl_Buffer collector("dedup");
-        if (stream.pipeStreamData(&collector, nullptr, 0, qpdf_dl_all,
+        Pl_Limit collector_limit("decode-limit", &collector, pdfcore_decode_limit(stream));
+        if (stream.pipeStreamData(&collector_limit, nullptr, 0, qpdf_dl_all,
                                   /*suppress_warnings=*/true, false)) {
             std::shared_ptr<Buffer> b(collector.getBuffer());
             if (b) {
@@ -5559,16 +5883,55 @@ void dedup_redirect(QPDFObjectHandle container,
 /// identische Page-Dicts gehören zu VERSCHIEDENEN Seiten; ein Merge würde
 /// Seiten unterschlagen. Der Walk läuft über /Kids und deckt damit auch
 /// Knoten ohne gültiges /Type ab.
-void dedup_protect_page_tree(QPDFObjectHandle const& node,
+/// Masterplan D3: Objekte ohne eigene Identität – zwei inhaltsgleiche
+/// Exemplare sind austauschbar. Alles mit Identität (/OCG, /OCMD, /Annot,
+/// /StructElem, /Action, /Page, Formularfelder, Baumknoten …) bleibt einzeln.
+bool dedup_is_value_object(QPDFObjectHandle const& obj)
+{
+    if (obj.isArray()) {
+        // Farbräume: [/ICCBased …], [/Indexed …], [/Separation …] usw.
+        if (obj.getArrayNItems() == 0) { return false; }
+        QPDFObjectHandle family = obj.getArrayItem(0);
+        if (!family.isName()) { return false; }
+        static std::set<std::string> const colourSpaces = {
+            "/ICCBased", "/Indexed", "/Separation", "/DeviceN", "/CalRGB",
+            "/CalGray", "/Lab", "/Pattern"};
+        return colourSpaces.count(family.getName()) != 0;
+    }
+    if (!obj.isDictionary()) { return false; }
+    QPDFObjectHandle type = obj.getKey("/Type");
+    if (type.isName()) {
+        static std::set<std::string> const valueTypes = {
+            "/ExtGState", "/FontDescriptor", "/Encoding", "/Font", "/Pattern",
+            "/Mask", "/Halftone"};
+        return valueTypes.count(type.getName()) != 0;
+    }
+    // Ohne /Type: Wert, solange nichts auf Identität hinweist. /Subtype
+    // (Annotationen), /S (Aktionen, Strukturelemente), /P und /Parent
+    // (Rückverweise), /T, /Names, /Limits, /Kids (Felder und Bäume).
+    static char const* const identityKeys[] = {
+        "/Subtype", "/S", "/P", "/Parent", "/T", "/Names", "/Limits", "/Kids",
+        "/OCGs", "/Name"};
+    for (auto const* key : identityKeys) {
+        if (obj.hasKey(key)) { return false; }
+    }
+    return true;
+}
+
+/// Masterplan D1: Arbeitsliste statt Rekursion; ein Knoten wird höchstens
+/// einmal betreten (ein /Kids-Zyklus lief vorher endlos).
+void dedup_protect_page_tree(QPDFObjectHandle const& root,
                              std::set<QPDFObjGen>& out)
 {
-    if (node.isNull() || !node.isDictionary()) { return; }
-    if (node.isIndirect()) { out.insert(node.getObjGen()); }
-    QPDFObjectHandle kids = node.getKey("/Kids");
-    if (kids.isArray()) {
-        std::vector<QPDFObjectHandle> const children = kids.getArrayAsVector();
-        for (auto const& kid : children) {
-            dedup_protect_page_tree(kid, out);
+    std::vector<QPDFObjectHandle> work{root};
+    while (!work.empty()) {
+        QPDFObjectHandle node = work.back();
+        work.pop_back();
+        if (node.isNull() || !node.isDictionary()) { continue; }
+        if (node.isIndirect() && !out.insert(node.getObjGen()).second) { continue; }
+        QPDFObjectHandle kids = node.getKey("/Kids");
+        if (kids.isArray()) {
+            for (auto const& kid : kids.getArrayAsVector()) { work.push_back(kid); }
         }
     }
 }
@@ -5578,6 +5941,7 @@ void dedup_protect_page_tree(QPDFObjectHandle const& node,
 int pdfcore_deduplicate_document(pdfcore_document_t *doc,
                                  pdfcore_dedup_stats_t *stats)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return PDFCORE_ERR_OPEN; }
     if (stats) {
         stats->merged_streams = 0;
@@ -5621,15 +5985,12 @@ int pdfcore_deduplicate_document(pdfcore_document_t *doc,
                 if (!obj.isDictionary() && !obj.isArray()) { continue; }
                 // Katalog und Seitenbaum niemals anfassen (siehe oben).
                 if (protectedObjects.count(og)) { continue; }
-                if (obj.isDictionary()) {
-                    // Formularfelder (/T) und Name-Tree-Knoten (/Names,
-                    // /Limits, /Kids) haben dokumentspezifische Semantik –
-                    // konservativ außen vor.
-                    if (obj.hasKey("/T") || obj.hasKey("/Names")
-                        || obj.hasKey("/Limits") || obj.hasKey("/Kids")) {
-                        continue;
-                    }
-                }
+                // Masterplan D3: Positivliste statt Ausschlussliste. Vorher
+                // wurde jedes inhaltsgleiche Dictionary zusammengelegt außer
+                // /T, /Names, /Limits, /Kids – zwei gleichnamige Ebenen (OCG)
+                // wurden so EIN Objekt und ließen sich nicht mehr einzeln
+                // schalten. Zusammengelegt werden nur noch reine Werte.
+                if (!dedup_is_value_object(obj)) { continue; }
                 std::string serial;
                 if (!dedup_canonical(obj, 0, serial, true)) { continue; }
                 auto it = canonicalByKey.find(serial);
@@ -5687,6 +6048,7 @@ int pdfcore_deduplicate_document(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 // ============================================================================
@@ -5748,7 +6110,8 @@ bool font5_stream_bytes(QPDFObjectHandle stream, std::string& out)
 {
     try {
         Pl_Buffer collector("font5");
-        if (!stream.pipeStreamData(&collector, nullptr, 0, qpdf_dl_all,
+        Pl_Limit collector_limit("decode-limit", &collector, pdfcore_decode_limit(stream));
+        if (!stream.pipeStreamData(&collector_limit, nullptr, 0, qpdf_dl_all,
                                    /*suppress_warnings=*/true, false)) {
             return false;
         }
@@ -5944,6 +6307,36 @@ void font5_register_map(QPDFObjectHandle const& fontMap, font5_walk& w)
 /// die nächsten Bytes wie Operatoren aussehen (druckbares ASCII): Ein
 /// zufälliges „ EI " in Binärdaten geht sonst als Ende durch. Ohne gültiges
 /// `EI` bleibt `i` auf dem Ende – konservativer als Binärdaten zu deuten.
+/// Masterplan D2: Namen aus Content-Streams können Bytes als `#xx` tragen
+/// (`/Im#20A` = „Im A“). qpdf liefert Ressourcen-Schlüssel dekodiert; die
+/// Scanner verglichen den rohen Text und hielten benutzte Einträge für
+/// unbenutzt. EINE Stelle, benutzt von allen Content-Scannern.
+static std::string pdf_name_decode(std::string const& raw)
+{
+    if (raw.find('#') == std::string::npos) { return raw; }
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') { return c - '0'; }
+        if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
+        if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
+        return -1;
+    };
+    std::string out;
+    out.reserve(raw.size());
+    for (size_t k = 0; k < raw.size(); ++k) {
+        if (raw[k] == '#' && k + 2 < raw.size()) {
+            int hi = hex(raw[k + 1]);
+            int lo = hex(raw[k + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>(hi * 16 + lo));
+                k += 2;
+                continue;
+            }
+        }
+        out.push_back(raw[k]);
+    }
+    return out;
+}
+
 static bool pdfcore_skip_inline_image(std::string const& bytes, size_t& i)
 {
     size_t const n = bytes.size();
@@ -6006,7 +6399,10 @@ bool font5_walk_consumer(std::vector<QPDFObjectHandle> const& contents,
 /// Form-XObject per Tf belegt, belegt denselben Namen im Namensraum des
 /// Aufrufers mit (nicht-konforme Writer lösen Form-Fonts über die
 /// Seitenressourcen auf). Überprotection ist hier die sichere Richtung.
-void font5_scan_tokens(std::string const& bytes,
+/// Rückgabe (Masterplan D2): false, wenn ein Inline-Bild nicht sicher
+/// übersprungen werden konnte – dann ist alles dahinter ungelesen, und der
+/// Aufrufer darf nichts als unbenutzt behandeln.
+bool font5_scan_tokens(std::string const& bytes,
                        QPDFObjectHandle const& resources,
                        std::set<std::string>& usedNames,
                        std::vector<std::set<std::string>*>* mirror,
@@ -6038,7 +6434,7 @@ void font5_scan_tokens(std::string const& bytes,
                 ++i;
             }
             // Ressourcen-Map-Schlüssel tragen den führenden Slash.
-            lastName = "/" + bytes.substr(start, i - start);
+            lastName = "/" + pdf_name_decode(bytes.substr(start, i - start));
             continue;
         }
         if (ch == '(') {
@@ -6102,7 +6498,7 @@ void font5_scan_tokens(std::string const& bytes,
             }
             std::string op = bytes.substr(start, i - start);
             if (op == "BI") {
-                pdfcore_skip_inline_image(bytes, i);
+                if (!pdfcore_skip_inline_image(bytes, i)) { return false; }
                 lastName.clear();
                 continue;
             }
@@ -6173,6 +6569,7 @@ void font5_scan_tokens(std::string const& bytes,
         }
         ++i;
     }
+    return true;
 }
 
 /// Geht die Content-Streams eines Verbrauchers gegen seine (bereits
@@ -6223,8 +6620,9 @@ bool font5_walk_consumer(std::vector<QPDFObjectHandle> const& contents,
             }
             bytes += part;
         }
-        if (!bytes.empty()) {
-            font5_scan_tokens(bytes, resources, usedNames, mirror, w, depth);
+        if (!bytes.empty()
+            && !font5_scan_tokens(bytes, resources, usedNames, mirror, w, depth)) {
+            scanned = false;
         }
     }
     if (hasMap) {
@@ -6289,6 +6687,7 @@ std::vector<QPDFObjectHandle> font5_page_contents(QPDFObjectHandle const& page)
 int pdfcore_font_audit(pdfcore_document_t *doc,
                        pdfcore_font_audit_stats_t *stats)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return PDFCORE_ERR_OPEN; }
     if (stats) {
         stats->font_objects = 0;
@@ -6527,6 +6926,7 @@ int pdfcore_font_audit(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 // ============================================================================
@@ -7011,7 +7411,7 @@ void font6_scan_tokens(std::string const& bytes,
                 if (delim) { break; }
                 ++i;
             }
-            lastName = bytes.substr(start, i - start);
+            lastName = pdf_name_decode(bytes.substr(start, i - start));
             continue;
         }
         if (ch == '(') {
@@ -7721,6 +8121,14 @@ bool font6_build_context(pdfcore_document_t *doc, font6_context& ctx)
                                  appearance.getArrayAsVector()) {
                                 if (item.isStream()) { streams.push_back(item); }
                             }
+                        } else if (appearance.isDictionary()) {
+                            // Masterplan D6: Zustands-Appearances
+                            // (Kontrollkästchen: /N << /On … /Off … >>) –
+                            // vorher übersprungen.
+                            for (auto const& state : appearance.getKeys()) {
+                                QPDFObjectHandle item = appearance.getKey(state);
+                                if (item.isStream()) { streams.push_back(item); }
+                            }
                         }
                         for (auto const& stream : streams) {
                             QPDFObjectHandle own =
@@ -7729,6 +8137,20 @@ bool font6_build_context(pdfcore_document_t *doc, font6_context& ctx)
                                 own = QPDFObjectHandle::newNull();
                             }
                             if (own.isNull()) { own = resources; }
+                            // Masterplan D6: Schriften einer Appearance werden
+                            // nie subsettet – ein Viewer regeneriert
+                            // Appearances mit Zeichen, die heute nicht im
+                            // Stream stehen (Feldwerte, Zustände).
+                            QPDFObjectHandle fm = own.isDictionary()
+                                ? own.getKey("/Font") : QPDFObjectHandle::newNull();
+                            if (fm.isDictionary()) {
+                                for (auto const& name : fm.getKeys()) {
+                                    QPDFObjectHandle value = fm.getKey(name);
+                                    if (value.isIndirect()) {
+                                        ctx.protectedFonts.insert(value.getObjGen());
+                                    }
+                                }
+                            }
                             std::vector<QPDFObjectHandle> one = { stream };
                             font6_walk_consumer(one, own, ctx.usage, 1,
                                                 pageIndex);
@@ -7802,6 +8224,7 @@ int pdfcore_font_subset(pdfcore_document_t *doc,
                         long long min_bytes_saved_threshold,
                         pdfcore_font_subset_stats_t *stats)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return PDFCORE_ERR_OPEN; }
     if (stats) {
         stats->subsetted_fonts = 0;
@@ -7846,6 +8269,7 @@ int pdfcore_font_subset(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 int pdfcore_font_subset_candidates(pdfcore_document_t *doc,
@@ -7854,6 +8278,7 @@ int pdfcore_font_subset_candidates(pdfcore_document_t *doc,
                                    int *count, int **out_pages,
                                    int *pages_count)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !out || !count || !out_pages || !pages_count) {
         return PDFCORE_ERR_OPEN;
     }
@@ -7939,19 +8364,23 @@ int pdfcore_font_subset_candidates(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 void pdfcore_font_subset_candidates_free(pdfcore_font_subset_candidate_t *out,
                                          int *pages)
 {
+    PDFCORE_GUARD_BEGIN
     std::free(out);
     std::free(pages);
+    PDFCORE_GUARD_END_VOID
 }
 
 int pdfcore_font_subset_selected(pdfcore_document_t *doc,
                                  const int *obj_numbers, const int *generations,
                                  int count, pdfcore_font_subset_stats_t *stats)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return PDFCORE_ERR_OPEN; }
     if (count > 0 && (!obj_numbers || !generations)) {
         return PDFCORE_ERR_OPEN;
@@ -8015,6 +8444,7 @@ int pdfcore_font_subset_selected(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 // ============================================================================
@@ -8195,7 +8625,8 @@ void rgc_walk_object(QPDFObjectHandle const& obj,
 /// überspringen, letzter Name je Token) – bewusst großzügig bei sc(n): Der
 /// letzte Name-Operand davor wird als mögliche Pattern-Nutzung gebucht
 /// (überprotektiv, nie zu wenig).
-void rgc_scan_tokens(std::string const& bytes,
+/// Rückgabe wie font5_scan_tokens (Masterplan D2).
+bool rgc_scan_tokens(std::string const& bytes,
                      std::string const mapKeys[rgc_category_count],
                      rgc_walk& w)
 {
@@ -8230,7 +8661,7 @@ void rgc_scan_tokens(std::string const& bytes,
                 if (delim) { break; }
                 ++i;
             }
-            lastName = bytes.substr(start, i - start);
+            lastName = pdf_name_decode(bytes.substr(start, i - start));
             lastNameIsName = true;
             continue;
         }
@@ -8291,7 +8722,7 @@ void rgc_scan_tokens(std::string const& bytes,
             }
             std::string op = bytes.substr(start, i - start);
             if (op == "BI") {
-                pdfcore_skip_inline_image(bytes, i);
+                if (!pdfcore_skip_inline_image(bytes, i)) { return false; }
                 lastNameIsName = false;
                 continue;
             }
@@ -8309,6 +8740,7 @@ void rgc_scan_tokens(std::string const& bytes,
         }
         ++i;
     }
+    return true;
 }
 
 /// Auflösen EINES Verbrauchers: Content scannen (Konkatenations-Regel des
@@ -8368,8 +8800,8 @@ bool rgc_walk_consumer(std::vector<QPDFObjectHandle> const& contents,
         }
         bytes += part;
     }
-    if (!bytes.empty() && keysOk) {
-        rgc_scan_tokens(bytes, mapKeys, w);
+    if (!bytes.empty() && keysOk && !rgc_scan_tokens(bytes, mapKeys, w)) {
+        scanned = false;
     }
 
     if (!scanned || !keysOk) {
@@ -8435,6 +8867,7 @@ long long rgc_estimate_bytes(QPDFObjectHandle const& value, int depth)
 int pdfcore_remove_unused_resources(pdfcore_document_t *doc,
                                     pdfcore_resource_gc_stats_t *stats)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return PDFCORE_ERR_OPEN; }
     if (stats) {
         stats->xobjects_removed = 0;
@@ -8599,6 +9032,14 @@ int pdfcore_remove_unused_resources(pdfcore_document_t *doc,
                         if (bucket.usedNames.count(rgc_name(key)) != 0) {
                             continue;
                         }
+                        // Masterplan D2: Die Default-Farbräume nennt nie ein
+                        // Operator – sie gelten implizit für jedes
+                        // Device-Bild der Seite. Nie entfernen.
+                        if (c == rgc_colorspace
+                            && (key == "/DefaultGray" || key == "/DefaultRGB"
+                                || key == "/DefaultCMYK")) {
+                            continue;
+                        }
                         QPDFObjectHandle value = map.getKey(key);
                         savedBytes += rgc_estimate_bytes(value, 0);
                         map.removeKey(key);
@@ -8617,6 +9058,7 @@ int pdfcore_remove_unused_resources(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 // ============================================================================
@@ -9141,6 +9583,7 @@ int pdfcore_minify_content_streams(pdfcore_document_t *doc,
                                    int *streamsMinified,
                                    long long *bytesSavedEstimate)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc) { return -1; }
     if (streamsMinified) { *streamsMinified = 0; }
     if (bytesSavedEstimate) { *bytesSavedEstimate = 0; }
@@ -9243,11 +9686,13 @@ int pdfcore_minify_content_streams(pdfcore_document_t *doc,
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 int pdfcore_space_inventory(pdfcore_document_t *doc,
                             long long document_bytes,
                             pdfcore_space_inventory_t *out)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !out) { return PDFCORE_ERR_OPEN; }
     std::memset(out, 0, sizeof(*out));
     try {
@@ -9328,6 +9773,7 @@ int pdfcore_space_inventory(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 // ============================================================================
@@ -9343,6 +9789,7 @@ int pdfcore_replace_image_object_indexed(pdfcore_document_t *doc,
                                          int palette_components,
                                          int decode_applied)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !indices || indices_len == 0 || !palette || palette_len == 0
         || width <= 0 || height <= 0) {
         return PDFCORE_ERR_OPEN;
@@ -9464,6 +9911,7 @@ int pdfcore_replace_image_object_indexed(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 // ============================================================================
@@ -9827,6 +10275,7 @@ int pdfcore_replace_page_image_draw_with_layers(
     const char *resource_name,
     const pdfcore_mrc_layer_t *layers, int layer_count)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !resource_name || !layers || layer_count <= 0
         || layer_count > 64) {
         return PDFCORE_ERR_OPEN;
@@ -9979,6 +10428,16 @@ int pdfcore_replace_page_image_draw_with_layers(
             }
         }
         replacement += "Q\n";
+        // Masterplan D6: Das Original „M cm /Im Do“ ließ M für den Rest des
+        // Inhalts stehen, wenn es nicht selbst in q/Q stand. Unser q/Q setzt
+        // M zurück – nachfolgender Inhalt rutschte. M danach erneut setzen
+        // ergibt in beiden Fällen den Zustand des Originals (innerhalb eines
+        // umgebenden q/Q hebt dessen Q es ohnehin wieder auf).
+        for (int k = 0; k < 6; ++k) {
+            replacement += mrc_num(match.matrix[k]);
+            replacement += " ";
+        }
+        replacement += "cm\n";
 
         std::string newContent = content.substr(0, match.spanStart)
             + replacement + content.substr(match.spanEnd);
@@ -9992,6 +10451,7 @@ int pdfcore_replace_page_image_draw_with_layers(
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 /* Ink-Overlay (Freihand-Tinte) – siehe Header. Angehängt wird IMMER hinter
@@ -10002,6 +10462,7 @@ int pdfcore_append_page_content(pdfcore_document_t *doc,
                                 const char *const *contents,
                                 int count)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !page_indices || !contents || count <= 0) { return -1; }
     try {
         std::vector<QPDFObjectHandle> pages = doc->qpdf.getAllPages();
@@ -10018,6 +10479,7 @@ int pdfcore_append_page_content(pdfcore_document_t *doc,
     } catch (...) {
         return -1;
     }
+    PDFCORE_GUARD_END(-1)
 }
 
 // MARK: - echtes zlib für Kandidaten-Streams (2026-10-01)
@@ -10025,6 +10487,7 @@ int pdfcore_append_page_content(pdfcore_document_t *doc,
 int pdfcore_flate_compress(const unsigned char *data, size_t data_len, int level,
                            unsigned char **out, size_t *out_len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!data || !out || !out_len || data_len == 0) { return PDFCORE_ERR_INTERNAL; }
     *out = nullptr; *out_len = 0;
     uLong bound = compressBound(static_cast<uLong>(data_len));
@@ -10039,6 +10502,7 @@ int pdfcore_flate_compress(const unsigned char *data, size_t data_len, int level
     *out = buffer;
     *out_len = static_cast<size_t>(dest);
     return PDFCORE_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
 // MARK: - OCR-Textebene (2026-10-01)
@@ -10046,6 +10510,7 @@ int pdfcore_flate_compress(const unsigned char *data, size_t data_len, int level
 int pdfcore_append_ocr_layer(pdfcore_document_t *doc, int page_index,
                              const char *content, size_t content_len)
 {
+    PDFCORE_GUARD_BEGIN
     if (!doc || !content || page_index < 0) { return PDFCORE_ERR_INTERNAL; }
     try {
         QPDFPageDocumentHelper helper(doc->qpdf);
@@ -10081,4 +10546,5 @@ int pdfcore_append_ocr_layer(pdfcore_document_t *doc, int page_index,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }

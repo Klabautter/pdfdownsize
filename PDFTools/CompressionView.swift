@@ -16,6 +16,8 @@ struct CompressionView: View {
     @EnvironmentObject private var discardGuard: DiscardGuard
 
     @State private var isTargeted = false
+    /// B4: Vorher/Nachher einer fertigen Stapelzeile (Doppelklick).
+    @State private var bulkComparison: URL?
 
     var body: some View {
         content
@@ -51,12 +53,16 @@ struct CompressionView: View {
 
     @ViewBuilder
     private var content: some View {
-        if !viewModel.bulkInputs.isEmpty {
-            BulkStage(viewModel: viewModel, isTargeted: isTargeted)
+        if let compared = bulkComparison, viewModel.bulkResult(for: compared) != nil {
+            BulkComparisonStage(viewModel: viewModel, input: compared,
+                                onBack: { bulkComparison = nil })
+        } else if !viewModel.bulkInputs.isEmpty {
+            BulkStage(viewModel: viewModel, isTargeted: isTargeted,
+                      onCompare: { bulkComparison = $0 })
         } else if viewModel.inputURL == nil {
             WorkspaceWelcome(icon: "doc.zipper",
                              title: String(localized: "PDFs komprimieren"),
-                             subtitle: String(localized: "Eine PDF oder gleich mehrere – alles bleibt auf dem Mac."),
+                             subtitle: String(localized: "Eine PDF oder gleich mehrere."),
                              dropHint: String(localized: "Dateien auch hierher ziehen"),
                              isTargeted: isTargeted) {
                 // ⌘O liegt im Ablage-Menü (Commands.swift) – nicht doppelt
@@ -68,6 +74,14 @@ struct CompressionView: View {
                         .frame(maxWidth: 360)
                 }
             }
+        } else if let verdict = viewModel.rejection, let url = viewModel.inputURL {
+            RejectedDocumentView(fileName: url.lastPathComponent, verdict: verdict,
+                                 onChooseOther: { viewModel.chooseFiles() },
+                                 onClose: { viewModel.clearSingleSelection() },
+                                 onUnlock: { viewModel.unlock(password: $0) },
+                                 passwordError: viewModel.passwordError,
+                                 isUnlocking: viewModel.isUnlocking)
+                .dropTargetOverlay(isTargeted, inset: 12)
         } else {
             SingleStage(viewModel: viewModel, isTargeted: isTargeted)
         }
@@ -393,6 +407,11 @@ private struct ControlPanel: View {
                 .help(viewModel.mode == .custom
                       ? "Bei „Eigene“ gelten die festen Einstellungen; das Ziel kann sie nicht unterschreiten und dient nur als Rückmeldung."
                       : "Gewünschte Höchstgröße. Verkleinert so weit, wie es die Qualitätsgrenzen des Modus erlauben.")
+                if viewModel.targetSizeInvalid {
+                    Text("Bitte eine Zahl in MB eingeben, zum Beispiel 5 oder 2,5.")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
                 Toggle("Schnelles Laden im Web", isOn: $viewModel.linearizeForWeb)
                     .toggleStyle(.switch)
                     .help("Linearisiert das PDF, damit die erste Seite im Browser sofort erscheint.")
@@ -870,10 +889,62 @@ private struct BulkRow: Identifiable {
     var id: URL { url }
 }
 
+/// B4: Vorher/Nachher einer Stapeldatei in der vorhandenen DocumentStage –
+/// kein neues Bedienkonzept, nur „Zurück zur Liste“ oben links.
+private struct BulkComparisonStage: View {
+    @ObservedObject var viewModel: CompressionViewModel
+    let input: URL
+    let onBack: () -> Void
+    @State private var fraction = 0.5
+    @State private var page = 0
+    @State private var original: PDFDocument?
+    @State private var compressed: PDFDocument?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Button(action: onBack) {
+                    Label("Zurück zur Liste", systemImage: "chevron.left")
+                }
+                .keyboardShortcut(.cancelAction)
+                Text(input.lastPathComponent)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                if let r = viewModel.bulkResult(for: input) {
+                    Text("\(Int(r.savedPercent.rounded())) % kleiner · \(CompressionResult.format(r.outputBytes))")
+                        .foregroundStyle(Theme.savings)
+                        .monospacedDigit()
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            if let original {
+                DocumentStage(original: original, compressed: compressed, pageIndex: page,
+                              fraction: $fraction, onPageChange: { page = $0 })
+                    .padding(24)
+            } else {
+                Spacer()
+            }
+        }
+        .background(Theme.canvas)
+        .task(id: input) {
+            let result = viewModel.bulkResult(for: input)
+            original = PDFDocument(url: input)
+            compressed = result.flatMap { PDFDocument(url: $0.outputURL) }
+            page = 0
+        }
+    }
+}
+
 private struct BulkStage: View {
     @ObservedObject var viewModel: CompressionViewModel
     @EnvironmentObject private var discardGuard: DiscardGuard
     let isTargeted: Bool
+    var onCompare: (URL) -> Void = { _ in }
+    @State private var selection: Set<URL> = []
+    @State private var showsCustom = true
 
     /// Sichern-Fehler als System-Alert (Befunde M7/S6) – Aktionsfehler
     /// gehören nicht in eine Fußzeile.
@@ -892,7 +963,17 @@ private struct BulkStage: View {
             header
                 .padding(.horizontal, 20)
                 .padding(.vertical, 14)
-            Table(rows) {
+            // B4: „Eigene“ im Stapel – dieselbe Einstellfläche wie im Einzelweg.
+            if viewModel.mode == .custom, !viewModel.isWorking {
+                DisclosureGroup("Einstellungen für „Eigene“", isExpanded: $showsCustom) {
+                    CustomSettingsPanel(viewModel: viewModel)
+                        .frame(maxWidth: 520, alignment: .leading)
+                        .padding(.top, 8)
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 10)
+            }
+            Table(rows, selection: $selection) {
                 TableColumn("Datei") { row in
                     HStack(spacing: 8) {
                         Image(nsImage: NSWorkspace.shared.icon(for: .pdf))
@@ -921,7 +1002,25 @@ private struct BulkStage: View {
                 TableColumn("") { row in
                     trailing(row)
                 }
-                .width(90)
+                .width(130)
+            }
+            // B4: keine leeren Zebrastreifen unter der letzten Datei.
+            .alternatingRowBackgrounds(.disabled)
+            // B4: Doppelklick auf eine fertige Zeile zeigt Vorher/Nachher.
+            .contextMenu(forSelectionType: URL.self) { _ in
+                EmptyView()
+            } primaryAction: { urls in
+                guard let url = urls.first, viewModel.bulkResult(for: url) != nil else { return }
+                onCompare(url)
+            }
+            if !viewModel.bulkSigned.isEmpty {
+                Label(String(localized: "\(viewModel.bulkSigned.count) Dateien digital signiert – die Signatur wird dabei ungültig."),
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
             }
             footer
                 .padding(.horizontal, 20)
@@ -951,7 +1050,15 @@ private struct BulkStage: View {
                     .monospacedDigit()
             }
             Spacer()
-            Picker("Modus", selection: $viewModel.mode) {
+            // B4: Auch nach dem Lauf wählbar – ein Wechsel fragt bei
+            // ungesicherten Ergebnissen nach und startet den Stapel neu.
+            Picker("Modus", selection: Binding(
+                get: { viewModel.mode },
+                set: { newMode in
+                    discardGuard.run(ifUnsaved: viewModel.hasUnsavedResult) {
+                        viewModel.changeBulkMode(to: newMode)
+                    }
+                })) {
                 ForEach(CompressionMode.allCases) { m in
                     Text(ControlPanel.label(m)).tag(m)
                 }
@@ -959,7 +1066,7 @@ private struct BulkStage: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(width: 320)
-            .disabled(viewModel.isWorking || !viewModel.bulkResults.isEmpty)
+            .disabled(viewModel.isWorking)
             Button("Alle entfernen", role: .destructive) {
                 discardGuard.run(ifUnsaved: viewModel.hasUnsavedResult) { viewModel.clearBulk() }
             }
@@ -976,6 +1083,12 @@ private struct BulkStage: View {
                  : "\(Int(r.savedPercent.rounded())) % kleiner · \(CompressionResult.format(r.outputBytes))")
                 .foregroundStyle(Theme.savings)
                 .monospacedDigit()
+        } else if let verdict = viewModel.bulkVerdicts[url], !verdict.isOK {
+            // Vorprüfung (B1): Grund sofort, nicht „…“ – die Datei läuft nicht mit.
+            Label(verdict.shortLabel,
+                  systemImage: verdict == .locked ? "lock" : "exclamationmark.triangle")
+                .foregroundStyle(.secondary)
+                .help(verdict.title + " " + verdict.detail)
         } else if viewModel.bulkCancelledURLs.contains(url) {
             Text("Abgebrochen").foregroundStyle(.secondary)
         } else if let message = viewModel.bulkErrors[url] {
@@ -1009,7 +1122,7 @@ private struct BulkStage: View {
             }
         } else if viewModel.isWorking {
             if !viewModel.bulkCancelledURLs.contains(url), viewModel.bulkResult(for: url) == nil,
-               viewModel.bulkErrors[url] == nil {
+               viewModel.bulkErrors[url] == nil, viewModel.bulkVerdicts[url]?.isOK != false {
                 Button { viewModel.cancelBulkFile(at: row.index) } label: {
                     Label("Diese Datei abbrechen", systemImage: "xmark.circle.fill")
                 }
@@ -1019,13 +1132,20 @@ private struct BulkStage: View {
                 .help("Diese Datei abbrechen – die übrigen laufen weiter")
             }
         } else {
-            Button { viewModel.removeBulkInput(at: row.index) } label: {
-                Label("Aus der Liste entfernen", systemImage: "minus.circle.fill")
+            HStack(spacing: 6) {
+                // B4: Fehlgeschlagene oder abgebrochene Datei allein wiederholen.
+                if viewModel.bulkErrors[url] != nil || viewModel.bulkCancelledURLs.contains(url) {
+                    Button("Wiederholen") { viewModel.retryBulkFile(at: row.index) }
+                        .buttonStyle(.link)
+                }
+                Button { viewModel.removeBulkInput(at: row.index) } label: {
+                    Label("Aus der Liste entfernen", systemImage: "minus.circle.fill")
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Aus der Liste entfernen")
             }
-            .labelStyle(.iconOnly)
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Aus der Liste entfernen")
         }
     }
 

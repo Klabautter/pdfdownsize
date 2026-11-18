@@ -39,6 +39,8 @@ enum ImageClass {
 struct PixelStats {
     let uniqueColorRatio: Double
     let chromaMean: Double
+    /// Grau-Entscheidung aus `ChromaCensus` (Masterplan A1) – dieselbe, die
+    /// das Qualitäts-Gate benutzt.
     let isGrayscale: Bool
     /// Anteil der VIER häufigsten quantisierten Farbschlüssel an den opaken
     /// Pixeln. Flächengrafik (Screenshots, Charts) wird von wenigen Flächen-
@@ -106,10 +108,14 @@ enum ImageClassifier {
         let top4 = sortedCounts.prefix(4).reduce(0, +)
         let dominantShare = Double(top4) / Double(denom)
 
+        // Grau/Farbe entscheidet die Farbzählung auf bis zu 1024 px, nicht der
+        // Mittelwert dieser 64-px-Stichprobe: Darin verschwand eine blaue
+        // Unterschrift auf weißem Papier (Masterplan A1).
+        let census = ChromaCensus.of(image)
         return PixelStats(
             uniqueColorRatio: uniqueRatio,
             chromaMean: chromaMean,
-            isGrayscale: chromaMean < 1.5,
+            isGrayscale: census?.isNeutral ?? false,
             dominantColorShare: dominantShare
         )
     }

@@ -39,7 +39,12 @@ struct OCRTests {
     /// auf die Fundstelle im Seitentext, Treffer in der Seitenüberschrift
     /// („Seite 4") werden mitgezählt, ein Suchwechsel lässt den gewählten
     /// Treffer außerhalb der neuen Liste stehen.
-    @Test func sucheFindetTrefferMitSeiteUndAusschnitt() {
+    /// C6: Die Suche läuft verzögert (250 ms) und abseits des Hauptthreads –
+    /// nach jeder Eingabe wird ihr Ende abgewartet; die Prüfungen sind
+    /// dieselben wie vorher.
+    @MainActor
+    @Test func sucheFindetTrefferMitSeiteUndAusschnitt() async throws {
+        func settle() async throws { try await Task.sleep(for: .milliseconds(450)) }
         let vm = OCRViewModel()
         vm.pageResults = [
             OCREngine.PageResult(pageIndex: 0, lines: [line("Rechnung Nummer 4711", row: 0),
@@ -48,8 +53,10 @@ struct OCRTests {
             OCREngine.PageResult(pageIndex: 2, lines: [line("Größe der Lieferung", row: 0)]),
         ]
         vm.searchQuery = ""
+        try await settle()
         #expect(vm.searchHits.isEmpty)
         vm.searchQuery = "RECHNUNG"
+        try await settle()
         #expect(vm.searchHits.map(\.pageIndex) == [0, 0])
         #expect(vm.searchHits.first?.snippet.contains("Rechnung Nummer") == true)
         let body = vm.textSections[0].body
@@ -57,22 +64,28 @@ struct OCRTests {
                                               NSRange(location: body.utf16.count - "rechnung unten".utf16.count,
                                                       length: 8)])
         vm.searchQuery = "größe"
+        try await settle()
         #expect(vm.searchHits.map(\.pageIndex) == [2])
         vm.searchQuery = "Seite"
+        try await settle()
         #expect(vm.searchHits.isEmpty)
 
         // Zwei OCR-Zeilen bilden einen Absatz – die Suche findet über den Umbruch.
         vm.searchQuery = "4711 Zweite"
+        try await settle()
         #expect(vm.searchHits.map(\.pageIndex) == [0])
 
         vm.selectedHit = 1
         vm.searchQuery = "rechnung"
+        try await settle()
         #expect(vm.selectedHit == 0)
 
         vm.pageResults = (0..<2000).map {
             OCREngine.PageResult(pageIndex: $0, lines: [line("Treffer \($0)", row: 0)])
         }
+        try await settle()
         vm.searchQuery = "treffer"
+        try await settle()
         #expect(vm.searchHits.count == OCRViewModel.maximumSearchHits)
         #expect(vm.searchHitTotal == 2000)
     }

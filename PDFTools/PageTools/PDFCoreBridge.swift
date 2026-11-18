@@ -36,11 +36,17 @@ final class PDFCoreDocument {
 
     let handle: OpaquePointer
 
-    init(path: String) throws {
+    init(path: String, password: String? = nil) throws {
         var status = PDFCORE_OK
         Self.processGate.lock()
         defer { Self.processGate.unlock() }
-        guard let handle = pdfcore_open(path, &status), status == PDFCORE_OK else {
+        let opened: OpaquePointer?
+        if let password {
+            opened = pdfcore_open_with_password(path, password, &status)
+        } else {
+            opened = pdfcore_open(path, &status)
+        }
+        guard let handle = opened, status == PDFCORE_OK else {
             throw PDFCoreError.openFailed(code: status.rawValue)
         }
         self.handle = handle

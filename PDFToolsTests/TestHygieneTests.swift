@@ -99,6 +99,29 @@ import pdfcore
             """)
     }
 
+    /// Masterplan D4: Keine C++-Ausnahme verlässt die C-Grenze. Jede im
+    /// Header deklarierte Funktion beginnt mit PDFCORE_GUARD_BEGIN – eine neue
+    /// Funktion ohne Hülle fällt hier auf, nicht erst als Absturz.
+    @Test func jederExportIstEingehuellt() throws {
+        let src = Self.testDirectory().deletingLastPathComponent()
+            .appendingPathComponent("Vendor/pdfcore/src")
+        var header = try String(contentsOf: src.appendingPathComponent("pdfcore.h"), encoding: .utf8)
+        let source = try String(contentsOf: src.appendingPathComponent("pdfcore.cc"), encoding: .utf8)
+        // Kommentare entfernen, dann deklarierte Namen sammeln.
+        header = header.replacingOccurrences(of: #"/\*[\s\S]*?\*/|//[^\n]*"#, with: "", options: .regularExpression)
+        let declared = Set(header.matches(of: /\b(pdfcore_[a-z0-9_]+)\(/).map { String($0.1) })
+        var unguarded: [String] = []
+        for name in declared.sorted() {
+            // Definition: Name, Parameterliste, dann „{“ und die Hülle.
+            let pattern = "\\b" + name + "\\([\\s\\S]*?\\)\\s*\\{\\s*PDFCORE_GUARD_BEGIN"
+            if source.range(of: pattern, options: .regularExpression) == nil {
+                unguarded.append(name)
+            }
+        }
+        #expect(declared.count > 50, "Header-Analyse fand nur \(declared.count) Funktionen")
+        #expect(unguarded.isEmpty, "Ohne PDFCORE_GUARD: \(unguarded)")
+    }
+
     /// Ein fester Dokumentpfad im Korpus ist eine Sonde, kein Test: Auf
     /// einer Maschine ohne dieses Dokument schlägt sie fehl oder – schlimmer
     /// – besteht stillschweigend, ohne etwas geprüft zu haben.

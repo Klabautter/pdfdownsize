@@ -11,9 +11,47 @@ import SwiftUI
 final class OpenFilesDelegate: NSObject, NSApplicationDelegate {
     static let didReceiveFiles = Notification.Name("PDFdownsize.didReceiveFiles")
 
+    /// Die Instanz, die `NSApplicationDelegateAdaptor` anlegt. `NSApp.delegate`
+    /// ist unter SwiftUI ein interner Wrapper und lässt sich nicht casten.
+    nonisolated(unsafe) static weak var current: OpenFilesDelegate?
+
+    override init() {
+        super.init()
+        Self.current = self
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         NotificationCenter.default.post(name: Self.didReceiveFiles, object: urls)
     }
+
+    // MARK: Beenden (Masterplan B3)
+    //
+    // Vorher gab es kein `applicationShouldTerminate`: ⌘Q verwarf ein
+    // ungesichertes Ergebnis und einen laufenden Lauf ohne Rückfrage, und
+    // `willTerminate` löschte den Sitzungsordner gleich mit.
+
+    /// Von RootView gesetzt: sammelt ungesicherte Ergebnisse und Läufe der
+    /// vier Werkzeuge.
+    var pendingWork: (@MainActor () -> PendingWork)?
+    /// Von RootView gesetzt: zeigt den Verwerfen-Dialog und meldet die Antwort.
+    var confirmQuit: (@MainActor (PendingWork, @escaping (Bool) -> Void) -> Void)?
+
+    @MainActor
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let work = pendingWork?(), work.needsConfirmation,
+              let confirmQuit else { return .terminateNow }
+        confirmQuit(work) { sender.reply(toApplicationShouldTerminate: $0) }
+        return .terminateLater
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+}
+
+/// Was beim Beenden oder Fensterschließen verloren ginge.
+struct PendingWork: Equatable {
+    var unsavedResult = false
+    var running = false
+    var needsConfirmation: Bool { unsavedResult || running }
 }
 
 @main
@@ -55,5 +93,10 @@ struct PDFToolsApp: App {
         .commands {
             appCommands
         }
+
+        Window("Lizenzen", id: "licenses") {
+            LicensesView()
+        }
+        .defaultSize(width: 820, height: 560)
     }
 }

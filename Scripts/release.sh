@@ -48,8 +48,20 @@ REPO="Klabautter/pdfdownsize"
 DERIVED="${PDFDOWNSIZE_DERIVED_DATA:-$ROOT/tmp/release-build}"
 NOTES_FILE="$ROOT/RELEASE_NOTES.md"
 DRY_RUN=0
-TEAM_ID="F73HH23RLN"
-NOTARY_PROFILE="${PDFDOWNSIZE_NOTARY_PROFILE:-financetracker-notary}"
+# Team-ID und Notar-Profil stehen in der nicht versionierten
+# Scripts/release.local.env (Masterplan G1) – nicht im öffentlichen Repo.
+#   PDFDOWNSIZE_TEAM_ID=…
+#   PDFDOWNSIZE_NOTARY_PROFILE=…
+LOCAL_ENV="$ROOT/Scripts/release.local.env"
+# shellcheck disable=SC1090
+[ -f "$LOCAL_ENV" ] && source "$LOCAL_ENV"
+TEAM_ID="${PDFDOWNSIZE_TEAM_ID:-}"
+NOTARY_PROFILE="${PDFDOWNSIZE_NOTARY_PROFILE:-}"
+[ -n "$TEAM_ID" ] && [ -n "$NOTARY_PROFILE" ] || {
+    echo "Scripts/release.local.env fehlt oder ist unvollständig" >&2
+    echo "(PDFDOWNSIZE_TEAM_ID und PDFDOWNSIZE_NOTARY_PROFILE)." >&2
+    exit 1
+}
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
@@ -87,6 +99,11 @@ fi
 
 command -v gh >/dev/null || { echo "gh fehlt: brew install gh, dann gh auth login" >&2; exit 1; }
 
+# Kein Release ohne grünes Gate (Masterplan G1). Das Gate schreibt die
+# Abnahme mit Commit-Hash; der Build bettet sie ein, release-check prüft sie.
+echo "→ Gate …"
+"$ROOT/Scripts/gate.sh" || { echo "Gate rot – kein Release." >&2; exit 1; }
+
 # Developer ID, nie das Entwicklungszertifikat (das trägt eine Mailadresse).
 SIGN_ID="$(security find-identity -v -p codesigning \
     | awk -v team="($TEAM_ID)" '/"Developer ID Application: / && index($0, team) {print $2; exit}')"
@@ -107,9 +124,19 @@ VERSION="$(xcodebuild -project PDFTools.xcodeproj -scheme PDFTools -configuratio
 TAG="v$VERSION"
 # Im Trockenlauf sind diese beiden Befunde nur Hinweise, damit der Ablauf
 # auch auf einem schon veröffentlichten Stand geprobt werden kann.
-if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
-    echo "Tag $TAG liegt schon auf GitHub – Version im Projekt erhöhen." >&2
-    [ "$DRY_RUN" = 1 ] || exit 1
+#
+# Wiederaufnahme (G1): Brach ein Lauf NACH dem Tag-Push ab (Notar, Netz),
+# zeigt der Tag schon auf HEAD. Dann geht es weiter, ohne ihn neu anzulegen.
+TAG_PUSHED=0
+REMOTE_TAG="$(git ls-remote --tags origin "refs/tags/$TAG^{}" 2>/dev/null | awk '{print $1}')"
+if [ -n "$REMOTE_TAG" ]; then
+    if [ "$REMOTE_TAG" = "$(git rev-parse HEAD)" ]; then
+        echo "   Tag $TAG zeigt schon auf HEAD – Wiederaufnahme."
+        TAG_PUSHED=1
+    else
+        echo "Tag $TAG liegt schon auf GitHub (anderer Stand) – Version im Projekt erhöhen." >&2
+        [ "$DRY_RUN" = 1 ] || exit 1
+    fi
 fi
 if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
     echo "Release $TAG existiert schon auf GitHub." >&2
@@ -130,6 +157,7 @@ echo "→ Baue Release …"
 # pdfcore_remove_page_thumbs und pdfcore_minify_content_streams per dlsym im
 # eigenen Binary; vollständig gestrippt fielen beide Optimierungen still weg
 # (gemessen bis +7 % Ausgabegröße).
+set +e
 xcodebuild build -project PDFTools.xcodeproj -scheme PDFTools \
     -configuration Release -derivedDataPath "$DERIVED" \
     CLANG_COVERAGE_MAPPING=NO ENABLE_CODE_COVERAGE=NO \
@@ -137,7 +165,14 @@ xcodebuild build -project PDFTools.xcodeproj -scheme PDFTools \
     "OTHER_CFLAGS=\$(inherited) -ffile-prefix-map=$ROOT=." \
     DEPLOYMENT_POSTPROCESSING=YES STRIP_INSTALLED_PRODUCT=YES \
     STRIP_STYLE=debugging 2>&1 \
-    | grep -E " error: |BUILD (SUCCEEDED|FAILED)" || true
+    | grep -E " error: |BUILD (SUCCEEDED|FAILED)"
+# Der Build-Status, nicht der des grep (G1): Vorher stand hier `|| true`,
+# und ein gescheiterter Build lief bis zur Prüfung auf ein vorhandenes,
+# ALTES App-Bündel weiter. Ohne `set -e` und ohne `||` bleibt PIPESTATUS
+# der der Pipeline.
+BUILD_STATUS="${PIPESTATUS[0]}"
+set -e
+[ "$BUILD_STATUS" -eq 0 ] || { echo "Build fehlgeschlagen (Status $BUILD_STATUS)" >&2; exit 1; }
 
 APP="$DERIVED/Build/Products/Release/PDFdownsize.app"
 [ -d "$APP" ] || { echo "Build fehlgeschlagen: $APP fehlt" >&2; exit 1; }
@@ -264,9 +299,13 @@ fi
 
 echo "→ Code pushen (das Release zeigt auf diesen Stand) …"
 run git push origin main
-echo "→ Tag $TAG anlegen und pushen …"
-run git tag -a "$TAG" -m "PDFdownsize $VERSION"
-run git push origin "$TAG"
+if [ "$TAG_PUSHED" = 1 ]; then
+    echo "→ Tag $TAG liegt schon auf HEAD – übersprungen."
+else
+    echo "→ Tag $TAG anlegen und pushen …"
+    run git tag -a "$TAG" -m "PDFdownsize $VERSION"
+    run git push origin "$TAG"
+fi
 echo "→ GitHub-Release $TAG mit ZIP anlegen …"
 run gh release create "$TAG" "$ZIP" -R "$REPO" --title "PDFdownsize $VERSION" \
     --notes-file "$NOTES_FILE" --verify-tag

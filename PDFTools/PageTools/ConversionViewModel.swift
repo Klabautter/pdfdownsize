@@ -22,6 +22,8 @@ final class ConversionViewModel: ObservableObject {
         case ready           // Quelle gesetzt, Parameter wählbar
         case working(cancelling: Bool)
         case done
+        /// Masterplan B1: Die PDF lässt sich nicht verarbeiten.
+        case rejected(DocumentProbe.Verdict)
     }
 
     // MARK: State
@@ -78,6 +80,15 @@ final class ConversionViewModel: ObservableObject {
             stage = .ready
             resultFolder = nil
             savedPDF = nil
+            // Vorprüfung (B1) – dieselbe wie in den anderen Werkzeugen.
+            Task.detached(priority: .userInitiated) {
+                let verdict = DocumentProbe.inspect(first)
+                guard !verdict.isOK else { return }
+                await MainActor.run {
+                    guard self.pdfURL == first, self.stage == .ready else { return }
+                    self.stage = .rejected(verdict)
+                }
+            }
         } else if !images.isEmpty {
             direction = .imagesToPdf
             imageURLs = images
@@ -154,6 +165,7 @@ final class ConversionViewModel: ObservableObject {
             return
         }
         guard !isWorking, direction == .pdfToImages, let url = pdfURL else { return }
+        if case .rejected = stage { return }
         let options = exportSettings.options
         let runID = UUID()
         operationID = runID

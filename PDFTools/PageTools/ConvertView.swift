@@ -20,6 +20,11 @@ struct ConvertView: View {
             switch vm.stage {
             case .choose:
                 chooseState
+            case .rejected(let verdict):
+                RejectedDocumentView(fileName: vm.pdfURL?.lastPathComponent ?? "",
+                                     verdict: verdict,
+                                     onChooseOther: { vm.wantsFiles = true },
+                                     onClose: { vm.reset() })
             case .ready, .working, .done:
                 workingState
             }
@@ -142,7 +147,7 @@ struct ConvertView: View {
     }
 
     private var headerSubtitle: String {
-        vm.direction == .pdfToImages ? String(localized: "Seiten als Bilder exportieren") : String(localized: "Zu einer PDF zusammenfassen")
+        vm.direction == .pdfToImages ? String(localized: "PDF → Bilder") : String(localized: "Bilder → PDF")
     }
 
     private var headerIcon: NSImage {
@@ -190,13 +195,13 @@ struct ConvertView: View {
                 // erneut exportieren (Befund S4).
                 if vm.stage == .done {
                     Button { chooseFolderAndExport() } label: {
-                        Text("Erneut exportieren …").frame(maxWidth: .infinity)
+                        Text("Bilder erneut sichern …").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.large)
                 } else {
                     Button { chooseFolderAndExport() } label: {
-                        Text("Exportieren …").frame(maxWidth: .infinity)
+                        Text("Bilder sichern …").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.extraLarge)
@@ -242,7 +247,7 @@ struct ConvertView: View {
         }
         if vm.stage == .done {
             if let folder = vm.resultFolder {
-                SavedResultBlock(title: vm.statusLabel.isEmpty ? String(localized: "Exportiert") : vm.statusLabel,
+                SavedResultBlock(title: vm.statusLabel.isEmpty ? String(localized: "Gesichert") : vm.statusLabel,
                                  detail: folder.path,
                                  urls: [folder])
             } else if let pdf = vm.savedPDF {
@@ -260,7 +265,7 @@ struct ConvertView: View {
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.prompt = String(localized: "Diesen Ordner verwenden")
-        panel.message = String(localized: "Ordner für die exportierten Bilder wählen")
+        panel.message = String(localized: "Ordner für die Bilder wählen")
         guard panel.runModal() == .OK, let folder = panel.url else { return }
         vm.exportPdfToImages(to: folder)
     }

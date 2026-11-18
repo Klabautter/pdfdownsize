@@ -75,10 +75,17 @@ struct ImageExportSheet: View {
                     }
                     .pickerStyle(.radioGroup)
                 } footer: {
-                    Text(pages.isEmpty
-                         ? "Keine Seiten zum Exportieren."
-                         : "Es entstehen \(pages.count) \(settings.usePNG ? "PNG" : "JPEG")-Dateien.")
-                        .foregroundStyle(.secondary)
+                    // Zwei Text-Werte statt eines Ternärs (B7): So bleiben
+                    // beide Schlüssel lokalisiert, und die Zahl wählt die
+                    // Pluralform des Katalogs („1 PNG-Datei“).
+                    Group {
+                        if pages.isEmpty {
+                            Text("Keine Seiten zum Exportieren.")
+                        } else {
+                            Text("Es entstehen \(pages.count) \(settings.usePNG ? "PNG" : "JPEG")-Dateien.")
+                        }
+                    }
+                    .foregroundStyle(.secondary)
                 }
                 .disabled(isWriting || written != nil)
 

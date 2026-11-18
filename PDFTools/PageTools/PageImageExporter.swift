@@ -188,9 +188,17 @@ enum PageImageExporter {
 
     // MARK: - Encoding
 
+    /// Masterplan D6: Höchstens so viele Pixel je exportierter Seite. Eine
+    /// Posterseite bei 300 DPI ergab sonst Hunderte Megapixel (×4 Byte) –
+    /// mehr Speicher, als ein Mac für eine Seite hergeben sollte.
+    nonisolated static let maximumExportPixels = 100_000_000
+
     private nonisolated static func encode(_ image: NSImage,
                                            pixels: CGSize,
                                            options: Options) throws -> Data {
+        guard pixels.width * pixels.height <= CGFloat(maximumExportPixels) else {
+            throw MergeError.pageTooLarge(Int((pixels.width * pixels.height / 1_000_000).rounded()))
+        }
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
             pixelsWide: Int(max(1, pixels.width)),

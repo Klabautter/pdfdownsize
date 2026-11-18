@@ -70,6 +70,7 @@ enum QualityGateMetric: String, Equatable, Sendable {
     case edgeWeightedScore
     case textRegionScore
     case deltaE76
+    case peakDeltaE76
 }
 
 /// Grenzwerte einer Preset/Klasse-Zelle. `nil` heißt: Diese Metrik wird in
@@ -80,6 +81,20 @@ struct QualityGatePolicy: Equatable, Sendable {
     var edgeWeightedScore: Double
     var textRegionScore: Double?
     var maxDeltaE76: Double?
+
+    /// Spitzen-ΔE der Smart-Fotozelle: der Startwert 12 aus dem Masterplan.
+    /// Seiten-QA von MRC und die Render-Stichprobe leiten sich davon ab.
+    static let peakDeltaE76Floor = 12.0
+    /// Grenze für `peakDeltaE76` – je Stufe wie `maxDeltaE76` gestaffelt
+    /// (Masterplan A1): das Doppelte der Mittelwert-Grenze derselben Zelle.
+    /// Smart/Foto 12 (Startwert), Klein/Foto 16, Qualität/Foto 8.
+    ///
+    /// Mit 12 für alle Stufen lehnte Klein JPEG auf Kartenkacheln mit dünnen
+    /// farbigen Linien ab (USGS-Karte, Smoke-30: −15 Punkte Ersparnis), ohne
+    /// dass die Farbe verloren ging – Klein darf wie beim Mittelwert mehr.
+    var maxPeakDeltaE76: Double? {
+        maxDeltaE76.map { 2 * $0 }
+    }
 
     /// Die Grenzwerttabelle (Preset × Klasse).
     ///
@@ -249,6 +264,10 @@ struct QualityGateMeasurement: Equatable, Sendable {
     let textRegionScore: Double?
     /// nil = Graustufen-/Bilevel-Bild: ΔE wird nicht angewendet.
     let meanDeltaE76: Double?
+    /// Mittleres ΔE76 über das 1 % farbigste der Referenzpixel (Masterplan
+    /// A1). Der Mittelwert über das ganze Bild verdünnt einen lokalen
+    /// Farbverlust – eine grau gewordene Unterschrift – auf null.
+    var peakDeltaE76: Double? = nil
     /// Debug-Metrik (Luminanz, Stichprobe).
     let psnr: Double
     let tileSSIMs: [Double]
@@ -343,11 +362,14 @@ enum QualityGates {
         let luma: [Float]
         /// RGBA-Bytes (4 pro Pixel) für das ΔE-Farbfehlermaß.
         let rgba: [UInt8]
-        /// Mittlerer Chroma-Abstand (max−min je Pixel) – Schwellwert wie
-        /// `ImageClassifier` (isGrayscale < 1.5).
-        let chromaMean: Double
+        /// Farbzählung – dieselbe Grau/Farbe-Entscheidung wie
+        /// `ImageClassifier` (Masterplan A1). Für Referenzen wird sie auf dem
+        /// Original erhoben, nicht auf diesem Messraster: Auf 320 px ist eine
+        /// Unterschrift auf A4 kaum noch zu sehen.
+        let census: ChromaCensus
 
-        var isColor: Bool { chromaMean >= 1.5 }
+        var chromaMean: Double { census.meanChroma }
+        var isColor: Bool { !census.isNeutral }
     }
 
     /// Pixelgröße der Stichprobe (am 8er-Fenster ausgerichtet) – geteilt,
@@ -376,7 +398,8 @@ enum QualityGates {
     /// die DPI-Politik erlaubt, wird auf der Zielauflösung gemessen – feiner
     /// kann das Ergebnis per Definition nicht sein. Standard bleibt 320 px.
     static func sample(_ image: CGImage,
-                       maxEdge: Int = QualityMetrics.sampleEdge) -> Sample? {
+                       maxEdge: Int = QualityMetrics.sampleEdge,
+                       census: ChromaCensus? = nil) -> Sample? {
         let window = 8
         guard let size = sampleSize(width: image.width, height: image.height,
                                     maxEdge: maxEdge) else { return nil }
@@ -402,16 +425,14 @@ enum QualityGates {
         let rgba = Array(UnsafeBufferPointer(start: px, count: pixelCount * 4))
 
         var luma = [Float](repeating: 0, count: pixelCount)
-        var chromaSum = 0
         for i in 0..<pixelCount {
             let o = i * 4
             let r = Int(rgba[o]), g = Int(rgba[o + 1]), b = Int(rgba[o + 2])
             luma[i] = Float((299 * r + 587 * g + 114 * b) / 1000)
-            chromaSum += max(r, g, b) - min(r, g, b)
         }
 
         return Sample(width: w, height: h, luma: luma, rgba: rgba,
-                      chromaMean: Double(chromaSum) / Double(pixelCount))
+                      census: census ?? ChromaCensus.measure(rgba: rgba, width: w, height: h))
     }
 
     // MARK: SSIM-Kern
@@ -476,8 +497,8 @@ enum QualityGates {
         let reference: Sample
 
         init(reference: CGImage) {
-            self.reference = QualityGates.sample(reference) ?? Sample(
-                width: 0, height: 0, luma: [], rgba: [], chromaMean: 0)
+            self.reference = QualityGates.sample(reference, census: ChromaCensus.of(reference))
+                ?? Sample(width: 0, height: 0, luma: [], rgba: [], census: .neutral)
         }
 
         init(reference sample: Sample) {
@@ -543,6 +564,9 @@ enum QualityGates {
         let deltaE: Double? = reference.isColor
             ? meanDeltaE76(reference: reference, candidate: candidate)
             : nil
+        let peakDeltaE: Double? = reference.isColor
+            ? peakDeltaE76(reference: reference, candidate: candidate)
+            : nil
 
         return QualityGateMeasurement(
             globalSSIM: Double(global),
@@ -550,6 +574,7 @@ enum QualityGates {
             edgeWeightedScore: edge,
             textRegionScore: text,
             meanDeltaE76: deltaE,
+            peakDeltaE76: peakDeltaE,
             psnr: psnr(reference: reference.luma, candidate: candidate.luma),
             tileSSIMs: tileScoresAsDouble,
             tileGrid: tileGrid,
@@ -788,6 +813,51 @@ enum QualityGates {
         return sum / Double(count)
     }
 
+    /// Mittleres ΔE76 über das 1 % der Referenzpixel mit der höchsten Chroma
+    /// (Masterplan A1). Ein Histogramm über die Chroma (0…255) liefert die
+    /// Schwelle in einem Durchgang; gemessen wird jedes Pixel, nicht jedes
+    /// zweite wie beim Mittelwert – eine Unterschrift ist schmal.
+    ///
+    /// Gezählt werden dabei nur farbige Pixel (Chroma ≥ `peakMinimumChroma`):
+    /// Ist weniger als 1 % der Fläche farbig – eine Unterschrift auf einer
+    /// gerenderten A4-Seite –, füllten sonst fast graue Pixel das Prozent auf
+    /// und verdünnten den Farbverlust unter die Grenze (A3-Test).
+    static let peakMinimumChroma = ChromaCensus.strongChroma / 2
+
+    static func peakDeltaE76(reference: Sample, candidate: Sample) -> Double {
+        let rgbaA = reference.rgba
+        let rgbaB = candidate.rgba
+        let pixels = reference.width * reference.height
+        guard pixels > 0, rgbaA.count >= pixels * 4, rgbaB.count >= pixels * 4 else { return 0 }
+        var histogram = [Int](repeating: 0, count: 256)
+        for i in 0..<pixels {
+            let o = i * 4
+            let r = rgbaA[o], g = rgbaA[o + 1], b = rgbaA[o + 2]
+            histogram[Int(max(r, g, b) - min(r, g, b))] += 1
+        }
+        let wanted = max(1, pixels / 100)
+        var threshold = 255
+        var covered = 0
+        while threshold > peakMinimumChroma {
+            covered += histogram[threshold]
+            if covered >= wanted { break }
+            threshold -= 1
+        }
+        var sum = 0.0
+        var count = 0
+        for i in 0..<pixels {
+            let o = i * 4
+            let r = rgbaA[o], g = rgbaA[o + 1], b = rgbaA[o + 2]
+            guard Int(max(r, g, b) - min(r, g, b)) >= threshold else { continue }
+            let labA = lab(r: r, g: g, b: b)
+            let labB = lab(r: rgbaB[o], g: rgbaB[o + 1], b: rgbaB[o + 2])
+            let dl = labA.0 - labB.0, da = labA.1 - labB.1, db = labA.2 - labB.2
+            sum += sqrt(dl * dl + da * da + db * db)
+            count += 1
+        }
+        return count > 0 ? sum / Double(count) : 0
+    }
+
     /// sRGB-Byte-Tripel → CIELAB (D65, 2°).
     private static func lab(r: UInt8, g: UInt8, b: UInt8) -> (Double, Double, Double) {
         func linear(_ v: UInt8) -> Double {
@@ -848,6 +918,11 @@ enum QualityGates {
            measurement.isColor, let deltaE = measurement.meanDeltaE76,
            deltaE > limit {
             violated.append(.deltaE76)
+        }
+        if let limit = policy.maxPeakDeltaE76,
+           measurement.isColor, let peak = measurement.peakDeltaE76,
+           peak > limit {
+            violated.append(.peakDeltaE76)
         }
         return violated.isEmpty ? .pass : .fail(violated)
     }

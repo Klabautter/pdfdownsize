@@ -20,6 +20,9 @@ final class OCRViewModel: ObservableObject {
         case ready           // Quelle gesetzt, Sprache wählbar
         case working(cancelling: Bool)
         case done
+        /// Masterplan B1: Die Datei lässt sich nicht verarbeiten (gesperrt,
+        /// leer, kaputt). Fläche zeigt Grund und nächsten Schritt.
+        case rejected(DocumentProbe.Verdict)
     }
 
     // MARK: State
@@ -70,7 +73,8 @@ final class OCRViewModel: ObservableObject {
         didSet {
             guard searchQuery != oldValue else { return }
             selectedHit = 0
-            updateSearchHits()
+            // C6: Tippen startet die Suche erst nach 250 ms Pause.
+            updateSearchHits(delay: .milliseconds(250))
         }
     }
     /// Gewählter Treffer (Index in `searchHits`) – ‹ › in der Textspalte.
@@ -86,7 +90,7 @@ final class OCRViewModel: ObservableObject {
 
     /// Ein Seitenabschnitt der Textspalte: Überschrift, Fließtext (Absätze
     /// durch Leerzeilen getrennt) oder ein Hinweis, warum es keinen gibt.
-    struct TextSection: Equatable, Identifiable {
+    struct TextSection: Equatable, Identifiable, Sendable {
         let pageIndex: Int
         let body: String
         let note: String?
@@ -136,7 +140,7 @@ final class OCRViewModel: ObservableObject {
             .joined(separator: "\n\n")
     }
 
-    struct SearchHit: Identifiable, Hashable {
+    struct SearchHit: Identifiable, Hashable, Sendable {
         let id: Int
         let pageIndex: Int
         /// Fundstelle im `body` des Seitenabschnitts (UTF-16, für NSTextView).
@@ -153,9 +157,30 @@ final class OCRViewModel: ObservableObject {
     @Published private(set) var searchHits: [SearchHit] = []
     @Published private(set) var searchHitTotal = 0
 
-    private func updateSearchHits() {
+    private var searchTask: Task<Void, Never>?
+
+    /// Masterplan C6: Die Suche läuft abseits des Hauptthreads; ein neuer
+    /// Begriff bricht die laufende Suche ab. Über 1000 Seiten Text blockierte
+    /// sie vorher bei jedem Tastendruck die Oberfläche.
+    private func updateSearchHits(delay: Duration = .zero) {
+        searchTask?.cancel()
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { searchHits = []; searchHitTotal = 0; return }
+        let sections = textSections
+        searchTask = Task { [weak self] in
+            if delay > .zero { try? await Task.sleep(for: delay) }
+            guard !Task.isCancelled else { return }
+            let (hits, total) = await Task.detached(priority: .userInitiated) {
+                Self.searchHits(query: query, in: sections)
+            }.value
+            guard !Task.isCancelled, let self,
+                  self.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+            self.searchHits = hits
+            self.searchHitTotal = total
+        }
+    }
+
+    nonisolated static func searchHits(query: String, in textSections: [TextSection]) -> ([SearchHit], Int) {
         var hits: [SearchHit] = []
         var total = 0
         for section in textSections where !section.body.isEmpty {
@@ -173,11 +198,10 @@ final class OCRViewModel: ObservableObject {
                 searchRange = range.upperBound..<body.endIndex
             }
         }
-        searchHits = hits
-        searchHitTotal = total
+        return (hits, total)
     }
 
-    private static func snippet(_ text: String, around range: Range<String.Index>) -> String {
+    nonisolated private static func snippet(_ text: String, around range: Range<String.Index>) -> String {
         let start = text.index(range.lowerBound, offsetBy: -40, limitedBy: text.startIndex)
             ?? text.startIndex
         let end = text.index(range.upperBound, offsetBy: 60, limitedBy: text.endIndex)
@@ -267,7 +291,7 @@ final class OCRViewModel: ObservableObject {
             return toRecognize == 1
                 ? String(localized: "1 von \(survey.pageCount) Seiten wird erkannt, die übrigen haben schon Text.")
                 : String(localized: "\(toRecognize) von \(survey.pageCount) Seiten werden erkannt, die übrigen haben schon Text.")
-        case .choose:
+        case .choose, .rejected:
             return nil
         }
     }
@@ -289,11 +313,28 @@ final class OCRViewModel: ObservableObject {
         }
         if let first = pdfs.first {
             resetRunState()
-            pageCount = PDFDocument(url: first)?.pageCount ?? 0
+            surveyTask?.cancel()
+            survey = nil
+            pageCount = 0
             pdfURL = first
             errorMessage = nil
             stage = .ready
             hasSignature = false
+            // Vorprüfung (B1) – dieselbe wie in Komprimieren und im Stapel.
+            Task.detached(priority: .userInitiated) {
+                let verdict = DocumentProbe.inspect(first)
+                await MainActor.run {
+                    guard self.pdfURL == first, self.stage == .ready else { return }
+                    if case .ok(let pages) = verdict {
+                        self.pageCount = pages
+                    } else {
+                        self.surveyTask?.cancel()
+                        self.survey = nil
+                        self.errorMessage = nil
+                        self.stage = .rejected(verdict)
+                    }
+                }
+            }
             Task.detached(priority: .utility) {
                 let signed = Compressor.containsDigitalSignature(at: first)
                 await MainActor.run {
@@ -302,8 +343,20 @@ final class OCRViewModel: ObservableObject {
                 }
             }
             surveyTask = Task { @MainActor in
-                guard let result = try? await OCREngine.surveyExistingText(sourceURL: first),
-                      !Task.isCancelled, pdfURL == first, stage == .ready else { return }
+                // Kein `try?` mehr (B1): Ein Fehler hier ist eine Auskunft.
+                // Eine gesperrte oder kaputte Datei meldet die Vorprüfung
+                // selbst; alles andere steht als Hinweis im Pult.
+                let result: OCREngine.TextSurvey
+                do {
+                    result = try await OCREngine.surveyExistingText(sourceURL: first)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard !Task.isCancelled, pdfURL == first, stage == .ready else { return }
+                    errorMessage = error.localizedDescription
+                    return
+                }
+                guard !Task.isCancelled, pdfURL == first, stage == .ready else { return }
                 survey = result
                 if result.allHaveText {
                     // Der vorhandene Text steht sofort in der Spalte.
@@ -398,10 +451,12 @@ final class OCRViewModel: ObservableObject {
                 // Der Output beweist, was die Oberfläche verspricht: Seitenzahl,
                 // qpdf-Struktur, und gegen die Quelle Annotationen, Links,
                 // Formularfelder und Geometrie (Befund A3).
-                let report = PDFValidator.validate(
+                statusLabel = String(localized: "Wird geprüft …")
+                let report = await PDFValidator.validateOffMain(
                     outputURL: output.outputURL,
                     referenceURL: url,
                     policy: .ocr(expectedPageCount: total, sourceURL: url))
+                try Task.checkCancellation()
                 guard report.isValid else {
                     try? FileManager.default.removeItem(at: output.outputURL)
                     // Den tatsächlichen Grund nennen – vorher hieß es immer

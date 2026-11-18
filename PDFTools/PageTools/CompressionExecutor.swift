@@ -12,6 +12,9 @@ import CoreGraphics
 ///    Bridge verweigert sie zusätzlich selbst (Findings 14/15).
 ///  - Es gibt keinen Seiten-Thumbnail-Ersatz mehr.
 enum CompressionExecutor {
+    /// Masterplan C5: Höchstens so viele Originalbytes liegen beim
+    /// verlustfreien JPEG-Umpacken gleichzeitig im Speicher.
+    static let repackWindowBytes = 256 << 20
 
     struct Result {
         let outputURL: URL
@@ -23,6 +26,10 @@ enum CompressionExecutor {
         /// Verweise, die auf ein bereits vorhandenes, bitgleiches Bild
         /// umgehängt wurden.
         var mergedDuplicateImages: Int = 0
+        /// Masterplan D6: Strukturpässe, die mit einem Fehler endeten
+        /// („Pass: Fehler“). Der Pass gilt dann als nicht gelaufen; die
+        /// Validierung am Ende prüft das Ergebnis wie immer.
+        var failedPasses: [String] = []
         /// Phase 1b – behaltene DCT-Streams, die neu verpackt wurden
         /// (Koeffizienten bitidentisch, optimierte Huffman-/Scan-Verpackung).
         var repackedImages: Int = 0
@@ -350,40 +357,53 @@ enum CompressionExecutor {
             // rund eine Sekunde auf einem Kern. Das Ergebnis ist dasselbe:
             // Jeder Strom wird für sich umgepackt, die Reihenfolge der
             // Dokument-Eingriffe bleibt unverändert.
-            var pending: [(resource: PDFImageResource, original: Data)] = []
-            for resource in resources where resource.terminalFilter == .dct
-                                                && resource.unknownFilters.isEmpty
-                                                && resource.filters == [.dct] {
+            //
+            // Masterplan C5: in Fenstern von höchstens `repackWindowBytes`
+            // Originalbytes. Vorher lagen ALLE Originale gleichzeitig im
+            // Speicher (IPCC: 3,2 GB Spitze). Gelesen, umgepackt und
+            // angewendet wird weiter in Dokumentreihenfolge – die Ausgabe
+            // ist dieselbe.
+            let candidates = resources.filter { resource in
+                resource.terminalFilter == .dct && resource.unknownFilters.isEmpty
+                    && resource.filters == [.dct]
+                    && plan.action(for: resource.objectID)?.transformsImage != true
+                    // Der Repack hält alle Koeffizienten im Speicher; eine
+                    // absurde Quelle bliebe sonst nur für die Dekodierung gesperrt.
+                    && resource.pixelCount <= CompressionPlanner.maximumReducibleSourcePixels
+            }
+            var next = 0
+            while next < candidates.count {
+                var pending: [(resource: PDFImageResource, original: Data)] = []
+                var windowBytes = 0
+                while next < candidates.count, windowBytes < Self.repackWindowBytes {
+                    if let isCancelled, isCancelled() { throw CancellationError() }
+                    let resource = candidates[next]
+                    next += 1
+                    guard let original = document.imageStreamData(objectID: resource.objectID,
+                                                                  decoded: false) else { continue }
+                    pending.append((resource, original))
+                    windowBytes += original.count
+                }
+                let results: [Data?] = ParallelWork.map(count: pending.count) { index in
+                    if let isCancelled, isCancelled() { return nil }
+                    guard case .repacked(let data) = JPEGEncoder.repack(
+                        pending[index].original, progressive: repackProgressive) else { return nil }
+                    return data
+                }
                 if let isCancelled, isCancelled() { throw CancellationError() }
-                if plan.action(for: resource.objectID)?.transformsImage == true { continue }
-                // Der Repack hält alle Koeffizienten im Speicher; eine absurde
-                // Quelle bliebe sonst nur für die Dekodierung gesperrt.
-                guard resource.pixelCount
-                        <= CompressionPlanner.maximumReducibleSourcePixels else { continue }
-                guard let original = document.imageStreamData(objectID: resource.objectID,
-                                                              decoded: false) else { continue }
-                pending.append((resource, original))
-            }
-            let originals = pending.map(\.original)
-            let results: [Data?] = ParallelWork.map(count: originals.count) { index in
-                if let isCancelled, isCancelled() { return nil }
-                guard case .repacked(let data) = JPEGEncoder.repack(
-                    originals[index], progressive: repackProgressive) else { return nil }
-                return data
-            }
-            if let isCancelled, isCancelled() { throw CancellationError() }
-            for (entry, result) in zip(pending, results) {
-                guard let data = result else { continue }
-                // Ein Verweigern der Bridge ist hier kein Planfehler, sondern
-                // Teil der Sicherheitsleiter: Dann bleiben die Originalbytes.
-                do {
-                    try document.replaceImageStreamBytes(objectID: entry.resource.objectID,
-                                                         data: data)
-                    repacked += 1
-                    // Gemessenes Stream-Delta – nie negativ (Never-Grow).
-                    savedRepack += max(0, entry.original.count - data.count)
-                } catch PDFCoreError.checkFailed, PDFCoreError.internalError {
-                    continue
+                for (entry, result) in zip(pending, results) {
+                    guard let data = result else { continue }
+                    // Ein Verweigern der Bridge ist hier kein Planfehler, sondern
+                    // Teil der Sicherheitsleiter: Dann bleiben die Originalbytes.
+                    do {
+                        try document.replaceImageStreamBytes(objectID: entry.resource.objectID,
+                                                             data: data)
+                        repacked += 1
+                        // Gemessenes Stream-Delta – nie negativ (Never-Grow).
+                        savedRepack += max(0, entry.original.count - data.count)
+                    } catch PDFCoreError.checkFailed, PDFCoreError.internalError {
+                        continue
+                    }
                 }
             }
         }
@@ -413,9 +433,18 @@ enum CompressionExecutor {
         //
         // Über den Korpus gemessen liegen so 30 MB doppelt im Bestand, also
         // 8 % aller Bilddaten – wiederholte Logos, Hintergründe, Diagramme.
+        // D6: Ein Fehler eines Strukturpasses wird festgehalten, nicht
+        // verschluckt – der Pass zählt als nicht gelaufen.
+        var failedPasses: [String] = []
+        func pass<T>(_ name: String, fallback: T, _ body: () throws -> T) -> T {
+            do { return try body() } catch {
+                failedPasses.append("\(name): \(error.localizedDescription)")
+                return fallback
+            }
+        }
         let mergedImages = StageTimer.run(stageTimer, .dedupMs) {
             plan.dedupPolicy == .off
-                ? 0 : ((try? document.deduplicateImages()) ?? 0)
+                ? 0 : pass("dedup-images", fallback: 0) { try document.deduplicateImages() }
         }
 
         // Phase 3b – Content-Hash-Dedup über ALLE indirekten Objekte:
@@ -431,8 +460,10 @@ enum CompressionExecutor {
         var dedupBytes = 0
         if plan.dedupPolicy != .off {
             let stats = StageTimer.run(stageTimer, .dedupMs) {
-                (try? document.deduplicate()) ?? PDFCoreDedupStats(
-                    mergedStreams: 0, mergedObjects: 0, estimatedBytesSaved: 0)
+                pass("dedup", fallback: PDFCoreDedupStats(
+                    mergedStreams: 0, mergedObjects: 0, estimatedBytesSaved: 0)) {
+                    try document.deduplicate()
+                }
             }
             dedupStreams = stats.mergedStreams
             dedupObjects = stats.mergedObjects
@@ -466,10 +497,10 @@ enum CompressionExecutor {
             unusedFontsRemoved: 0, estimatedBytesSaved: 0)
         if plan.fontPolicy != .off {
             fontStats = StageTimer.run(stageTimer, .fontMs) {
-                (try? document.auditFonts()) ?? PDFCoreFontAuditStats(
+                pass("fonts", fallback: PDFCoreFontAuditStats(
                     fontObjects: 0, fontFileStreams: 0,
                     duplicateFontRefsRemoved: 0, unusedFontsRemoved: 0,
-                    estimatedBytesSaved: 0)
+                    estimatedBytesSaved: 0)) { try document.auditFonts() }
             }
         }
 
@@ -502,8 +533,9 @@ enum CompressionExecutor {
         var gcStats = PDFCoreResourceGCStats()
         if plan.traceVersion >= 2 && plan.resourceGCPolicy == .auto {
             gcStats = StageTimer.run(stageTimer, .resourceGCMs) {
-                (try? activeDocument.removeUnusedResources())
-                    ?? PDFCoreResourceGCStats()
+                pass("resource-gc", fallback: PDFCoreResourceGCStats()) {
+                    try activeDocument.removeUnusedResources()
+                }
             }
         }
 
@@ -514,7 +546,7 @@ enum CompressionExecutor {
         var removedThumbs = 0
         if plan.traceVersion >= 2 {
             removedThumbs = StageTimer.run(stageTimer, .resourceGCMs) {
-                (try? activeDocument.removePageThumbs()) ?? 0
+                pass("thumbs", fallback: 0) { try activeDocument.removePageThumbs() }
             }
         }
 
@@ -525,7 +557,9 @@ enum CompressionExecutor {
         var minifiedSaved = 0
         if plan.traceVersion >= 2 {
             let stats = StageTimer.run(stageTimer, .resourceGCMs) {
-                (try? activeDocument.minifyContentStreams()) ?? (streams: 0, savedBytes: 0)
+                pass("minify", fallback: (streams: 0, savedBytes: 0)) {
+                    try activeDocument.minifyContentStreams()
+                }
             }
             minifiedStreams = stats.streams
             minifiedSaved = stats.savedBytes
@@ -581,6 +615,7 @@ enum CompressionExecutor {
                       skippedImages: plan.keptActions.count,
                       rejectedByBridge: rejected,
                       mergedDuplicateImages: mergedImages,
+                      failedPasses: failedPasses,
                       repackedImages: repacked,
                       zopfliRepackedStreams: zopfliRepacked,
                       zopfliEstimatedBytesSaved: zopfliSaved,

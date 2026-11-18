@@ -21,6 +21,9 @@ struct PixelSize: Hashable, Codable, Sendable {
 enum KeepReason: Hashable, Codable, Sendable {
     /// Auflösung und Kantenlänge liegen im Rahmen.
     case withinBudget
+    /// Masterplan C3: Eine Stichprobe gleichartiger Bilder zeigte, dass die
+    /// ganze Gruppe weniger als 3 % des Dokuments einsparen würde.
+    case sampledNoGain(sampled: Int, groupSize: Int)
     /// Zu klein, als dass eine Transformation etwas brächte.
     case tooSmall
     /// Zu viele Pixel, um sie sicher zu dekodieren.
@@ -59,6 +62,8 @@ enum KeepReason: Hashable, Codable, Sendable {
     var explanation: String {
         switch self {
         case .withinBudget: return "innerhalb der Zielauflösung"
+        case .sampledNoGain(let sampled, let groupSize):
+            return "Stichprobe \(sampled) von \(groupSize) gleichartigen Bildern: unter 3 % Ersparnis"
         case .tooSmall: return "zu klein"
         case .pixelBudgetExceeded(let pixels):
             return "über dem Pixelbudget (\(pixels) Pixel)"

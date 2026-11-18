@@ -343,8 +343,12 @@ enum CandidateGenerator {
     /// JPX-Hintergrund mit JBIG2-Maske, also schon MRC. Verlustfreie
     /// Quellen gewinnen die Leiter fast immer; dort wäre die Sonde nur
     /// Mehrarbeit.
+    ///
+    /// Masterplan C3: auch für Flate-Quellen. Eine kompakt gepackte Grafik,
+    /// deren kleinste JPEG-Stufe schon größer ist, braucht keine Leiter.
     static func probeApplies(to resource: PDFImageResource) -> Bool {
         resource.terminalFilter == .dct || resource.terminalFilter == .jpx
+            || resource.terminalFilter == .flate
     }
 
     /// Toleranz der Sonde gegen die seltene Nicht-Monotonie des Encoders
@@ -423,6 +427,25 @@ enum CandidateGenerator {
     /// bei 1,9–2,9 bit, zwölf Folienfotos bei 5,1–5,7 bit (2026-11-03).
     static let maximumPaperEntropy = 4.0
 
+    /// Masterplan C3: Höchstdauer der JPEG-Leiter je Bild ohne bestandenen
+    /// Kandidaten.
+    static let ladderTimeBudget: Duration = .seconds(20)
+
+    /// Masterplan C3: KEEP ohne Dekodierung – für Bilder, deren Gruppe die
+    /// Stichprobe schon als „lohnt nicht“ ausgewiesen hat.
+    static func keepOnly(resource: PDFImageResource,
+                         options: ImageCompressionOptions,
+                         pixels: ImagePixelSource,
+                         store: CandidateStore,
+                         reason: KeepReason) -> Generated {
+        var session = Session(resource: resource, options: options,
+                              pixels: pixels, store: store,
+                              pageContext: [:], stageTimer: nil,
+                              allowsQuantizedPalette: false)
+        session.finishStructural(reason)
+        return session.finalize()
+    }
+
     static func generate(resource: PDFImageResource,
                          options: ImageCompressionOptions,
                          classifierPolicy: ClassifierPolicy,
@@ -431,12 +454,15 @@ enum CandidateGenerator {
                          mrc: [PreparedMRCCandidate] = [],
                          pageContext: [Int: PageAnalysis] = [:],
                          stageTimer: StageTimer? = nil,
-                         allowsQuantizedPalette: Bool = false) -> Generated {
+                         allowsQuantizedPalette: Bool = false,
+                         isCancelled: (() -> Bool)? = nil) -> Generated {
         var session = Session(resource: resource, options: options,
                               pixels: pixels, store: store,
                               pageContext: pageContext,
                               stageTimer: stageTimer,
                               allowsQuantizedPalette: allowsQuantizedPalette)
+        // Masterplan C4: Abbruch je Leiterstufe statt erst nach dem Bild.
+        session.isCancelled = isCancelled
         session.run(classifierPolicy: classifierPolicy)
         // V2-7 (§13) – QA-geprüfte MRC-Seitenbündel der Seite: Sie
         // konkurrieren im Set des DOMINANTEN RASTERBILDES mit dessen
@@ -516,6 +542,12 @@ enum CandidateGenerator {
         /// ein (V2-11: die Phasenuhr des entfernten Legacy-`decide` ist
         /// durch diesen Messpunkt ersetzt).
         let stageTimer: StageTimer?
+        /// Masterplan C4: vor jeder Leiterstufe geprüft. Ein abgebrochenes
+        /// Set ist unvollständig – der Planner verwirft es und wirft.
+        var isCancelled: (() -> Bool)?
+        var cancelled: Bool { isCancelled?() ?? false }
+        /// Masterplan C3: Beginn der Arbeit an diesem Bild (Zeitbudget).
+        let startedAt = ContinuousClock.now
         let objectID: PDFObjectID
         let originalBytes: Int
         let pages: [Int]
@@ -792,6 +824,7 @@ enum CandidateGenerator {
         // Legacy-`decide`; seit V2-11 DER Entscheidungsfluss)
 
         mutating func run(classifierPolicy: ClassifierPolicy) {
+            if cancelled { return }
             // 0. Bilevel-Vorprüfung (Dictionary-Ebene, vor jeder Dekodierung)
             //    – Bilevel wird nur von Klein und bei sehr hoher Auflösung auch
             //    von Smart verkleinert (`addResampledBilevel`), sonst nie.
@@ -1570,11 +1603,22 @@ enum CandidateGenerator {
             var pending = Set(order)
             var smallestPassingPixels: Int?
             for rungIndex in order {
+                if cancelled { break }
                 let rung = ladder[rungIndex]
                 pending.remove(rungIndex)
                 if !hasSearchBudget {
                     for skipped in pending.sorted() {
                         traceJPEG(target: ladder[skipped], result: nil, disposition: "budget-skipped")
+                    }
+                    break
+                }
+                // Masterplan C3: Zeitbudget je Bild. Nach 20 s ohne einen
+                // bestandenen Kandidaten endet die Leiter mit dem bisherigen
+                // Stand (oder KEEP) – vorher rechnete ein schon optimaler
+                // Buchscan eine volle Minute für ein Prozent.
+                if !sawPassingRung, ContinuousClock.now - startedAt > CandidateGenerator.ladderTimeBudget {
+                    for skipped in [rungIndex] + pending.sorted() {
+                        traceJPEG(target: ladder[skipped], result: nil, disposition: "time-budget-skipped")
                     }
                     break
                 }
@@ -1693,9 +1737,17 @@ enum CandidateGenerator {
         private func probe(rung: PixelSize, target: PixelSize, targetImage: CGImage,
                            grayscale: Bool, jpegOptions: ImageCompressionOptions)
             -> JPEGSearchRung? {
-            guard originalBytes > 0, CandidateGenerator.probeApplies(to: resource),
-                  case .adaptive(let ladderQ, _) = jpegOptions.qualityPolicy,
-                  let quality = ladderQ.min() else { return nil }
+            // C3: auch bei fester Qualität (Eigene) – dann ist sie die einzige
+            // Stufe und damit selbst die Untergrenze.
+            let quality: Double
+            switch jpegOptions.qualityPolicy {
+            case .adaptive(let ladderQ, _):
+                guard let lowest = ladderQ.min() else { return nil }
+                quality = lowest
+            case .fixed(let fixed):
+                quality = fixed
+            }
+            guard originalBytes > 0, CandidateGenerator.probeApplies(to: resource) else { return nil }
             let start = ContinuousClock.now
             let decoded = rung == target ? targetImage : decodedRaster(for: rung)
             guard let decoded else { return nil }
@@ -2322,7 +2374,9 @@ extension CandidateGenerator {
                                                  height: base.height, maxEdge: edge),
               let reduced = ImageResampler.resize(base, to: size, components: 3)
         else { return nil }
-        return QualityGates.sample(reduced, maxEdge: edge)
+        // Grau/Farbe zählt auf dem Original (bis 1024 px), nicht auf dem
+        // Messraster – dort verschwindet eine Unterschrift (Masterplan A1).
+        return QualityGates.sample(reduced, maxEdge: edge, census: ChromaCensus.of(original))
     }
 }
 

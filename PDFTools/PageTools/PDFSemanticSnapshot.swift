@@ -176,14 +176,14 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
             guard let doc = PDFDocument(url: url), !doc.isLocked else {
                 throw CocoaError(.fileReadCorruptFile)
             }
-            return capture(doc)
+            return capture(doc, pages: parallelPages(url: url, pageCount: doc.pageCount))
         case .libQPDF:
             return try captureViaLibQPDF(url)
         case .merged:
             guard let doc = PDFDocument(url: url), !doc.isLocked else {
                 throw CocoaError(.fileReadCorruptFile)
             }
-            var snapshot = capture(doc)
+            var snapshot = capture(doc, pages: parallelPages(url: url, pageCount: doc.pageCount))
             snapshot.backend = .merged
             // Dokumentstrukturen kommen von libqpdf: PDFKit meldet Named
             // Destinations, Page Labels, Attachments und Feldwerte nicht
@@ -217,13 +217,54 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
     /// erzeugen `page.string` und `page.annotations` je Seite autoreleased
     /// Objekte. Der Rückgabewert besteht nur aus Structs und Strings und
     /// übersteht das Leeren des Pools.
-    static func capture(_ doc: PDFDocument) -> PDFSemanticSnapshot {
-        autoreleasepool {
+    /// Seitenteil einer Erfassung: je Seite Snapshot, Formularfelder, Links.
+    struct PagePart: Sendable {
         var pages: [PageSnapshot] = []
         var fields: [FormSnapshot.Field] = []
         var externalURLs: [String] = []
+    }
 
-        for i in 0..<doc.pageCount {
+    /// Masterplan C2: Ab `parallelPageThreshold` Seiten wird der Seitenteil
+    /// (Text aller Seiten – der teuerste Schritt) auf bis zu 6 eigene
+    /// PDFDocument-Instanzen verteilt. Eine Instanz ist nicht parallel
+    /// benutzbar, getrennte Instanzen schon. nil = seriell im Aufrufer.
+    static let parallelPageThreshold = 100
+    static func parallelPages(url: URL, pageCount: Int) -> PagePart? {
+        guard pageCount >= parallelPageThreshold else { return nil }
+        let workers = min(6, max(1, pageCount / 50))
+        let chunk = (pageCount + workers - 1) / workers
+        let parts: [PagePart?] = ParallelWork.map(count: workers, limit: workers) { w in
+            let range = (w * chunk)..<min(pageCount, (w + 1) * chunk)
+            guard let doc = PDFDocument(url: url), !doc.isLocked else { return nil }
+            var part = PagePart()
+            for i in range { collectPage(doc, index: i, into: &part) }
+            return part
+        }
+        var merged = PagePart()
+        for part in parts {
+            guard let part else { return nil }   // eine Instanz scheiterte: seriell
+            merged.pages += part.pages
+            merged.fields += part.fields
+            merged.externalURLs += part.externalURLs
+        }
+        return merged
+    }
+
+    static func capture(_ doc: PDFDocument, pages precomputed: PagePart? = nil) -> PDFSemanticSnapshot {
+        autoreleasepool {
+        var part = precomputed ?? PagePart()
+        if precomputed == nil {
+            for i in 0..<doc.pageCount { collectPage(doc, index: i, into: &part) }
+        }
+        let pages = part.pages
+        let fields = part.fields
+        let externalURLs = part.externalURLs
+        return finish(doc, pages: pages, fields: fields, externalURLs: externalURLs)
+        }
+    }
+
+    /// Eine Seite erfassen (Text, Annotationen, Boxen).
+    private static func collectPage(_ doc: PDFDocument, index i: Int, into part: inout PagePart) {
             // Seitenzugriffe von PDFKit sind autoreleased; bei einem
             // 300-Seiten-Dokument summiert sich das ohne Pool spürbar.
             autoreleasepool {
@@ -234,18 +275,18 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
 
             for a in annos where a.type == "Widget" {
                 guard let name = a.fieldName else { continue }
-                fields.append(FormSnapshot.Field(
+                part.fields.append(FormSnapshot.Field(
                     name: name,
                     type: a.widgetFieldType.rawValue,
                     value: Self.widgetValue(a),
                     flags: 0))
             }
             for a in annos where a.type == "Link" {
-                if let url = a.url?.absoluteString { externalURLs.append(url) }
+                if let url = a.url?.absoluteString { part.externalURLs.append(url) }
             }
 
             let text = page.string ?? ""
-            pages.append(PageSnapshot(
+            part.pages.append(PageSnapshot(
                 index: i,
                 mediaBox: [media.minX, media.minY, media.maxX, media.maxY],
                 cropBox: [crop.minX, crop.minY, crop.maxX, crop.maxY],
@@ -258,8 +299,12 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
                 linkCount: annos.filter { $0.type == "Link" }.count,
                 widgetCount: annos.filter { $0.type == "Widget" }.count))
             }
-        }
+    }
 
+    /// Dokumentteil einer Erfassung (Gliederung, Attribute) plus Seitenteil.
+    private static func finish(_ doc: PDFDocument, pages: [PageSnapshot],
+                               fields: [FormSnapshot.Field],
+                               externalURLs: [String]) -> PDFSemanticSnapshot {
         var outline: [NavigationSnapshot.OutlineEntry] = []
         flatten(doc.outlineRoot, depth: 0, into: &outline)
 
@@ -288,7 +333,6 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
             form: FormSnapshot(fields: fields.sorted { $0.name < $1.name },
                                signatures: []),
             attachments: [])
-        }
     }
 
     /// libqpdf-Sicht: exakte Dokumentstruktur inklusive vererbter Attribute.

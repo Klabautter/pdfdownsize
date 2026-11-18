@@ -67,5 +67,8 @@ enum ParallelWork {
         static func release(_ count: Int) {
             lock.lock(); inUse = max(0, inUse - count); lock.unlock()
         }
+
+        /// Belegte Plätze (Masterplan C4: nach einem Abbruch muss das 0 sein).
+        static var current: Int { lock.withLock { inUse } }
     }
 }

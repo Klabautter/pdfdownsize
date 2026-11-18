@@ -238,6 +238,13 @@ int pdfcore_minify_content_streams(pdfcore_document_t *doc,
 /// Öffnet ein Dokument. Gibt NULL bei Fehler zurück; `status` (optional) erhält den Code.
 pdfcore_document_t *pdfcore_open(const char *path, pdfcore_status *status);
 
+/// Masterplan B2: Öffnen mit Passwort (Benutzer- oder Besitzerpasswort).
+/// Falsches Passwort → PDFCORE_ERR_PASSWORD. Beim Schreiben bleibt die
+/// Verschlüsselung samt Passwörtern erhalten (qpdf-Standard).
+/// Das Passwort wird nicht gespeichert und nicht protokolliert.
+pdfcore_document_t *pdfcore_open_with_password(const char *path, const char *password,
+                                               pdfcore_status *status);
+
 /// Anzahl Seiten, -1 bei ungültigem Handle.
 int pdfcore_page_count(pdfcore_document_t *doc);
 
@@ -253,6 +260,15 @@ int pdfcore_version(char *buffer, size_t buffer_size);
 const char *pdfcore_source_hash(void);
 
 void pdfcore_close(pdfcore_document_t *doc);
+
+/// Masterplan B2: Entschlüsselte Kopie von `path` nach `out_path` schreiben.
+/// PDFCORE_ERR_PASSWORD bei fehlendem/falschem Passwort.
+int pdfcore_decrypt_to(const char *path, const char *password, const char *out_path);
+
+/// Masterplan B2: `plain_path` mit denselben Verschlüsselungsparametern wie
+/// `original_path` (geöffnet mit `password`) nach `out_path` schreiben.
+int pdfcore_reencrypt_like(const char *plain_path, const char *original_path,
+                           const char *password, const char *out_path);
 
 /// Schreibt das (ggf. sanitisierte) Dokument neu. 0=ok.
 int pdfcore_save(pdfcore_document_t *doc, const char *path);

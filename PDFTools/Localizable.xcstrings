@@ -273,6 +273,46 @@
         }
       }
     },
+    "%lld Dateien digital signiert – die Signatur wird dabei ungültig.": {
+      "localizations": {
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Datei ist digital signiert – die Signatur wird dabei ungültig."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Dateien digital signiert – die Signatur wird dabei ungültig."
+                }
+              }
+            }
+          }
+        },
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld file is digitally signed – the signature becomes invalid."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld files are digitally signed – the signature becomes invalid."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "%lld Dokumente · %@ · %@": {
       "localizations": {
         "de": {
@@ -292,15 +332,39 @@
     "%lld PDFs": {
       "localizations": {
         "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld PDFs"
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld PDF"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld PDFs"
+                }
+              }
+            }
           }
         },
         "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld PDFs"
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld PDF"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld PDFs"
+                }
+              }
+            }
           }
         }
       }
@@ -633,6 +697,22 @@
         }
       }
     },
+    "%lld übersprungen": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld übersprungen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld skipped"
+          }
+        }
+      }
+    },
     "(%lld von %lld)": {
       "localizations": {
         "de": {
@@ -841,18 +921,162 @@
         }
       }
     },
-    "Alle %lld Seiten komprimiert · %@": {
+    "Alle %lld Seiten erkannt.": {
       "localizations": {
         "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Alle %lld Seiten komprimiert · %@"
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Die Seite wurde erkannt."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Alle %lld Seiten erkannt."
+                }
+              }
+            }
           }
         },
         "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "All %lld pages compressed · %@"
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "The page was recognized."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "All %lld pages recognized."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "Alle %lld Seiten haben schon Text.": {
+      "localizations": {
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Die Seite hat schon Text."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Alle %lld Seiten haben schon Text."
+                }
+              }
+            }
+          }
+        },
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "The page already has text."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "All %lld pages already have text."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "Alle %lld Seiten hatten schon Text – nichts musste erkannt werden.": {
+      "localizations": {
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Die Seite hatte schon Text – nichts musste erkannt werden."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Alle %lld Seiten hatten schon Text – nichts musste erkannt werden."
+                }
+              }
+            }
+          }
+        },
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "The page already had text – nothing needed recognizing."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "All %lld pages already had text – nothing needed recognizing."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "Alle %lld Seiten komprimiert · %@": {
+      "localizations": {
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Seite komprimiert · %@"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Alle %lld Seiten komprimiert · %@"
+                }
+              }
+            }
+          }
+        },
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Page compressed · %@"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "All %lld pages compressed · %@"
+                }
+              }
+            }
           }
         }
       }
@@ -860,15 +1084,39 @@
     "Alle %lld Seiten werden komprimiert": {
       "localizations": {
         "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Alle %lld Seiten werden komprimiert"
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Die Seite wird komprimiert"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Alle %lld Seiten werden komprimiert"
+                }
+              }
+            }
           }
         },
         "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "All %lld pages are being compressed"
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Compressing the page"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Compressing all %lld pages"
+                }
+              }
+            }
           }
         }
       }
@@ -885,6 +1133,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Set every parameter yourself – the engine still protects the document"
+          }
+        }
+      }
+    },
+    "Alle Quellen aus Organisieren entfernen": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alle Quellen aus Organisieren entfernen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove all sources from Organize"
           }
         }
       }
@@ -1029,6 +1293,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Open Other Files…"
+          }
+        }
+      }
+    },
+    "Andere PDF wählen …": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Andere PDF wählen …"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose Another PDF…"
           }
         }
       }
@@ -1241,6 +1521,22 @@
         }
       }
     },
+    "Beenden": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beenden"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quit"
+          }
+        }
+      }
+    },
     "Bei Kompatibilität „Maximal“ wird immer der System-Kodierer verwendet (Baseline-JPEG).": {
       "localizations": {
         "de": {
@@ -1401,6 +1697,38 @@
         }
       }
     },
+    "Bilder erneut sichern …": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bilder erneut sichern …"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save Images Again…"
+          }
+        }
+      }
+    },
+    "Bilder sichern …": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bilder sichern …"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save Images…"
+          }
+        }
+      }
+    },
     "Bilder werden optimiert …": {
       "localizations": {
         "de": {
@@ -1413,6 +1741,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Optimizing images…"
+          }
+        }
+      }
+    },
+    "Bilder → PDF": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bilder → PDF"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Images → PDF"
           }
         }
       }
@@ -1445,6 +1789,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Screen"
+          }
+        }
+      }
+    },
+    "Bitte eine Zahl in MB eingeben, zum Beispiel 5 oder 2,5.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bitte eine Zahl in MB eingeben, zum Beispiel 5 oder 2,5."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Please enter a number in MB, for example 5 or 2.5."
           }
         }
       }
@@ -1625,6 +1985,22 @@
         }
       }
     },
+    "Das Passwort stimmt nicht.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das Passwort stimmt nicht."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The password is incorrect."
+          }
+        }
+      }
+    },
     "Datei": {
       "localizations": {
         "de": {
@@ -1753,6 +2129,38 @@
         }
       }
     },
+    "Die Datei ist keine lesbare PDF (beschädigt oder unvollständig).": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Datei ist keine lesbare PDF (beschädigt oder unvollständig)."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The file is not a readable PDF (damaged or incomplete)."
+          }
+        }
+      }
+    },
+    "Die Datei ist nicht mehr da.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Datei ist nicht mehr da."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The file is no longer there."
+          }
+        }
+      }
+    },
     "Die Kompressionskomponente fehlt oder ist beschädigt. Bitte installiere PDFdownsize erneut.": {
       "extractionState": "stale",
       "localizations": {
@@ -1766,6 +2174,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "The compression component is missing or damaged. Please reinstall PDFdownsize."
+          }
+        }
+      }
+    },
+    "Die PDF hat Strukturfehler, die eine sichere Verarbeitung verhindern.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die PDF hat Strukturfehler, die eine sichere Verarbeitung verhindern."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The PDF has structural errors that prevent safe processing."
           }
         }
       }
@@ -1862,6 +2286,70 @@
           "stringUnit": {
             "state": "translated",
             "value": "This file is not a PDF."
+          }
+        }
+      }
+    },
+    "Diese Datei ist keine lesbare PDF.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Datei ist keine lesbare PDF."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This file is not a readable PDF."
+          }
+        }
+      }
+    },
+    "Diese PDF ist leer.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese PDF ist leer."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This PDF is empty."
+          }
+        }
+      }
+    },
+    "Diese PDF ist passwortgeschützt und lässt sich so nicht verarbeiten.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese PDF ist passwortgeschützt und lässt sich so nicht verarbeiten."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This PDF is password-protected and can’t be processed as is."
+          }
+        }
+      }
+    },
+    "Diese PDF ist passwortgeschützt.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese PDF ist passwortgeschützt."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This PDF is password-protected."
           }
         }
       }
@@ -2074,18 +2562,82 @@
         }
       }
     },
-    "Eine PDF oder gleich mehrere – alles bleibt auf dem Mac.": {
+    "Ein Lauf ist noch nicht fertig, und ein Ergebnis ist nicht gesichert. Beides geht verloren.": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Eine PDF oder gleich mehrere – alles bleibt auf dem Mac."
+            "value": "Ein Lauf ist noch nicht fertig, und ein Ergebnis ist nicht gesichert. Beides geht verloren."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "One PDF or several at once – everything stays on your Mac."
+            "value": "A job is still running and a result hasn’t been saved. Both will be lost."
+          }
+        }
+      }
+    },
+    "Ein Lauf ist noch nicht fertig. Das Original bleibt unverändert.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ein Lauf ist noch nicht fertig. Das Original bleibt unverändert."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A job is still running. The original stays unchanged."
+          }
+        }
+      }
+    },
+    "Eine PDF oder gleich mehrere.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eine PDF oder gleich mehrere."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "One PDF or several at once."
+          }
+        }
+      }
+    },
+    "Eine Seite ergäbe bei dieser Auflösung %lld Megapixel. Bitte eine kleinere Auflösung wählen.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eine Seite ergäbe bei dieser Auflösung %lld Megapixel. Bitte eine kleinere Auflösung wählen."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A page would have %lld megapixels at this resolution. Please choose a lower resolution."
+          }
+        }
+      }
+    },
+    "Einstellungen für „Eigene“": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einstellungen für „Eigene“"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Settings for “Custom”"
           }
         }
       }
@@ -2118,6 +2670,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Recommended: hard to tell from the original on screen, much smaller."
+          }
+        }
+      }
+    },
+    "Entsperren": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entsperren"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock"
           }
         }
       }
@@ -2221,15 +2789,39 @@
     "Es entstehen %lld %@-Dateien.": {
       "localizations": {
         "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Es entstehen %lld %@-Dateien."
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Es entsteht %lld %@-Datei."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Es entstehen %lld %@-Dateien."
+                }
+              }
+            }
           }
         },
         "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "This creates %lld %@ files."
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Creates %lld %@ file."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Creates %lld %@ files."
+                }
+              }
+            }
           }
         }
       }
@@ -2978,6 +3570,54 @@
         }
       }
     },
+    "Laufende Verarbeitung abbrechen und beenden?": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Laufende Verarbeitung abbrechen und beenden?"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel the running job and quit?"
+          }
+        }
+      }
+    },
+    "Leer": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leer"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Empty"
+          }
+        }
+      }
+    },
+    "Leeren": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leeren"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Clear"
+          }
+        }
+      }
+    },
     "Legt eine unsichtbare Textebene über gescannte Seiten – danach lässt sich der Text suchen, markieren und kopieren. Aussehen, Links, Formulare und Lesezeichen bleiben erhalten; Seiten mit vorhandenem Text werden übersprungen.": {
       "localizations": {
         "de": {
@@ -3006,6 +3646,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Linearizes the PDF so the first page appears instantly in the browser."
+          }
+        }
+      }
+    },
+    "Lizenz auswählen": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lizenz auswählen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a License"
+          }
+        }
+      }
+    },
+    "Lizenzen": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lizenzen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Licenses"
           }
         }
       }
@@ -3102,6 +3774,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Try another mode"
+          }
+        }
+      }
+    },
+    "Mit dem Passwort lässt sie sich verarbeiten. Das Ergebnis bleibt mit demselben Passwort geschützt.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mit dem Passwort lässt sie sich verarbeiten. Das Ergebnis bleibt mit demselben Passwort geschützt."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "With the password it can be processed. The result stays protected with the same password."
           }
         }
       }
@@ -3218,6 +3906,54 @@
         }
       }
     },
+    "Neu in dieser Version": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neu in dieser Version"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "What’s New in This Version"
+          }
+        }
+      }
+    },
+    "Nicht gefunden": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht gefunden"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not found"
+          }
+        }
+      }
+    },
+    "Nicht gesichertes Ergebnis verwerfen und beenden?": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht gesichertes Ergebnis verwerfen und beenden?"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Discard the unsaved result and quit?"
+          }
+        }
+      }
+    },
     "Nicht gesichertes Ergebnis verwerfen?": {
       "localizations": {
         "de": {
@@ -3230,6 +3966,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Discard unsaved result?"
+          }
+        }
+      }
+    },
+    "Nicht lesbar": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht lesbar"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not readable"
           }
         }
       }
@@ -3426,6 +4178,22 @@
         }
       }
     },
+    "Ohne das Passwort lässt sie sich nicht verarbeiten. Das Original bleibt unverändert.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ohne das Passwort lässt sie sich nicht verarbeiten. Das Original bleibt unverändert."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "It can’t be processed without the password. The original stays unchanged."
+          }
+        }
+      }
+    },
     "Optionen": {
       "localizations": {
         "de": {
@@ -3438,6 +4206,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Options"
+          }
+        }
+      }
+    },
+    "Ordner für die Bilder wählen": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ordner für die Bilder wählen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a folder for the images"
           }
         }
       }
@@ -3746,6 +4530,22 @@
         }
       }
     },
+    "PDF → Bilder": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PDF → Bilder"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PDF → Images"
+          }
+        }
+      }
+    },
     "PDF-Seiten als Bilder oder Bilder als PDF – die Richtung erkennt die App beim Ablegen.": {
       "localizations": {
         "de": {
@@ -3774,6 +4574,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "PDFdownsize"
+          }
+        }
+      }
+    },
+    "PDFdownsize-Hilfe": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PDFdownsize-Hilfe"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PDFdownsize Help"
           }
         }
       }
@@ -3934,6 +4750,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "PNG (lossless)"
+          }
+        }
+      }
+    },
+    "Passwort": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Passwort"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Password"
+          }
+        }
+      }
+    },
+    "Passwortgeschützt": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Passwortgeschützt"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Password-protected"
           }
         }
       }
@@ -4506,6 +5354,54 @@
         }
       }
     },
+    "Sie enthält keine Seiten, die sich verarbeiten lassen.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sie enthält keine Seiten, die sich verarbeiten lassen."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "It contains no pages that can be processed."
+          }
+        }
+      }
+    },
+    "Sie ist beschädigt oder unvollständig, zum Beispiel nach einem abgebrochenen Download.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sie ist beschädigt oder unvollständig, zum Beispiel nach einem abgebrochenen Download."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "It is damaged or incomplete, for example after an interrupted download."
+          }
+        }
+      }
+    },
+    "Sie wurde verschoben oder gelöscht.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sie wurde verschoben oder gelöscht."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "It was moved or deleted."
+          }
+        }
+      }
+    },
     "Smart": {
       "localizations": {
         "de": {
@@ -4723,18 +5619,18 @@
         }
       }
     },
-    "Text in gescannten Seiten erkennen – lokal auf dem Mac.": {
+    "Text in gescannten Seiten erkennen.": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Text in gescannten Seiten erkennen – lokal auf dem Mac."
+            "value": "Text in gescannten Seiten erkennen."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Recognize text in scanned pages – locally on your Mac."
+            "value": "Recognize text in scanned pages."
           }
         }
       }
@@ -4815,6 +5711,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Scope"
+          }
+        }
+      }
+    },
+    "Unerwarteter Fehler in der PDF-Verarbeitung. Das Original ist unverändert.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unerwarteter Fehler in der PDF-Verarbeitung. Das Original ist unverändert."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unexpected error while processing the PDF. The original is unchanged."
           }
         }
       }
@@ -5091,6 +6003,22 @@
         }
       }
     },
+    "Wiederholen": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wiederholen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retry"
+          }
+        }
+      }
+    },
     "Wird abgebrochen …": {
       "localizations": {
         "de": {
@@ -5103,6 +6031,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Cancelling…"
+          }
+        }
+      }
+    },
+    "Wird geprüft …": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wird geprüft …"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking…"
           }
         }
       }
@@ -5359,6 +6303,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Back to pages"
+          }
+        }
+      }
+    },
+    "Zurück zur Liste": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zurück zur Liste"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Back to List"
           }
         }
       }

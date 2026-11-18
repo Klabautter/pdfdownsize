@@ -84,6 +84,12 @@ final class MergeViewModel: ObservableObject {
     }
     @Published private(set) var outcomeState: OutcomeState = .none
 
+    /// Erstellte PDF liegt nur als Temp vor (B3: Rückfrage beim Beenden).
+    var hasUnsavedResult: Bool {
+        if case .unsaved = outcomeState { return true }
+        return false
+    }
+
     var outcome: MergeOutcome? {
         switch outcomeState {
         case .none: return nil
@@ -234,12 +240,16 @@ final class MergeViewModel: ObservableObject {
             let scanned = await Task.detached(priority: .userInitiated) { () -> [ImportScan] in
                 var result: [ImportScan] = []
                 for url in pdfs {
-                    guard FileManager.default.fileExists(atPath: url.path) else {
-                        result.append(.failed(String(localized: "Datei nicht gefunden: \(url.lastPathComponent)")))
+                    // Dieselbe Vorprüfung wie in den anderen Werkzeugen (B1):
+                    // benannter Grund statt „nicht lesbar oder geschützt“.
+                    let verdict = DocumentProbe.inspect(url)
+                    guard verdict.isOK else {
+                        result.append(.failed("\(url.lastPathComponent): \(verdict.title)"))
                         continue
                     }
+                    // Die Kacheln zeichnet PDFKit – seine Seitenzahl bleibt maßgeblich.
                     guard let doc = PDFDocument(url: url), !doc.isLocked else {
-                        result.append(.failed(String(localized: "Nicht lesbar oder passwortgeschützt: \(url.lastPathComponent)")))
+                        result.append(.failed("\(url.lastPathComponent): \(DocumentProbe.Verdict.unreadable.title)"))
                         continue
                     }
                     result.append(.pdf(url: url, pageCount: doc.pageCount,
@@ -516,9 +526,11 @@ final class MergeViewModel: ObservableObject {
                 // Masterplan Schritt 8 – jeder Output muss seine Operation
                 // beweisen: Seitenzahl UND unabhängige Strukturprüfung über
                 // libqpdf. PDFKit öffnet auch strukturell beschädigte Dateien.
-                let report = PDFValidator.validate(
+                processingLabel = String(localized: "Wird geprüft …")
+                let report = await PDFValidator.validateOffMain(
                     outputURL: tempURL,
                     policy: .pageOperation(expectedPageCount: pages.count))
+                try Task.checkCancellation()
                 guard report.isValid else {
                     try? FileManager.default.removeItem(at: tempURL)
                     throw MergeError.validationFailed
@@ -603,9 +615,10 @@ final class MergeViewModel: ObservableObject {
                 }
                 try Task.checkCancellation()
 
-                let report = PDFValidator.validate(
+                let report = await PDFValidator.validateOffMain(
                     outputURL: staging,
                     policy: .pageOperation(expectedPageCount: chunk.count))
+                try Task.checkCancellation()
                 guard report.isValid else {
                     throw MergeError.validationFailed
                 }
@@ -783,6 +796,8 @@ enum MergeError: LocalizedError {
     case validationFailed
     case assemblyFailed
     case missingSource(String)
+    /// D6: Seite zu groß für den Bildexport (Megapixel).
+    case pageTooLarge(Int)
 
     var errorDescription: String? {
         switch self {
@@ -792,6 +807,8 @@ enum MergeError: LocalizedError {
             return String(localized: "PDF konnte nicht geschrieben werden.")
         case .missingSource(let name):
             return String(localized: "Quelle fehlt oder ist unlesbar: \(name)")
+        case .pageTooLarge(let megapixels):
+            return String(localized: "Eine Seite ergäbe bei dieser Auflösung \(megapixels) Megapixel. Bitte eine kleinere Auflösung wählen.")
         }
     }
 }

@@ -96,6 +96,9 @@ struct CompressionTrace: Codable, Sendable {
     /// Engine-Pfad mit Font-Kandidaten gefüllt; ohne sie bleibt das Feld
     /// im JSON aus (additiv wie `classification`).
     var fonts: [Font]?
+    /// Masterplan D6: Strukturpässe, die mit einem Fehler endeten (Name:
+    /// Fehlertext). nil = keiner. Vorher verschluckte `try?` diese Fehler.
+    var failedPasses: [String]? = nil
 
     enum CodingKeys: String, CodingKey {
         case schema, document
@@ -169,7 +172,8 @@ enum CompressionTraceWriter {
                                       classifications: classifications),
             fonts: fontDecisions.isEmpty
                 ? nil : buildFonts(decisions: fontDecisions,
-                                   execution: execution))
+                                   execution: execution),
+            failedPasses: execution.failedPasses.isEmpty ? nil : execution.failedPasses)
     }
 
     /// V2-8 – Font-Zeilen aus Plan und Ausführung ableiten (keine zweite

@@ -292,10 +292,10 @@ enum CMYKReencode {
                 }
                 let referenceTile = QualityGates.Sample(
                     width: width, height: height, luma: [],
-                    rgba: referenceRGBA, chromaMean: 0)
+                    rgba: referenceRGBA, census: .neutral)
                 let candidateTile = QualityGates.Sample(
                     width: width, height: height, luma: [],
-                    rgba: candidateRGBA, chromaMean: 0)
+                    rgba: candidateRGBA, census: .neutral)
                 let delta = QualityGates.meanDeltaE76(reference: referenceTile,
                                                       candidate: candidateTile)
                 if delta > (maximum ?? -1) { maximum = delta }

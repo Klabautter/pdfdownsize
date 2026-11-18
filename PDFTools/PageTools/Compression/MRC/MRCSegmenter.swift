@@ -179,6 +179,13 @@ enum MRCSegmenter {
         stripPhotoRects(from: &foreground, width: width, height: height,
                         rects: photoRects)
 
+        // Farbige Tinte bleibt im Hintergrund (Masterplan A2, Stufe 1): Die
+        // Maske wird im Kern immer schwarz gefüllt – eine blaue Unterschrift
+        // in der Maske wurde schwarz-blau gescheckt. Ist zu viel der Tinte
+        // farbig, ist die Seite kein MRC-Fall.
+        guard stripColoredInk(from: &foreground, chroma: chroma,
+                              width: width, height: height) else { return nil }
+
         // --- Connected Components → text/line-art-Maske ----------------------
         guard let (mask, blobRects, inkCount) =
             classifyComponents(foreground: foreground,
@@ -222,6 +229,50 @@ enum MRCSegmenter {
                             photoRegions: photoRegions,
                             inkFraction: inkFraction,
                             paperLuma: Double(paperLuma))
+    }
+
+    // MARK: Farbige Tinte (Masterplan A2, Stufe 1)
+
+    /// Chroma, ab der ein Vordergrundpixel als farbige Tinte gilt – dieselbe
+    /// Grenze wie die Farbzählung (`ChromaCensus.strongChroma`).
+    static let coloredInkChroma = ChromaCensus.strongChroma
+    /// Höchster Anteil farbiger Pixel an der Tinte. Darüber ist die Seite
+    /// kein MRC-Fall (farbiger Text, Formular mit Farbdruck): Die Tinte
+    /// landete sonst überwiegend im weichen Hintergrund.
+    static let maximumColoredInkFraction = 0.03
+
+    /// Nimmt farbige Tinte und ihren 1-px-Rand aus der Maske; der Rand trägt
+    /// sonst als dunkler Saum Schwarz um die farbige Linie. Gibt `false`
+    /// zurück, wenn mehr als `maximumColoredInkFraction` der Tinte farbig ist.
+    static func stripColoredInk(from foreground: inout [Bool], chroma: [UInt8],
+                                width: Int, height: Int) -> Bool {
+        var colored = [Bool](repeating: false, count: width * height)
+        var ink = 0
+        var coloredCount = 0
+        for i in 0..<(width * height) where foreground[i] {
+            ink += 1
+            if Int(chroma[i]) > coloredInkChroma {
+                colored[i] = true
+                coloredCount += 1
+            }
+        }
+        guard ink > 0, coloredCount > 0 else { return true }
+        if Double(coloredCount) / Double(ink) > maximumColoredInkFraction { return false }
+        for y in 0..<height {
+            for x in 0..<width where foreground[y * width + x] {
+                var near = false
+                for dy in -1...1 where !near {
+                    let yy = y + dy
+                    guard yy >= 0, yy < height else { continue }
+                    for dx in -1...1 {
+                        let xx = x + dx
+                        if xx >= 0, xx < width, colored[yy * width + xx] { near = true; break }
+                    }
+                }
+                if near { foreground[y * width + x] = false }
+            }
+        }
+        return true
     }
 
     // MARK: Sobel-Edge-Map

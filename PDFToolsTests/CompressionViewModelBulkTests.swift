@@ -113,7 +113,12 @@ import PDFKit
         #expect(results.count == 2, "Erfolge fehlen: \(results.count)")
         #expect(viewModel.bulkResults.count == 2)
         #expect(viewModel.bulkResultInputs == inputs)
-        #expect(viewModel.bulkErrors[broken] != nil, "Fehlervermerk fehlt")
+        // Masterplan B1: Eine Datei, die gar keine PDF ist, erkennt die
+        // Vorprüfung – sie läuft nicht mit und zählt als übersprungen, nicht
+        // als Fehler. (Echte Laufzeitfehler: BulkLikeSingleE2ETests.)
+        #expect(viewModel.bulkVerdicts[broken] == .unreadable, "Vorprüfung fehlt")
+        #expect(viewModel.bulkErrors.isEmpty)
+        #expect(viewModel.progressLabel.contains("1 übersprungen"), "\(viewModel.progressLabel)")
         #expect(viewModel.errorMessage == nil, "Einzelfehler ist kein globaler Fehler")
         #expect(viewModel.isWorking == false)
         for r in viewModel.bulkResults {
@@ -126,6 +131,10 @@ import PDFKit
     /// Abbruch über die bestehende Mechanik (cancelWork bzw. Task-Abbruch)
     /// bricht den Runner: CancelFlag UND Task-Abbruch sind gebrückt.
     /// Abbruch ist kein Fehler – keine errorMessage, isWorking geräumt.
+    ///
+    /// Masterplan B4: Ein globaler Abbruch verwirft nicht mehr alles. Jede
+    /// Datei ist danach entweder fertig (Ergebnis bleibt) oder „Abgebrochen“
+    /// – keine fehlt, keine zählt als Fehler.
     @Test(.hangGuard) @MainActor func bulkLaufLaesstSichAbbrechen() async throws {
         CompressionConcurrency.maxConcurrentDocuments = 2
         defer { CompressionConcurrency.resetLimit() }
@@ -136,9 +145,11 @@ import PDFKit
         let viewModel = CompressionViewModel(defaults: .isolatedForTest())
         let run = Task { try await viewModel.runBulkCompression(inputs) }
         run.cancel()
-        await #expect(throws: CancellationError.self) {
-            _ = try await run.value
-        }
+        let results = try await run.value
+        #expect(results.count + viewModel.bulkCancelledURLs.count == inputs.count,
+                "Jede Datei ist fertig oder abgebrochen")
+        #expect(viewModel.bulkErrors.isEmpty, "Abbruch zählt nicht als Fehler")
+        for r in results { try? FileManager.default.removeItem(at: r.outputURL) }
         #expect(viewModel.isWorking == false)
         #expect(viewModel.workStartedAt == nil)
         #expect(viewModel.isCancelling == false)
@@ -222,14 +233,15 @@ import PDFKit
         try sentinel.write(to: occupied)
 
         let firstSave = try viewModel.saveAllBulk(to: root)
+        // Masterplan B4: Ein zweites „Alle sichern“ schreibt nichts erneut –
+        // vorher entstand jede Datei ein zweites Mal als „_2“.
         let secondSave = try viewModel.saveAllBulk(to: root)
-        let saved = firstSave + secondSave
-        #expect(Set(saved).count == 4)
-        #expect(try Data(contentsOf: occupied) == sentinel)
+        #expect(secondSave.isEmpty, "Schon Gesichertes erneut geschrieben: \(secondSave)")
+        let saved = firstSave
+        #expect(Set(saved).count == 2)
+        #expect(try Data(contentsOf: occupied) == sentinel, "Fremde Datei überschrieben")
         #expect(viewModel.bulkResults.map(\.outputURL) == results.map(\.outputURL))
-        for batch in [firstSave, secondSave] {
-            #expect(batch.compactMap { PDFDocument(url: $0)?.pageCount } == [1, 2])
-        }
+        #expect(firstSave.compactMap { PDFDocument(url: $0)?.pageCount } == [1, 2])
 
         viewModel.removeBulkInput(at: 0)
         viewModel.clearBulk()

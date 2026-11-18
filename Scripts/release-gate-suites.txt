@@ -1,0 +1,25 @@
+# Suiten, die den Produktionspfad Ende zu Ende fahren (Masterplan G1).
+# Eine Zeile je Suite; Scripts/gate.sh fährt genau diese.
+# Kompression je Stufe, Farbe, Render-Stichprobe
+ColorInkSurvivesCompressionE2ETests
+RenderSampleValidationTests
+ChromaCensusTests
+QualityGatesTests
+# Nicht lesbare Dateien, Beenden
+UnreadableDocumentE2ETests
+QuitConfirmationTests
+# Kompression über das ViewModel, Stapel, Schätzung
+CompressionUITests
+EstimatePublicationTests
+# Organisieren
+HardeningTests
+AssemblyCancellationTests
+# OCR
+OCRTests
+# MRC
+MRCSegmentationTests
+MRCPageRewriteTests
+MRCRenderQualityTests
+# Kern
+TestHygieneTests
+QPDFBundleTests

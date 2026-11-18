@@ -44,6 +44,23 @@ extension CompressionPlan {
             .map(\.resourceID)
     }
 
+    /// Masterplan A3: Byte-Unterschied der transformierten Ressourcen je
+    /// Seite (0-basiert) – Grundlage der Render-Stichprobe. Eine Ressource
+    /// auf mehreren Seiten zählt auf jeder.
+    var changedImageBytesByPage: [Int: Int] {
+        let sets = setsByID
+        var result: [Int: Int] = [:]
+        for decision in decisions where Self.isTransformed(decision, sets: sets) {
+            guard let set = sets[decision.resourceID],
+                  let keep = set.keepCandidate,
+                  let selected = set.candidates.first(where: { $0.id == decision.selectedCandidateID })
+            else { continue }
+            let delta = abs(keep.metrics.encodedBytes - selected.metrics.encodedBytes)
+            for page in decision.pages { result[page, default: 0] += delta }
+        }
+        return result
+    }
+
     // MARK: Privat
 
     private var setsByID: [String: CandidateSet] {

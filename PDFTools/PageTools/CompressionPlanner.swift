@@ -286,7 +286,8 @@ enum CompressionPlanner {
                 isCancelled: isCancelled,
                 stageTimer: stageTimer,
                 allowsQuantizedPalette: allowsQuantizedPalette,
-                workProgress: workProgress)
+                workProgress: workProgress,
+                documentBytes: documentBytes)
         }
 
         // Phase 1b (2026-10-15) – MRC nur bei Bedarf: Erst wenn der beste
@@ -601,7 +602,8 @@ enum CompressionPlanner {
                                                  isCancelled: (() -> Bool)?,
                                                  stageTimer: StageTimer?,
                                                  allowsQuantizedPalette: Bool = false,
-                                                 workProgress: WorkProgressLedger? = nil)
+                                                 workProgress: WorkProgressLedger? = nil,
+                                                 documentBytes: Int = 0)
         throws -> [(resource: PDFImageResource, generated: CandidateGenerator.Generated)] {
 
         struct Entry {
@@ -622,18 +624,64 @@ enum CompressionPlanner {
                                         mrc: mrcCandidates,
                                         pageContext: pageContext,
                                         stageTimer: stageTimer,
-                                        allowsQuantizedPalette: allowsQuantizedPalette)
+                                        allowsQuantizedPalette: allowsQuantizedPalette,
+                                        isCancelled: isCancelled)
+        }
+
+        // Masterplan C3 – Stichproben-Leiter: Bei mehr als
+        // `sampleGroupThreshold` gleichartigen Bildern (Buchscan: Hunderte
+        // gleich großer Seiten) läuft die volle Leiter zuerst auf 8
+        // gleichmäßig verteilten. Bringt die hochgerechnete Gruppe weniger als
+        // 3 % des Dokuments, bleiben die übrigen KEEP. Sonst läuft alles wie
+        // bisher; die 8 Ergebnisse werden nicht neu gerechnet.
+        var precomputed: [Int: CandidateGenerator.Generated] = [:]
+        var keepOnly: [Int: KeepReason] = [:]
+        let groups = Dictionary(grouping: resources.indices) { index -> String in
+            let r = resources[index]
+            return "\(r.width)x\(r.height)/\(r.bitsPerComponent)/\(r.filters)/\(r.colorSpace)"
+        }
+        let denominator = documentBytes > 0
+            ? documentBytes : resources.reduce(0) { $0 + max(0, $1.encodedByteCount) }
+        for (_, members) in groups where members.count > Self.sampleGroupThreshold {
+            if let isCancelled, isCancelled() { throw CancellationError() }
+            let picks = (0..<Self.sampleSize).map { members[$0 * members.count / Self.sampleSize] }
+            var sampledOriginal = 0
+            var sampledBest = 0
+            for pick in picks {
+                let resource = resources[pick]
+                let mrcCandidates = mrcByResource[CandidateSet.resourceID(for: resource.objectID)] ?? []
+                let generated = autoreleasepool { generate(resource, mrcCandidates: mrcCandidates) }
+                precomputed[pick] = generated
+                let keepBytes = generated.set.keepCandidate?.metrics.encodedBytes ?? resource.encodedByteCount
+                let best = generated.set.candidates.map(\.metrics.encodedBytes).min() ?? keepBytes
+                sampledOriginal += keepBytes
+                sampledBest += min(best, keepBytes)
+            }
+            let projected = Double(sampledOriginal - sampledBest)
+                * Double(members.count) / Double(picks.count)
+            guard denominator > 0, projected / Double(denominator) < Self.sampleMinimumGain else { continue }
+            for member in members where precomputed[member] == nil {
+                keepOnly[member] = .sampledNoGain(sampled: picks.count, groupSize: members.count)
+            }
+        }
+        func entry(_ index: Int) -> CandidateGenerator.Generated? {
+            if let done = precomputed[index] { return done }
+            if let reason = keepOnly[index] {
+                return CandidateGenerator.keepOnly(resource: resources[index], options: imageOptions,
+                                                   pixels: pixels, store: store, reason: reason)
+            }
+            return nil
         }
 
         // Seriell – exakt die bisherige Schleife.
         guard options.featureFlags.pixelBudgetScheduler else {
             var entries: [(resource: PDFImageResource,
                            generated: CandidateGenerator.Generated)] = []
-            for resource in resources {
+            for (index, resource) in resources.enumerated() {
                 if let isCancelled, isCancelled() { throw CancellationError() }
                 let mrcCandidates = mrcByResource[
                     CandidateSet.resourceID(for: resource.objectID)] ?? []
-                let generated: CandidateGenerator.Generated = autoreleasepool {
+                let generated: CandidateGenerator.Generated = entry(index) ?? autoreleasepool {
                     generate(resource, mrcCandidates: mrcCandidates)
                 }
                 workProgress?.complete(WorkProgressLedger.weight(pixels: resource.pixelCount))
@@ -656,8 +704,20 @@ enum CompressionPlanner {
                         generated: CandidateGenerator.Generated)?](
             repeating: nil, count: resources.count)
 
+        // Masterplan C4: Bei Abbruch keine neuen Jobs, aber auf die laufenden
+        // WARTEN, bevor geworfen wird – vorher rechneten bis zu 8 Jobs weiter
+        // und hielten Dokument und Raster, während der Aufrufer schon fertig war.
+        var cancelledWhileDispatching = false
         for (index, resource) in resources.enumerated() {
-            if let isCancelled, isCancelled() { throw CancellationError() }
+            if let isCancelled, isCancelled() { cancelledWhileDispatching = true; break }
+            // C3: Stichprobe oder Gruppen-KEEP – kein Job nötig.
+            if let ready = entry(index) {
+                lock.lock()
+                results[index] = (resource, ready)
+                lock.unlock()
+                workProgress?.complete(WorkProgressLedger.weight(pixels: resource.pixelCount))
+                continue
+            }
             let mrcCandidates = mrcByResource[
                 CandidateSet.resourceID(for: resource.objectID)] ?? []
             // Schätzung §15.2: Dekodierte Quelle + Zielraster + Encode-
@@ -699,9 +759,15 @@ enum CompressionPlanner {
             }
         }
         group.wait()
+        if cancelledWhileDispatching || isCancelled?() == true { throw CancellationError() }
         if let caught { throw caught }
         return results.compactMap { $0 }
     }
+
+    /// Masterplan C3 – Stichproben-Leiter.
+    static let sampleGroupThreshold = 40
+    static let sampleSize = 8
+    static let sampleMinimumGain = 0.03
 
     // MARK: - Bilevel-Race (Phase 2b)
 

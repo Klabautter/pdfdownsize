@@ -17,6 +17,10 @@ struct SourceDocument: Identifiable, Hashable {
         self.fileSize = Int64((attrs?[.size] as? Int) ?? 0)
         self.pageCount = pageCount
     }
+
+    /// Aus einem Bild entstandene Temp-PDF (Masterplan B6: wird nicht als
+    /// `<UUID>.pdf` an andere Werkzeuge weitergereicht).
+    var isConvertedImage: Bool { fileName != url.lastPathComponent }
 }
 
 struct PageItem: Identifiable, Hashable {

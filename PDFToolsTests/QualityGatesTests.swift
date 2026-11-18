@@ -268,8 +268,10 @@ import CoreGraphics
             Issue.record("Farbverschiebung wurde durchgelassen: \(measurement)")
             return
         }
-        #expect(violated == [.deltaE76],
-                "Nur ΔE sollte verletzt sein: \(violated)")
+        // Eine globale Farbverschiebung trifft auch das farbigste Prozent
+        // (Spitzen-ΔE, Masterplan A1) – beide Farbgrenzen, keine Struktur.
+        #expect(violated == [.deltaE76, .peakDeltaE76],
+                "Nur die Farbgrenzen sollten verletzt sein: \(violated)")
     }
 
     /// Graustufen ignorieren ΔE: kein Chroma, keine ΔE-Messung, kein Gate.

@@ -431,10 +431,13 @@ enum RateDistortionOptimizer {
             case .deltaE76:
                 value = measurement.meanDeltaE76
                 limit = policy.maxDeltaE76
+            case .peakDeltaE76:
+                value = measurement.peakDeltaE76
+                limit = policy.maxPeakDeltaE76
             }
             let valueText = value.map { String(format: "%.4f", $0) } ?? "?"
             let limitText = limit.map { String(format: "%.2f", $0) } ?? "?"
-            let comparator = metric == .deltaE76 ? ">" : "<"
+            let comparator = (metric == .deltaE76 || metric == .peakDeltaE76) ? ">" : "<"
             return "\(metric.rawValue) \(valueText)\(comparator)\(limitText)"
         }.joined(separator: ", ")
     }

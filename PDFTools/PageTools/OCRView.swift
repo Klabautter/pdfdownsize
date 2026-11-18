@@ -29,6 +29,12 @@ struct OCRView: View {
             switch vm.stage {
             case .choose:
                 chooseState
+            case .rejected(let verdict):
+                RejectedDocumentView(fileName: vm.pdfURL?.lastPathComponent ?? "",
+                                     verdict: verdict,
+                                     onChooseOther: { vm.wantsFiles = true },
+                                     onClose: { vm.reset() })
+                    .dropTargetOverlay(isTargeted, inset: 12)
             case .ready, .working, .done:
                 workingState
             }
@@ -88,7 +94,7 @@ struct OCRView: View {
     private var chooseState: some View {
         WorkspaceWelcome(icon: "text.viewfinder",
                          title: String(localized: "PDF durchsuchbar machen"),
-                         subtitle: String(localized: "Text in gescannten Seiten erkennen – lokal auf dem Mac."),
+                         subtitle: String(localized: "Text in gescannten Seiten erkennen."),
                          dropHint: String(localized: "Dateien auch hierher ziehen"),
                          isTargeted: isTargeted) {
             Button("PDF auswählen …") { showImporter = true }

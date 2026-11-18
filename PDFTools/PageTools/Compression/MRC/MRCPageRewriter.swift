@@ -42,11 +42,15 @@ struct MRCPageQuality {
     let meanAbsDiff: Double
     /// |Tintenabdeckung(Output) − Tintenabdeckung(Quelle)|.
     let inkDelta: Double
+    /// ΔE76 über das 1 % farbigste der Quellpixel, gemessen auf bis zu
+    /// 1024 px (Masterplan A2). nil = Quelle ist grau.
+    var peakDeltaE76: Double? = nil
 
     var meetsScanLimits: Bool {
         globalSSIM >= MRCPageQA.minimumGlobalSSIM
             && p05TileSSIM >= MRCPageQA.minimumP05TileSSIM
             && inkDelta <= MRCPageQA.maximumInkDelta
+            && (peakDeltaE76 ?? 0) <= MRCPageQA.maximumPeakDeltaE76
     }
 }
 
@@ -60,6 +64,12 @@ enum MRCPageQA {
     static let minimumGlobalSSIM = 0.97
     static let minimumP05TileSSIM = 0.95
     static let maximumInkDelta = 0.005
+    /// Farbtreue (Masterplan A2): derselbe Startwert wie das Bild-Gate.
+    static let maximumPeakDeltaE76 = QualityGatePolicy.peakDeltaE76Floor
+    /// Messraster der Farbprüfung. Die Struktur (SSIM/p05) bleibt auf dem
+    /// Raster, an dem ihre Grenzen kalibriert sind; die Farbe wird feiner
+    /// gemessen, weil bei 320 px (A4 ≈ 27 DPI) keine Unterschrift zu sehen ist.
+    static let colorMeasurementEdge = 1024
 
     /// Render-DPI des Vergleichs (Standard-Regression wie im RenderDifferential),
     /// Kanten Cap gegen Poster-Seiten.
@@ -116,6 +126,16 @@ enum MRCPageQA {
                   let lumaOutput = lumaBuffer(outputImage),
                   lumaSource.count == lumaOutput.count else { return nil }
 
+            // Farbtreue auf dem feinen Raster, nur wenn die Quelle farbig ist.
+            var peakDeltaE: Double?
+            if let census = ChromaCensus.of(sourceImage), !census.isNeutral,
+               let fineSource = QualityGates.sample(sourceImage, maxEdge: colorMeasurementEdge,
+                                                    census: census),
+               let fineOutput = QualityGates.sample(outputImage, maxEdge: colorMeasurementEdge),
+               fineSource.width == fineOutput.width, fineSource.height == fineOutput.height {
+                peakDeltaE = QualityGates.peakDeltaE76(reference: fineSource, candidate: fineOutput)
+            }
+
             var changed = 0
             var totalDiff = 0
             var inkSource = 0
@@ -134,7 +154,8 @@ enum MRCPageQA {
                 p05TileSSIM: measurement.p05TileSSIM,
                 changedAreaRatio: Double(changed) / Double(total),
                 meanAbsDiff: Double(totalDiff) / Double(total),
-                inkDelta: Double(abs(inkSource - inkOutput)) / Double(total))
+                inkDelta: Double(abs(inkSource - inkOutput)) / Double(total),
+                peakDeltaE76: peakDeltaE)
         }
     }
 
@@ -208,6 +229,9 @@ enum MRCPageRewriter {
     /// Pixel-Budget-Scheduler des Planners (dort Cap 8, hier 4: Die
     /// Scratch-QA rendert je Stufe zweimal via PDFKit).
     static let provisionConcurrency = 4
+    /// Masterplan C5: Arbeitsspeicher der Segmentierung je Rasterpixel
+    /// (Luminanz, Chroma, Kanten, Sauvola-Integrale, Maske, Hintergrund).
+    static let segmentationBytesPerPixel: Int64 = 26
     /// Relative Kosten einer MRC-Seite gegenüber der Kandidatensuche
     /// desselben Rasters (Fortschrittsgewicht, keine Planungsgröße).
     static let mrcWorkFactor = 2.0
@@ -333,6 +357,10 @@ enum MRCPageRewriter {
         // Seite. Jeder Job schreibt NUR seinen Slot; die Zusammenführung
         // unten läuft in Analyse-Reihenfolge – deterministisch.
         let slots = DispatchSemaphore(value: provisionConcurrency)
+        // Masterplan C5: Die Segmentierung belegt rund 26 Byte je Pixel und
+        // lief bisher neben dem Pixel-Budget (viermal parallel). Jetzt holt
+        // jede Seite ein Lease beim Scheduler – zu große Seiten warten.
+        let scheduler = PixelWorkScheduler(budgetBytes: PixelWorkScheduler.resolvedBudget())
         let group = DispatchGroup()
         let lock = NSLock()
         var results = [MRCProvision?](repeating: nil, count: jobs.count)
@@ -349,6 +377,8 @@ enum MRCPageRewriter {
                 slots.signal()
                 break
             }
+            let lease = scheduler.acquireBlocking(
+                bytes: Int64(job.resource.pixelCount) * Self.segmentationBytesPerPixel)
             group.enter()
             startedWeight += jobWeights[index]
             let jobWeight = jobWeights[index]
@@ -357,6 +387,7 @@ enum MRCPageRewriter {
             DispatchQueue(label: "pdftools.mrc.\(index)", qos: .userInitiated).async {
                 defer {
                     workProgress?.complete(jobWeight)
+                    lease.release()
                     slots.signal()
                     group.leave()
                 }
