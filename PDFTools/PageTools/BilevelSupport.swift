@@ -596,7 +596,10 @@ enum BilevelResampling {
     /// Klein: „etwa 600 DPI“; das Band fängt Scans auf, die knapp größer
     /// platziert sind. Smart: erst klar über 600 DPI (Toleranz wie die Bilder).
     static let smallMinimumDPI = 570.0
-    static let smartMinimumDPI = 690.0
+    /// Masterplan H3: Smart verkleinert ab 400 DPI auf rund 300 DPI (vorher
+    /// erst über 690 DPI). Ziel mit 5 % Spielraum nach unten.
+    static let smartMinimumDPI = 400.0
+    static let smartFloorDPI = 285.0
     static let smallFloorDPI = 300.0
     /// Klein unterhalb von `smallMinimumDPI`: ab 400 DPI halbieren, ab knapp
     /// 300 DPI auf zwei Drittel. Das Ziel liegt jeweils bei rund 200 DPI.
@@ -627,8 +630,15 @@ enum BilevelResampling {
             }
             while dpi / Double(factor * 2) >= smallFloorDPI { factor *= 2 }
         case .smart:
-            guard dpi > smartMinimumDPI else { return nil }
-            while dpi / Double(factor) > smartMinimumDPI { factor *= 2 }
+            guard dpi >= smartMinimumDPI else { return nil }
+            // Die stärkste Verkleinerung, die noch ≈ 300 DPI hält: Halbierungen,
+            // dazu 2/3 und 3/4 (400 → 300).
+            var ratios = [Ratio(target: 3, source: 4), Ratio(target: 2, source: 3)]
+            var halving = 2
+            while dpi / Double(halving) >= smartFloorDPI { ratios.append(.halving(halving)); halving *= 2 }
+            return ratios
+                .filter { dpi * Double($0.target) / Double($0.source) >= smartFloorDPI }
+                .min { Double($0.target) / Double($0.source) < Double($1.target) / Double($1.source) }
         case .quality, .custom:
             return nil
         }
@@ -638,7 +648,7 @@ enum BilevelResampling {
     /// Der Bruch, aus dem eine geplante Zielgröße entstand. Der Plan trägt nur
     /// die Zielgröße; der Executor erzeugt damit dieselben Bits neu.
     static func ratio(sourceWidth: Int, sourceHeight: Int, target: PixelSize) -> Ratio? {
-        var candidates = [Ratio(target: 2, source: 3)]
+        var candidates = [Ratio(target: 2, source: 3), Ratio(target: 3, source: 4)]
         var factor = 2
         while factor <= max(sourceWidth, sourceHeight) {
             candidates.append(.halving(factor))

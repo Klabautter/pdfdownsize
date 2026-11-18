@@ -327,10 +327,12 @@ import UniformTypeIdentifiers
         let qualitaet = try Self.run(input, .quality)
         defer { for r in [klein, smart, qualitaet] { try? FileManager.default.removeItem(at: r.output) } }
 
+        // Masterplan H3: Smart ab 400 DPI auf rund 300 DPI (vorher: halbiert
+        // bis unter 690 DPI, also 600). Klein unverändert (300 DPI).
         #expect(try Self.dimensions(klein.output) == PixelSize(width: 1500, height: 1500))
-        #expect(try Self.dimensions(smart.output) == PixelSize(width: 3000, height: 3000))
+        #expect(try Self.dimensions(smart.output) == PixelSize(width: 1500, height: 1500))
         #expect(try Self.dimensions(qualitaet.output) == PixelSize(width: 6000, height: 6000))
-        #expect(klein.bytes < smart.bytes && smart.bytes < qualitaet.bytes,
+        #expect(klein.bytes <= smart.bytes && smart.bytes < qualitaet.bytes,
                 "Klein \(klein.bytes), Smart \(smart.bytes), Qualität \(qualitaet.bytes)")
 
         // Die geschriebene Datei rendert und bleibt nah an der Quelle.
@@ -347,16 +349,33 @@ import UniformTypeIdentifiers
         }
     }
 
-    /// 600 DPI: Klein ja, Smart nein.
-    @Test(.hangGuard) func bilevelAt600DPIOnlyKlein() throws {
+    /// 600 DPI: Klein und (seit H3) Smart auf 300 DPI, Qualität bleibt.
+    @Test(.hangGuard) func bilevelAt600DPIGoesTo300InKleinAndSmart() throws {
         let buffer = try Self.textBilevel(width: 3000, height: 3000, pointSize: 92)
         let input = try Self.bilevelDocument(buffer, dpi: 600)
         defer { try? FileManager.default.removeItem(at: input) }
         let klein = try Self.run(input, .small)
         let smart = try Self.run(input, .smart)
-        defer { for r in [klein, smart] { try? FileManager.default.removeItem(at: r.output) } }
+        let quality = try Self.run(input, .quality)
+        defer { for r in [klein, smart, quality] { try? FileManager.default.removeItem(at: r.output) } }
         #expect(try Self.dimensions(klein.output) == PixelSize(width: 1500, height: 1500))
-        #expect(try Self.dimensions(smart.output) == PixelSize(width: 3000, height: 3000))
+        #expect(try Self.dimensions(smart.output) == PixelSize(width: 1500, height: 1500))
+        #expect(try Self.dimensions(quality.output) == PixelSize(width: 3000, height: 3000))
+    }
+
+    /// Masterplan H3: 400 DPI (Büroscan-artiges Schriftbild) – Smart auf 300
+    /// DPI (3/4), Qualität bleibt. Vorher blieb Smart unter 690 DPI unberührt.
+    @Test(.hangGuard) func bilevelAt400DPIGoesTo300InSmart() throws {
+        let buffer = try Self.textBilevel(width: 3200, height: 4400, pointSize: 61, scanLike: true)
+        let input = try Self.bilevelDocument(buffer, dpi: 400)
+        defer { try? FileManager.default.removeItem(at: input) }
+        let smart = try Self.run(input, .smart)
+        let quality = try Self.run(input, .quality)
+        defer { for r in [smart, quality] { try? FileManager.default.removeItem(at: r.output) } }
+        #expect(try Self.dimensions(smart.output) == PixelSize(width: 2400, height: 3300))
+        #expect(try Self.dimensions(quality.output) == PixelSize(width: 3200, height: 4400))
+        let page = try #require(RenderDifferential.compare(sourceURL: input, outputURL: smart.output, dpi: 150).first)
+        #expect(abs(page.inkDelta) < 0.01, "inkDelta \(page.inkDelta)")
     }
 
     /// Der Büroscan: 300 DPI, 11-pt-Text. Klein rechnet auf 200 DPI, die anderen
@@ -431,9 +450,13 @@ import UniformTypeIdentifiers
         #expect(try ratio(dpi: 400, .small) == .halving(2))
         #expect(try ratio(dpi: 300, .small) == BilevelResampling.Ratio(target: 2, source: 3))
         #expect(try ratio(dpi: 240, .small) == nil)
-        #expect(try ratio(dpi: 1200, .smart) == .halving(2))
-        #expect(try ratio(dpi: 2400, .smart) == .halving(4))
-        #expect(try ratio(dpi: 600, .smart) == nil)
+        // Masterplan H3: Smart ab 400 DPI auf rund 300 DPI.
+        #expect(try ratio(dpi: 1200, .smart) == .halving(4))
+        #expect(try ratio(dpi: 2400, .smart) == .halving(8))
+        #expect(try ratio(dpi: 600, .smart) == .halving(2))
+        #expect(try ratio(dpi: 400, .smart) == BilevelResampling.Ratio(target: 3, source: 4))
+        #expect(try ratio(dpi: 450, .smart) == BilevelResampling.Ratio(target: 2, source: 3))
+        #expect(try ratio(dpi: 399, .smart) == nil)
         #expect(try ratio(dpi: 300, .smart) == nil)
         #expect(try ratio(dpi: 300, .quality) == nil)
         #expect(try ratio(dpi: 1200, .quality) == nil)
