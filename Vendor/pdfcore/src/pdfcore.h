@@ -281,13 +281,6 @@ int pdfcore_page_count(pdfcore_document_t *doc);
 /// Strukturprüfung (entspricht `qpdf --check`). 0 = ok, sonst Fehlercode.
 int pdfcore_check(pdfcore_document_t *doc);
 
-/// Masterplan C2 Schritt 5: wie pdfcore_check, aber Streams, deren Rohbytes
-/// und Kenndaten (/Filter, /DecodeParms, Maße) unverändert aus der Quelle
-/// stammen, werden nicht dekodiert – sie sind so gültig wie dort. Veränderte
-/// Streams prüft sie voll. Ist die Quelle nicht lesbar: volle Prüfung.
-int pdfcore_check_against_source(pdfcore_document_t *doc, const char *source_path,
-                                  const char *password);
-
 /// qpdf-Version in Puffer schreiben. Gibt benötigte Länge zurück (ohne NUL).
 int pdfcore_version(char *buffer, size_t buffer_size);
 

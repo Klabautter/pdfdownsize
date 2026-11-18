@@ -297,7 +297,7 @@ enum PDFValidator {
         if policy.runsStructureCheck {
             do {
                 let core = try PDFCoreDocument(path: outputURL.path)
-                try core.check(againstSource: referenceURL)
+                try core.check()
             } catch {
                 report.fail("Strukturprüfung (qpdf) fehlgeschlagen: "
                     + "\(error.localizedDescription)", ValidationFinding(

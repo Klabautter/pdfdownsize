@@ -351,39 +351,7 @@ static std::string describe_color_space(QPDFObjectHandle cs)
     return n > 0 ? family + ":" + std::to_string(n) : family;
 }
 
-namespace {
-
-/// Masterplan C2 Schritt 5: Identität eines Streams – Rohbytes (FNV-1a,
-/// 64 Bit, plus Länge) und die Kenndaten, die über ihre Deutung entscheiden.
-uint64_t stream_identity(Buffer const& raw, QPDFObjectHandle dict)
-{
-    uint64_t h = 1469598103934665603ULL;
-    auto mix = [&](unsigned char const* p, size_t n) {
-        for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ULL; }
-    };
-    mix(raw.getBuffer(), raw.getSize());
-    uint64_t size = raw.getSize();
-    mix(reinterpret_cast<unsigned char const*>(&size), sizeof size);
-    for (char const* key : {"/Filter", "/DecodeParms", "/Width", "/Height", "/BitsPerComponent"}) {
-        QPDFObjectHandle v = dict.getKey(key);
-        std::string text = std::string(key) + (v.isNull() ? "" : v.unparseResolved());
-        mix(reinterpret_cast<unsigned char const*>(text.data()), text.size());
-    }
-    return h;
-}
-
-/// Rohbytes eines Streams (ohne Filter), nullptr wenn nicht lesbar.
-std::unique_ptr<Buffer> raw_stream_bytes(QPDFObjectHandle stream)
-{
-    Pl_Buffer raw("raw");
-    bool attempted = false;
-    if (!stream.pipeStreamData(&raw, &attempted, 0, qpdf_dl_none, true, false)) { return nullptr; }
-    return std::unique_ptr<Buffer>(raw.getBuffer());
-}
-
-} // namespace
-
-static int check_impl(pdfcore_document_t *doc, std::set<uint64_t> const* known)
+int pdfcore_check(pdfcore_document_t *doc)
 {
     PDFCORE_GUARD_BEGIN
     if (!doc) { return PDFCORE_ERR_OPEN; }
@@ -416,7 +384,6 @@ static int check_impl(pdfcore_document_t *doc, std::set<uint64_t> const* known)
         // Daten. Ein Stream, den qpdf nicht dekodieren kann, meldet sich
         // entweder über den Rückgabewert oder über eine neue Warnung.
         std::set<QPDFObjGen> seen;
-        std::set<QPDFObjGen> unchangedStreams;
         bool streamsOK = true;
 
         // Masterplan D1: Arbeitsliste statt Rekursion. Ein Besucht-Set
@@ -434,16 +401,9 @@ static int check_impl(pdfcore_document_t *doc, std::set<uint64_t> const* known)
                     seen.insert(og);
                 }
                 if (obj.isStream()) {
-                    // C2 Schritt 5: Gleiche Rohbytes und Kenndaten wie in der
-                    // Quelle sind so gültig wie dort – dieselbe Aussage,
-                    // ohne Dekodieren. Alles andere wird voll gelesen.
-                    std::unique_ptr<Buffer> rawBytes = known ? raw_stream_bytes(obj) : nullptr;
-                    bool const unchanged = rawBytes && obj.isIndirect()
-                        && known->count(stream_identity(*rawBytes, obj.getDict()));
-                    if (unchanged) { unchangedStreams.insert(obj.getObjGen()); }
                     Pl_Discard discard;
                     bool attempted = false;
-                    if (!unchanged && !obj.pipeStreamData(&discard, &attempted, 0, qpdf_dl_all,
+                    if (!obj.pipeStreamData(&discard, &attempted, 0, qpdf_dl_all,
                                             /*suppress_warnings=*/true,
                                             /*will_retry=*/false)) {
                         streamsOK = false;
@@ -531,8 +491,6 @@ static int check_impl(pdfcore_document_t *doc, std::set<uint64_t> const* known)
                         continue;
                     }
                     if (has_opaque_image_filter(d)) { continue; }
-                    // C2 Schritt 5: unverändert gegenüber der Quelle.
-                    if (x.isIndirect() && unchangedStreams.count(x.getObjGen())) { continue; }
 
                     long long comps = color_space_components(d.getKey("/ColorSpace"));
                     if (comps <= 0) { continue; }
@@ -583,34 +541,6 @@ static int check_impl(pdfcore_document_t *doc, std::set<uint64_t> const* known)
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
-    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
-}
-
-int pdfcore_check(pdfcore_document_t *doc)
-{
-    PDFCORE_GUARD_BEGIN
-    return check_impl(doc, nullptr);
-    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
-}
-
-int pdfcore_check_against_source(pdfcore_document_t *doc, const char *source_path,
-                                  const char *password)
-{
-    PDFCORE_GUARD_BEGIN
-    if (!doc || !source_path) { return PDFCORE_ERR_OPEN; }
-    std::set<uint64_t> known;
-    try {
-        QPDF source;
-        source.processFile(source_path, password);
-        for (auto& obj : source.getAllObjects()) {
-            if (!obj.isStream()) { continue; }
-            if (auto raw = raw_stream_bytes(obj)) { known.insert(stream_identity(*raw, obj.getDict())); }
-        }
-    } catch (...) {
-        // Quelle nicht lesbar: die volle Prüfung, nichts wird übersprungen.
-        known.clear();
-    }
-    return check_impl(doc, &known);
     PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
