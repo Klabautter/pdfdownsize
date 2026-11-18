@@ -89,7 +89,7 @@ SKIP_UI=(-skip-testing:PDFToolsUITests)
 
 status=0
 (cd "$ARBEITSKOPIE" && xcodebuild test -scheme PDFTools -destination 'platform=macOS' \
-    -parallel-testing-enabled NO "${SKIP_UI[@]}" "$@") || status=$?
+    -parallel-testing-enabled NO ${SKIP_UI[@]+"${SKIP_UI[@]}"} "$@") || status=$?
 
 # Artefakte zurück; im Projekt wird nichts gelöscht.
 rsync -a --exclude '**/outputs' "$ARBEITSKOPIE/benchmark/" "$ROOT/benchmark/"
