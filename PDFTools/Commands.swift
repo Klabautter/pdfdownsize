@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - Focused-Value-Routing für Menü-Befehle (§33)
 
@@ -11,6 +12,20 @@ extension FocusedValues {
         get { self[AppToolKey.self] }
         set { self[AppToolKey.self] = newValue }
     }
+    /// Masterplan F2: Werkzeugwechsel aus dem Menü „Darstellung“.
+    var selectTool: ToolSelector? {
+        get { self[ToolSelectorKey.self] }
+        set { self[ToolSelectorKey.self] = newValue }
+    }
+}
+
+struct ToolSelector {
+    let select: (AppTool) -> Void
+    init(_ select: @escaping (AppTool) -> Void) { self.select = select }
+}
+
+struct ToolSelectorKey: FocusedValueKey {
+    typealias Value = ToolSelector
 }
 
 // MergeViewModel wird über `.focusedSceneObject(vm)` registriert und
@@ -35,8 +50,11 @@ extension PDFToolsApp {
         !(organizeVM?.project.pages.isEmpty ?? true)
     }
 
+    /// F2: Seiten löschen nur im Projektzustand – nicht während eines Laufs
+    /// und nicht hinter der Ergebnisansicht.
     private var hasSelection: Bool {
         organizeActive && !(organizeVM?.selectedPageIDs.isEmpty ?? true)
+            && !(organizeVM?.isProcessing ?? true) && organizeVM?.outcome == nil
     }
 
     /// „Sichern …" ist nur aktiv, wenn das aktive Werkzeug ein ungesichertes
@@ -44,8 +62,11 @@ extension PDFToolsApp {
     private var canSave: Bool {
         switch activeTool {
         case .compress:
-            guard let vm = compressionVM, let pending = vm.pendingResult else { return false }
-            return !pending.alreadyOptimized && !vm.isWorking
+            guard let vm = compressionVM, !vm.isWorking else { return false }
+            // F2: Im Stapel sichert ⌘S alle noch nicht gesicherten Ergebnisse.
+            if !vm.bulkResultInputs.isEmpty { return !vm.allBulkResultsSaved }
+            guard let pending = vm.pendingResult else { return false }
+            return !pending.alreadyOptimized
         case .organize:
             guard let vm = organizeVM else { return false }
             return vm.outcome != nil && vm.savedURL == nil && !vm.isProcessing
@@ -119,7 +140,9 @@ extension PDFToolsApp {
             Button("Sichern …") {
                 switch activeTool {
                 case .compress:
-                    if let pending = compressionVM?.pendingResult {
+                    if let vm = compressionVM, !vm.bulkResultInputs.isEmpty {
+                        vm.saveAllBulkWithPanel()
+                    } else if let pending = compressionVM?.pendingResult {
                         compressionVM?.savePending(pending)
                     }
                 case .organize:
@@ -136,7 +159,37 @@ extension PDFToolsApp {
             .disabled(!canSave)
         }
 
-        // Bearbeiten (zusätzlich zu Rückgängig/Wiederholen des Systems)
+        // Darstellung (Masterplan F2): Werkzeuge per Tastatur.
+        CommandGroup(before: .sidebar) {
+            ForEach(Array(AppTool.allCases.enumerated()), id: \.element) { index, tool in
+                Button(tool.label) { selectTool?.select(tool) }
+                    .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
+                    .disabled(selectTool == nil)
+            }
+            Divider()
+        }
+
+        // Rückgängig/Wiederholen (Masterplan F2): im Organisieren auf dem
+        // eigenen Projekt-UndoManager, sonst wie gewohnt über das Fenster.
+        CommandGroup(replacing: .undoRedo) {
+            let projectUndo = organizeActive ? organizeVM?.ownUndoManager : nil
+            Button(projectUndo.map { $0.undoMenuItemTitle } ?? String(localized: "Rückgängig")) {
+                if let projectUndo { projectUndo.undo() } else {
+                    NSApp.sendAction(Selector(("undo:")), to: nil, from: nil)
+                }
+            }
+            .keyboardShortcut("z", modifiers: .command)
+            .disabled(projectUndo.map { !$0.canUndo || (organizeVM?.isProcessing ?? false) } ?? false)
+            Button(projectUndo.map { $0.redoMenuItemTitle } ?? String(localized: "Wiederholen")) {
+                if let projectUndo { projectUndo.redo() } else {
+                    NSApp.sendAction(Selector(("redo:")), to: nil, from: nil)
+                }
+            }
+            .keyboardShortcut("z", modifiers: [.command, .shift])
+            .disabled(projectUndo.map { !$0.canRedo || (organizeVM?.isProcessing ?? false) } ?? false)
+        }
+
+        // Bearbeiten
         CommandGroup(after: .undoRedo) {
             Divider()
 

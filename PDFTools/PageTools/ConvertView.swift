@@ -208,6 +208,7 @@ struct ConvertView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.extraLarge)
+                    .keyboardShortcut(.defaultAction)   // F2: Return = Hauptaktion
                     .disabled(!vm.hasSource)
                 }
             }
@@ -227,6 +228,7 @@ struct ConvertView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.extraLarge)
+                .keyboardShortcut(.defaultAction)   // F2: Return = Hauptaktion
                 .disabled(!vm.hasSource)
                 if onOpenInOrganize != nil {
                     Button { onOpenInOrganize?(vm.imageURLs) } label: {

@@ -174,7 +174,7 @@ struct OCRView: View {
             footer
                 .padding(Theme.panelPadding)
         }
-        .focusEffectDisabled()
+        // Masterplan F2: kein abgeschalteter Fokusring am Pult.
     }
 
     private var header: some View {
@@ -359,6 +359,7 @@ struct OCRView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.extraLarge)
+                .keyboardShortcut(.defaultAction)   // F2: Return = Hauptaktion
             }
             // Nichts erkannt: kein Sichern-Knopf, der nur das Original
             // kopieren würde (Sichtabnahme 2026-10-12, L7); der Kopf sagt,

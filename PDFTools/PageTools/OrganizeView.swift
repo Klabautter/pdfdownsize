@@ -23,7 +23,6 @@ struct OrganizeView: View {
     /// Werkzeugwechsel). Ersetzt „Mit Smart komprimieren": Dort wählt man
     /// die Stufe selbst (Sichtabnahme 2026-10-12).
     var onCompress: ((URL) -> Void)? = nil
-    @Environment(\.undoManager) private var undoManager
 
     @State private var mergeLosses: [MergeLossSummary.Loss] = []
     @State private var lastAnchorID: UUID?
@@ -75,8 +74,10 @@ struct OrganizeView: View {
         } isTargeted: { targeted in
             isTargeted = targeted
         }
-        .onAppear { vm.attachUndoManager(undoManager) }
-        .onChange(of: undoManager) { _, m in vm.attachUndoManager(m) }
+        // Masterplan F2: Organisieren hat einen EIGENEN UndoManager; das Menü
+        // „Rückgängig“ (Commands) spricht ihn an, solange Organisieren aktiv
+        // ist – ⌘Z wirkt nie werkzeugübergreifend.
+        .onAppear { vm.attachUndoManager(vm.ownUndoManager) }
         .onChange(of: vm.wantsImport) { _, wants in
             if wants {
                 vm.wantsImport = false
@@ -159,6 +160,7 @@ struct OrganizeView: View {
                         }
                     }
                     .buttonStyle(.glassProminent)
+                    .keyboardShortcut(.defaultAction)   // F2: Return = Hauptaktion
                     .disabled(vm.project.pages.isEmpty || vm.isProcessing)
                 }
             }

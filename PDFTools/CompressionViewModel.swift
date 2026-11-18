@@ -1258,6 +1258,25 @@ final class CompressionViewModel: ObservableObject {
         return saved
     }
 
+    /// „Alle sichern …“ mit Ordner-Dialog – Knopf im Stapel und ⌘S (F2).
+    /// Liefert die Fehlermeldung, falls nicht alles gesichert wurde.
+    @discardableResult
+    func saveAllBulkWithPanel() -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = String(localized: "Hier sichern")
+        panel.message = String(localized: "Ordner für die komprimierten PDFs wählen")
+        guard panel.runModal() == .OK, let folder = panel.url else { return nil }
+        do {
+            _ = try saveAllBulk(to: folder)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     /// Sichert EIN Bulk-Ergebnis über ein Save-Panel – hier ist der Name
     /// frei wählbar (Vorschlag: Eingabename + Modus-Suffix).
     func saveBulkResult(for url: URL) {

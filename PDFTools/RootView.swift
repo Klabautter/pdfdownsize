@@ -155,6 +155,8 @@ struct RootView: View {
         .navigationSubtitle(documentTitle == nil ? "" : selectedTool.label)
         // Für Menü-Befehle (§33): aktives Tool im Fokus-Environment melden.
         .focusedSceneValue(\.appTool, selectedTool)
+        // Masterplan F2: Werkzeugwechsel per Menü (⌘1–⌘4).
+        .focusedSceneValue(\.selectTool, ToolSelector { selectedTool = $0 })
         .onChange(of: selectedTool) { _, tool in handOver(to: tool) }
         .onChange(of: compressionVM.inputURL) { old, new in remember(new, closing: old) }
         .onChange(of: ocrVM.pdfURL) { old, new in remember(new, closing: old) }

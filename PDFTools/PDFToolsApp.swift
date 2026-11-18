@@ -59,6 +59,7 @@ struct PDFToolsApp: App {
     @NSApplicationDelegateAdaptor(OpenFilesDelegate.self) private var openFilesDelegate
     // intern (nicht private): Commands.swift-Erweiterung greift darauf zu.
     @FocusedValue(\.appTool) var activeTool: AppTool?
+    @FocusedValue(\.selectTool) var selectTool: ToolSelector?
     @FocusedObject var organizeVM: MergeViewModel?
     @FocusedObject var compressionVM: CompressionViewModel?
     @FocusedObject var conversionVM: ConversionViewModel?

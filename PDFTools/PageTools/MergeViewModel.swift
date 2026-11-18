@@ -147,6 +147,9 @@ final class MergeViewModel: ObservableObject {
         project != baselineProject
     }
 
+    /// Masterplan F2: eigener UndoManager des Projekts.
+    let ownUndoManager = UndoManager()
+
     func attachUndoManager(_ manager: UndoManager?) {
         undoManager = manager
         // Jede Aktion = genau eine eigene Undo-Gruppe (kein Event-Coalescing).

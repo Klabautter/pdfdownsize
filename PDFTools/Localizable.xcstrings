@@ -5226,6 +5226,22 @@
         }
       }
     },
+    "Rückgängig": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rückgängig"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Undo"
+          }
+        }
+      }
+    },
     "S/W-Scans verlustfrei": {
       "localizations": {
         "de": {

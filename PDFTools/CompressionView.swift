@@ -252,9 +252,8 @@ private struct ControlPanel: View {
                 }
             }
         }
-        // Kein Fokusring um das Glas-Pult (sah „viereckig" aus, sobald ein
-        // Bedienelement den Fokus hatte).
-        .focusEffectDisabled()
+        // Masterplan F2: Der Fokusring bleibt – ohne ihn sah man per Tastatur
+        // nicht, welches Bedienelement aktiv ist.
     }
 
     private var estimateInFooter: Bool {
@@ -848,6 +847,16 @@ struct DocumentStage: View {
         }
         .position(x: x, y: top + height / 2)
         .gesture(drag)
+        // Masterplan F2: per Tastatur fokussierbar, Pfeiltasten verschieben
+        // um 5 %.
+        .focusable()
+        .onMoveCommand { direction in
+            switch direction {
+            case .left: fraction = max(fraction - 0.05, 0)
+            case .right: fraction = min(fraction + 0.05, 1)
+            default: break
+            }
+        }
         .onHover { inside in
             if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
         }
@@ -856,8 +865,8 @@ struct DocumentStage: View {
         .accessibilityValue("\(Int(fraction * 100)) % Original")
         .accessibilityAdjustableAction { direction in
             switch direction {
-            case .increment: fraction = min(fraction + 0.1, 1)
-            case .decrement: fraction = max(fraction - 0.1, 0)
+            case .increment: fraction = min(fraction + 0.05, 1)
+            case .decrement: fraction = max(fraction - 0.05, 0)
             @unknown default: break
             }
         }
@@ -1224,19 +1233,8 @@ private struct BulkStage: View {
     }
 
     private func chooseFolderAndSave() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.prompt = String(localized: "Hier sichern")
-        panel.message = String(localized: "Ordner für die komprimierten PDFs wählen")
-        guard panel.runModal() == .OK, let folder = panel.url else { return }
-        do {
-            _ = try viewModel.saveAllBulk(to: folder)
-        } catch {
-            // Teilerfolge stehen in bulkSavedURLs; der Fehler nennt den Rest.
-            saveError = error.localizedDescription
-        }
+        // Teilerfolge stehen in bulkSavedURLs; der Fehler nennt den Rest.
+        if let error = viewModel.saveAllBulkWithPanel() { saveError = error }
     }
 }
 
