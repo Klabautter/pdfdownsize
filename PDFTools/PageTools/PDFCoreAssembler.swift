@@ -86,6 +86,45 @@ enum PDFCoreAssembler {
         }
     }
 
+    /// Masterplan E1: Alle Seiten aus EINER Quelle – Umbau im Quelldokument,
+    /// der Katalog (Tags, Anhänge, XMP, Ebenen, Verschlüsselung) bleibt.
+    static func writeSingleSource(plan: PageAssemblyPlan, to outputURL: URL,
+                                  password: String? = nil,
+                                  onPage: ((Int, Int) -> Void)? = nil,
+                                  shouldContinue: (() -> Bool)? = nil) throws {
+        guard let source = plan.pages.first?.sourceURL else { throw PDFCoreAssemblerError.emptyPlan }
+        let box = CallbackBox(onPage: onPage, shouldContinue: shouldContinue)
+        let indices = plan.pages.map { Int32($0.sourcePageIndex) }
+        let rotations = plan.pages.map { Int32($0.rotation) }
+        let status = indices.withUnsafeBufferPointer { idx in
+            rotations.withUnsafeBufferPointer { rot in
+                pdfcore_rewrite_single_source(
+                    source.path, password, idx.baseAddress, rot.baseAddress,
+                    Int32(plan.pages.count), outputURL.path,
+                    { context, done, total in
+                        guard let context else { return }
+                        Unmanaged<CallbackBox>.fromOpaque(context).takeUnretainedValue()
+                            .report(Int(done), Int(total))
+                    },
+                    { context in
+                        guard let context else { return 1 }
+                        return Unmanaged<CallbackBox>.fromOpaque(context).takeUnretainedValue()
+                            .wantsToContinue() ? 1 : 0
+                    },
+                    Unmanaged.passUnretained(box).toOpaque())
+            }
+        }
+        withExtendedLifetime(box) {}
+        switch UInt32(bitPattern: status) {
+        case PDFCORE_OK.rawValue: return
+        case PDFCORE_ERR_CANCELLED.rawValue: throw CancellationError()
+        case PDFCORE_ERR_CHECK_FAILED.rawValue: throw PDFCoreAssemblerError.invalidPageIndex
+        case PDFCORE_ERR_OPEN.rawValue, PDFCORE_ERR_PASSWORD.rawValue:
+            throw PDFCoreAssemblerError.openFailed(code: UInt32(bitPattern: status))
+        default: throw PDFCoreAssemblerError.internalError
+        }
+    }
+
     /// Hält Fortschritts- und Abbruch-Closure für die Dauer des C-Aufrufs.
     private final class CallbackBox {
         private let onPage: ((Int, Int) -> Void)?

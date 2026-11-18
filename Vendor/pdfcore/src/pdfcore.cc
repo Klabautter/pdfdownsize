@@ -632,6 +632,7 @@ int pdfcore_reencrypt_like(const char *plain_path, const char *original_path,
 }
 
 
+
 // ============================================================================
 // Epic Phase 7 – read-only semantische Inspection
 // ============================================================================
@@ -2166,6 +2167,172 @@ private:
 };
 
 } // namespace
+
+/* Masterplan E1: Ein-Quellen-Operation IM Quelldokument.
+ *
+ * Vorher baute write_pages_impl IMMER ein leeres Dokument auf und kopierte
+ * nur Seiten, AcroForm und Ziele – Tags, Anhänge, XMP, Ebenen und
+ * Verschlüsselung gingen verloren, auch wenn nur eine Seite gedreht wurde.
+ * Hier bleibt der Katalog, wie er ist: Seiten werden entfernt, umgeordnet,
+ * gedreht oder (bei Mehrfachnutzung) flach kopiert. Felder, deren Widgets
+ * nur auf entfernten Seiten lagen, fliegen aus /AcroForm. Lesezeichen und
+ * Ziele auf entfernte Seiten bereinigt danach der vorhandene Nachlauf
+ * (remove_dangling_links). Die Verschlüsselung bleibt (qpdf-Standard).
+ * Fortschritt und Abbruch wie write_pages_impl: je Seite on_page, vor jeder
+ * Seite und vor jedem Ausgabeblock should_continue; bei Abbruch bleibt das
+ * Ziel unberührt und die Zwischendatei verschwindet. */
+int pdfcore_rewrite_single_source(const char *source_path, const char *password,
+                                  const int *page_indices, const int *rotations,
+                                  int count, const char *output_path,
+                                  void (*on_page)(void *, int, int),
+                                  int (*should_continue)(void *), void *context)
+{
+    PDFCORE_GUARD_BEGIN
+    if (!source_path || !page_indices || !output_path || count <= 0) {
+        return PDFCORE_ERR_OPEN;
+    }
+    pdfcore_status status = PDFCORE_OK;
+    std::unique_ptr<pdfcore_document_t, void (*)(pdfcore_document_t*)> doc(
+        open_impl(source_path, password, &status), pdfcore_close);
+    if (!doc) { return status; }
+
+    QPDFPageDocumentHelper pdh(doc->qpdf);
+    std::vector<QPDFPageObjectHelper> pages = pdh.getAllPages();
+    int const total = static_cast<int>(pages.size());
+    for (int k = 0; k < count; ++k) {
+        if (page_indices[k] < 0 || page_indices[k] >= total) {
+            return PDFCORE_ERR_CHECK_FAILED;
+        }
+    }
+
+    // Zielreihenfolge; eine zweite Nutzung derselben Seite wird flach kopiert.
+    std::vector<QPDFPageObjectHelper> order;
+    std::set<int> used;
+    for (int k = 0; k < count; ++k) {
+        QPDFPageObjectHelper page = pages[static_cast<size_t>(page_indices[k])];
+        if (!used.insert(page_indices[k]).second) { page = page.shallowCopyPage(); }
+        int rotation = rotations ? rotations[k] : 0;
+        if (rotation % 360 != 0) { page.rotatePage(rotation, /*relative=*/true); }
+        order.push_back(page);
+    }
+
+    // Felder, deren Widgets ausschließlich auf entfernten Seiten liegen.
+    QPDFAcroFormDocumentHelper afdh(doc->qpdf);
+    std::set<QPDFObjGen> keptFields;
+    std::set<QPDFObjGen> candidateFields;
+    for (int i = 0; i < total; ++i) {
+        bool kept = used.count(i) != 0;
+        for (auto& widget : afdh.getWidgetAnnotationsForPage(pages[static_cast<size_t>(i)])) {
+            QPDFObjGen field = afdh.getFieldForAnnotation(widget).getObjectHandle().getObjGen();
+            (kept ? keptFields : candidateFields).insert(field);
+        }
+    }
+    std::set<QPDFObjGen> removedFields;
+    for (auto const& field : candidateFields) {
+        if (!keptFields.count(field)) { removedFields.insert(field); }
+    }
+
+    // Seitenbaum neu ordnen: alle heraus, Zielreihenfolge hinein.
+    for (auto& page : pages) { pdh.removePage(page); }
+    int done = 0;
+    for (auto& page : order) {
+        if (should_continue && !should_continue(context)) { return PDFCORE_ERR_CANCELLED; }
+        pdh.addPage(page, /*first=*/false);
+        ++done;
+        if (on_page) { on_page(context, done, count); }
+    }
+    if (!removedFields.empty()) { afdh.removeFormFields(removedFields); }
+
+    // Lesezeichen auf entfernte Seiten aushängen. Die Geschwister werden aus
+    // dem tatsächlichen /First→/Next-Durchlauf neu verkettet (/Prev, /Last,
+    // /Count): PDFKit schreibt Ketten, deren /Prev und /Last auf Kopien
+    // zeigen – wer dort /Prev folgt, hängt den falschen Knoten aus.
+    // Einträge ohne auflösbares Ziel bleiben.
+    std::set<QPDFObjGen> keptPages;
+    for (auto& page : order) { keptPages.insert(page.getObjectHandle().getObjGen()); }
+    QPDFOutlineDocumentHelper odh(doc->qpdf);
+    auto targetIsRemoved = [&](QPDFObjectHandle item) {
+        QPDFObjectHandle dest = item.getKey("/Dest");
+        if (dest.isNull()) {
+            QPDFObjectHandle action = item.getKey("/A");
+            if (action.isDictionary() && action.getKey("/S").isName()
+                && action.getKey("/S").getName() == "/GoTo") {
+                dest = action.getKey("/D");
+            }
+        }
+        if (dest.isName() || dest.isString()) { dest = odh.resolveNamedDest(dest); }
+        if (dest.isDictionary() && dest.hasKey("/D")) { dest = dest.getKey("/D"); }
+        QPDFObjectHandle target = (dest.isArray() && dest.getArrayNItems() > 0)
+            ? dest.getArrayItem(0) : QPDFObjectHandle::newNull();
+        return target.isDictionary() && !keptPages.count(target.getObjGen());
+    };
+    std::vector<QPDFObjectHandle> parents;
+    QPDFObjectHandle outlines = doc->qpdf.getRoot().getKey("/Outlines");
+    if (outlines.isDictionary()) { parents.push_back(outlines); }
+    std::set<QPDFObjGen> visited;
+    while (!parents.empty()) {
+        QPDFObjectHandle parent = parents.back();
+        parents.pop_back();
+        std::vector<QPDFObjectHandle> kept;
+        for (QPDFObjectHandle item = parent.getKey("/First"); item.isDictionary();
+             item = item.getKey("/Next")) {
+            if (item.isIndirect() && !visited.insert(item.getObjGen()).second) { break; }
+            if (targetIsRemoved(item)) { continue; }
+            kept.push_back(item);
+            if (item.getKey("/First").isDictionary()) { parents.push_back(item); }
+        }
+        for (size_t k = 0; k < kept.size(); ++k) {
+            kept[k].replaceKey("/Parent", parent);
+            if (k > 0) { kept[k].replaceKey("/Prev", kept[k - 1]); } else { kept[k].removeKey("/Prev"); }
+            if (k + 1 < kept.size()) { kept[k].replaceKey("/Next", kept[k + 1]); } else { kept[k].removeKey("/Next"); }
+        }
+        if (kept.empty()) {
+            parent.removeKey("/First");
+            parent.removeKey("/Last");
+            if (parent.hasKey("/Count")) { parent.replaceKey("/Count", QPDFObjectHandle::newInteger(0)); }
+        } else {
+            parent.replaceKey("/First", kept.front());
+            parent.replaceKey("/Last", kept.back());
+            // Sichtbare Nachkommen zählen wir nicht neu; offen/zu (Vorzeichen)
+            // bleibt, der Betrag ist die Zahl der direkten Kinder.
+            QPDFObjectHandle count = parent.getKey("/Count");
+            long long n = static_cast<long long>(kept.size());
+            if (count.isInteger()) {
+                parent.replaceKey("/Count", QPDFObjectHandle::newInteger(count.getIntValue() < 0 ? -n : n));
+            }
+        }
+    }
+
+    std::string tmp = std::string(output_path) + ".pdfcore-tmp";
+    FILE *tmpFile = QUtil::safe_fopen(tmp.c_str(), "wb");
+    bool cancelled = false;
+    try {
+        Pl_StdioFile fileOut("pdfcore tmp output", tmpFile);
+        Pl_CancelCheck cancelCheck(&fileOut, should_continue, context);
+        QPDFWriter writer(doc->qpdf);
+        writer.setOutputPipeline(&cancelCheck);
+        std::shared_lock<std::shared_mutex> level(flate_level_mutex());
+        writer.write();
+    } catch (const WritePagesCancelled&) {
+        cancelled = true;
+    } catch (...) {
+        fclose(tmpFile);
+        std::remove(tmp.c_str());
+        throw;
+    }
+    fclose(tmpFile);
+    if (cancelled) {
+        std::remove(tmp.c_str());
+        return PDFCORE_ERR_CANCELLED;
+    }
+    std::remove(output_path);
+    if (std::rename(tmp.c_str(), output_path) != 0) {
+        std::remove(tmp.c_str());
+        return PDFCORE_ERR_INTERNAL;
+    }
+    return PDFCORE_OK;
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
+}
 
 static int write_pages_impl(const char *const *source_paths,
                             const int *page_indices,

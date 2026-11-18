@@ -270,6 +270,15 @@ int pdfcore_decrypt_to(const char *path, const char *password, const char *out_p
 int pdfcore_reencrypt_like(const char *plain_path, const char *original_path,
                            const char *password, const char *out_path);
 
+/// Masterplan E1: Seiten EINER Quelle im Quelldokument entfernen, ordnen,
+/// drehen (relativ) und mehrfach nutzen – Katalog (Tags, Anhänge, XMP,
+/// Ebenen, Verschlüsselung) bleibt erhalten. `password` darf NULL sein.
+int pdfcore_rewrite_single_source(const char *source_path, const char *password,
+                                  const int *page_indices, const int *rotations,
+                                  int count, const char *output_path,
+                                  void (*on_page)(void *, int, int),
+                                  int (*should_continue)(void *), void *context);
+
 /// Schreibt das (ggf. sanitisierte) Dokument neu. 0=ok.
 int pdfcore_save(pdfcore_document_t *doc, const char *path);
 

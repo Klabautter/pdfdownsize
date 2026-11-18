@@ -87,7 +87,11 @@ struct PolicyHardeningTests {
         return url
     }
 
-    @Test func attachmentsAreDroppedByDocumentedPolicy() async throws {
+    /// Masterplan E1: Eine Ein-Quellen-Operation arbeitet im Quelldokument –
+    /// der Anhang bleibt. Vorher galt „Anhänge fallen beim Assembly weg“.
+    /// Bei mehreren Quellen bleibt der Neuaufbau (und damit der Verlust,
+    /// den E2 im Hinweis vor „PDF erstellen“ nennt).
+    @Test func attachmentsSurviveSingleSourceButNotMultiSource() async throws {
         let url = try attachmentFixture()
         defer { try? FileManager.default.removeItem(at: url) }
 
@@ -98,19 +102,28 @@ struct PolicyHardeningTests {
 
         let doc = try #require(PDFDocument(url: url))
         let source = SourceDocument(url: url, pageCount: doc.pageCount)
-        let plan = PageAssemblyPlan(pages: [
+        let single = PageAssemblyPlan(pages: [
             PageItem(source: source, pageIndex: 0).assemblyItem,
         ])
-
         let out = FileManager.default.temporaryDirectory
             .appendingPathComponent("p15-\(UUID().uuidString).pdf")
         defer { try? FileManager.default.removeItem(at: out) }
-        try await PageAssemblyService.assemble(plan: plan, to: out, progress: { _ in })
+        try await PageAssemblyService.assemble(plan: single, to: out, progress: { _ in })
+        let coreAfter = try #require(try? PDFCoreDocument(path: out.path))
+        #expect(coreAfter.attachmentCount == 1, "Ein-Quellen-Operation hat den Anhang verloren")
 
-        let openedAfter = try? PDFCoreDocument(path: out.path)
-        let coreAfter = try #require(openedAfter)
-        // Policy: Attachments werden beim Assembly NICHT übernommen (dokumentiert).
-        #expect(coreAfter.attachmentCount == 0)
+        let other = try PDFFixtures.vectorTextPDF(lines: 2)
+        defer { try? FileManager.default.removeItem(at: other) }
+        let multi = PageAssemblyPlan(pages: [
+            PageItem(source: source, pageIndex: 0).assemblyItem,
+            PageItem(source: SourceDocument(url: other, pageCount: 1), pageIndex: 0).assemblyItem,
+        ])
+        let outMulti = FileManager.default.temporaryDirectory
+            .appendingPathComponent("p15-multi-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: outMulti) }
+        try await PageAssemblyService.assemble(plan: multi, to: outMulti, progress: { _ in })
+        let coreMulti = try #require(try? PDFCoreDocument(path: outMulti.path))
+        #expect(coreMulti.attachmentCount == 0)
     }
 
     // MARK: Phase 16 – Metadata-Producer deterministisch

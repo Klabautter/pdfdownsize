@@ -140,7 +140,7 @@ enum CompressionError: LocalizedError {
         case .qpdfMissing:
             // Endnutzer soll niemals Homebrew brauchen (Review P0.2).
             #if DEBUG
-            return String(localized: "qpdf fehlt. Vendored Helper prüfen (Vendor/qpdf) oder brew install qpdf.")
+            return String(localized: "qpdf fehlt im App-Paket. Bitte PDFdownsize neu installieren.")
             #else
             return String(localized: "Die Kompressionskomponente fehlt oder ist beschädigt. Bitte installiere PDFdownsize erneut.")
             #endif

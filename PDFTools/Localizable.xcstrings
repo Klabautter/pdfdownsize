@@ -17,6 +17,54 @@
         }
       }
     },
+    " auf Seite %lld": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " auf Seite %lld"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " on page %lld"
+          }
+        }
+      }
+    },
+    " auf den Seiten %@": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " auf den Seiten %@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " on pages %@"
+          }
+        }
+      }
+    },
+    " auf den Seiten %@ …": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " auf den Seiten %@ …"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": " on pages %@ …"
+          }
+        }
+      }
+    },
     "%@  %@": {
       "localizations": {
         "de": {
@@ -49,6 +97,22 @@
         }
       }
     },
+    "%@ kleiner": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ kleiner"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ smaller"
+          }
+        }
+      }
+    },
     "%@ px": {
       "localizations": {
         "de": {
@@ -77,6 +141,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "%@ in total"
+          }
+        }
+      }
+    },
+    "%@ · Alles bleibt auf diesem Mac": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · Alles bleibt auf diesem Mac"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · Everything stays on this Mac"
           }
         }
       }
@@ -309,6 +389,22 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "%lld Dokumente": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld Dokumente"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld documents"
           }
         }
       }
@@ -665,6 +761,22 @@
         }
       }
     },
+    "%lld von %lld Seiten werden erkannt, die übrigen haben schon Text.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld von %2$lld Seiten werden erkannt, die übrigen haben schon Text."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld of %2$lld pages will be recognized, the others already have text."
+          }
+        }
+      }
+    },
     "%lld von %lld komprimiert": {
       "localizations": {
         "de": {
@@ -741,6 +853,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "+%lld"
+          }
+        }
+      }
+    },
+    "1 Seite erkannt": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 Seite erkannt"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 page recognized"
+          }
+        }
+      }
+    },
+    "1 hatte schon Text": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 hatte schon Text"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 already had text"
+          }
+        }
+      }
+    },
+    "1 von %lld Seiten wird erkannt, die übrigen haben schon Text.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 von %lld Seiten wird erkannt, die übrigen haben schon Text."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 of %lld pages will be recognized, the others already have text."
           }
         }
       }
@@ -3474,6 +3634,22 @@
         }
       }
     },
+    "Kleinstmöglich in diesem Modus: %@ – Ziel war %@": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kleinstmöglich in diesem Modus: %@ – Ziel war %@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Smallest possible in this mode: %@ – target was %@"
+          }
+        }
+      }
+    },
     "Kompatibilität": {
       "localizations": {
         "de": {
@@ -3634,6 +3810,22 @@
         }
       }
     },
+    "Legt eine unsichtbare Textebene über gescannte Seiten. Links, Formulare und Lesezeichen bleiben erhalten; Seiten mit vorhandenem Text werden übersprungen.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Legt eine unsichtbare Textebene über gescannte Seiten. Links, Formulare und Lesezeichen bleiben erhalten; Seiten mit vorhandenem Text werden übersprungen."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Adds an invisible text layer to scanned pages. Links, forms and bookmarks are kept; pages that already have text are skipped."
+          }
+        }
+      }
+    },
     "Linearisiert das PDF, damit die erste Seite im Browser sofort erscheint.": {
       "localizations": {
         "de": {
@@ -3726,6 +3918,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "MB"
+          }
+        }
+      }
+    },
+    "Macht gescannte Seiten durchsuchbar – das Aussehen bleibt unverändert.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Macht gescannte Seiten durchsuchbar – das Aussehen bleibt unverändert."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Makes scanned pages searchable – their appearance stays the same."
           }
         }
       }
@@ -3966,6 +4174,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Discard unsaved result?"
+          }
+        }
+      }
+    },
+    "Nicht komprimiert: Das Ergebnis hätte%@ Text verloren. Die Datei bleibt unverändert.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht komprimiert: Das Ergebnis hätte%@ Text verloren. Die Datei bleibt unverändert."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not compressed: the result would have lost text%@. The file stays unchanged."
+          }
+        }
+      }
+    },
+    "Nicht komprimiert: Das Ergebnis wich%@ vom Original ab. Die Datei bleibt unverändert.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht komprimiert: Das Ergebnis wich%@ vom Original ab. Die Datei bleibt unverändert."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not compressed: the result differed from the original%@. The file stays unchanged."
           }
         }
       }
@@ -6195,6 +6435,22 @@
         }
       }
     },
+    "Ziel %@ – wird vermutlich nicht ganz erreicht": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ziel %@ – wird vermutlich nicht ganz erreicht"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Target %@ – probably not quite reachable"
+          }
+        }
+      }
+    },
     "Zielgröße wird angepasst …": {
       "localizations": {
         "de": {
@@ -6500,6 +6756,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "mozJPEG: smaller files at the same quality. System: the macOS encoder."
+          }
+        }
+      }
+    },
+    "qpdf fehlt im App-Paket. Bitte PDFdownsize neu installieren.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "qpdf fehlt im App-Paket. Bitte PDFdownsize neu installieren."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "qpdf is missing from the app bundle. Please reinstall PDFdownsize."
           }
         }
       }

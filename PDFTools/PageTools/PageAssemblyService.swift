@@ -76,13 +76,22 @@ enum PageAssemblyService {
         // `Task.isCancelled` sieht dort denselben Task wie dieser Funktions-
         // rumpf. Die Bridge wirft bei `false` einen eigenen Statuscode, den
         // `PDFCoreAssembler` als `CancellationError` weitergibt.
-        try PDFCoreAssembler.write(
-            plan: plan, to: outputURL, removeDanglingLinks: true,
-            onPage: { done, total in
-                guard !Task.isCancelled else { return }
-                progress(Double(done) / Double(max(total, 1)))
-            },
-            shouldContinue: { !Task.isCancelled })
+        // Masterplan E1: Stammen alle Seiten aus EINER echten PDF, wird im
+        // Quelldokument umgebaut – der Katalog bleibt. Der Neuaufbau bleibt
+        // für echte Mehr-Quellen-Fälle (und aus Bildern erzeugte Seiten).
+        let singleSource = sourceURLsInOrder.count == 1
+            && !sourceURLsInOrder[0].path.hasPrefix(ImageImporter.sessionDirectory.path)
+        let onPage: (Int, Int) -> Void = { done, total in
+            guard !Task.isCancelled else { return }
+            progress(Double(done) / Double(max(total, 1)))
+        }
+        if singleSource {
+            try PDFCoreAssembler.writeSingleSource(plan: plan, to: outputURL,
+                                                   onPage: onPage, shouldContinue: { !Task.isCancelled })
+        } else {
+            try PDFCoreAssembler.write(plan: plan, to: outputURL, removeDanglingLinks: true,
+                                       onPage: onPage, shouldContinue: { !Task.isCancelled })
+        }
         try bailIfCancelled()
 
         // Nachsorge an der fertigen Datei: Enthält sie noch kaputte interne
@@ -108,8 +117,9 @@ enum PageAssemblyService {
         // Phase 11 – dangling interne Links entfernen (Bridge, schreibt bei Änderung).
         autoreleasepool { Self.sanitizeWrittenOutput(at: outputURL) }
 
-        // Phase 12 – Outline-Rebuild (PDFKit-Schritt).
-        if sourceURLsInOrder.count == 1 {
+        // Phase 12 – Outline-Rebuild (PDFKit-Schritt). Im Ein-Quellen-Umbau
+        // (E1) bleibt die Gliederung der Quelle samt Unterebenen erhalten.
+        if sourceURLsInOrder.count == 1 && !singleSource {
             autoreleasepool {
                 applyTopLevelOutlines(specs: outlineSpecsPerSource.first ?? [],
                                       plan: plan,
