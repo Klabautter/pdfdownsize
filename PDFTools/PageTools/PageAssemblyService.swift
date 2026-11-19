@@ -85,9 +85,21 @@ enum PageAssemblyService {
             guard !Task.isCancelled else { return }
             progress(Double(done) / Double(max(total, 1)))
         }
+        // Masterplan N1: Meldet der Kern, dass der Umbau im Quelldokument an
+        // dieser Datei nicht sauber gelingt (entfernte Seiten blieben
+        // erreichbar, oder qpdf scheiterte am Seitenbaum), wird neu aufgebaut
+        // wie in 1.0.9 – lieber Katalogeinträge verlieren als gelöschte
+        // Seiten ausliefern.
+        var rebuiltInPlace = false
         if singleSource {
-            try PDFCoreAssembler.writeSingleSource(plan: plan, to: outputURL,
-                                                   onPage: onPage, shouldContinue: { !Task.isCancelled })
+            do {
+                try PDFCoreAssembler.writeSingleSource(plan: plan, to: outputURL,
+                                                       onPage: onPage, shouldContinue: { !Task.isCancelled })
+                rebuiltInPlace = true
+            } catch PDFCoreAssemblerError.needsRebuild {
+                try PDFCoreAssembler.write(plan: plan, to: outputURL, removeDanglingLinks: true,
+                                           onPage: onPage, shouldContinue: { !Task.isCancelled })
+            }
         } else {
             try PDFCoreAssembler.write(plan: plan, to: outputURL, removeDanglingLinks: true,
                                        onPage: onPage, shouldContinue: { !Task.isCancelled })
@@ -119,7 +131,7 @@ enum PageAssemblyService {
 
         // Phase 12 – Outline-Rebuild (PDFKit-Schritt). Im Ein-Quellen-Umbau
         // (E1) bleibt die Gliederung der Quelle samt Unterebenen erhalten.
-        if sourceURLsInOrder.count == 1 && !singleSource {
+        if sourceURLsInOrder.count == 1 && !rebuiltInPlace {
             autoreleasepool {
                 applyTopLevelOutlines(specs: outlineSpecsPerSource.first ?? [],
                                       plan: plan,

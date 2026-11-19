@@ -8,6 +8,8 @@
 #include <qpdf/QPDFOutlineDocumentHelper.hh>
 #include <qpdf/QPDFAcroFormDocumentHelper.hh>
 #include <qpdf/QPDFPageLabelDocumentHelper.hh>
+#include <qpdf/QPDFNameTreeObjectHelper.hh>   /* Masterplan N1 */
+#include <qpdf/QPDFNumberTreeObjectHelper.hh> /* Masterplan N1 */
 #include <qpdf/Pl_Buffer.hh>
 #include <qpdf/Pl_Discard.hh>
 #include <qpdf/Pl_Flate.hh>   /* Phase V2-9 – compression level des Writers */
@@ -2300,6 +2302,295 @@ private:
 
 } // namespace
 
+/* Masterplan N1 (Prüfung 19.11.2026): Entfernte Seiten verlassen die Datei.
+ *
+ * Befund: Der Umbau nahm Seiten nur aus /Kids. Benannte Ziele, Strukturbaum
+ * (/Pg), /OpenAction und Widgets hierarchischer Felder zeigten weiter auf
+ * die Seitenobjekte – QPDFWriter schreibt alles Erreichbare, also blieben
+ * Inhalt, Bilder und Texte gelöschter Seiten in der Ausgabe.
+ *
+ * Zwei Ebenen:
+ *   1. Verweise aufräumen (Links, /OpenAction, Ziele, Strukturbaum, Felder),
+ *      damit nichts ins Leere zeigt.
+ *   2. Die entfernten Seitenobjekte selbst leeren (replaceObject → null).
+ *      Das ist die Garantie: Welcher Verweis auch übersehen wurde, er
+ *      erreicht keinen Inhalt mehr. */
+namespace {
+
+/// Zielseite eines Ziels: `[seite …]` oder `<< /D [seite …] >>`.
+QPDFObjectHandle n1_dest_page(QPDFObjectHandle dest)
+{
+    if (dest.isDictionary() && dest.hasKey("/D")) { dest = dest.getKey("/D"); }
+    if (dest.isArray() && dest.getArrayNItems() > 0) { return dest.getArrayItem(0); }
+    return QPDFObjectHandle::newNull();
+}
+
+bool n1_is_removed(QPDFObjectHandle page, std::set<QPDFObjGen> const& removed)
+{
+    return page.isIndirect() && page.isDictionary() && removed.count(page.getObjGen()) != 0;
+}
+
+bool n1_name_is(QPDFObjectHandle obj, char const* name)
+{
+    return obj.isName() && obj.getName() == name;
+}
+
+/// Ziel eines Links, Lesezeichens oder einer /OpenAction: /Dest, sonst
+/// /A mit /S /GoTo → /D; benannte Ziele werden aufgelöst.
+QPDFObjectHandle n1_resolved_dest(QPDFObjectHandle holder, QPDFOutlineDocumentHelper& odh)
+{
+    QPDFObjectHandle dest = QPDFObjectHandle::newNull();
+    if (holder.isArray()) {
+        dest = holder;
+    } else if (holder.isDictionary()) {
+        dest = holder.getKey("/Dest");
+        if (dest.isNull()) {
+            // Anmerkung/Lesezeichen tragen die Aktion unter /A; /OpenAction
+            // IST die Aktion.
+            QPDFObjectHandle action = holder.getKey("/A");
+            if (!action.isDictionary()) { action = holder; }
+            if (n1_name_is(action.getKey("/S"), "/GoTo")) { dest = action.getKey("/D"); }
+        }
+    }
+    if (dest.isName() || dest.isString()) { dest = odh.resolveNamedDest(dest); }
+    return dest;
+}
+
+/// Strukturbaum: Elemente, deren Inhalt ausschließlich auf entfernten
+/// Seiten lag, fallen heraus (sie tragen /ActualText, /Alt, /E – Text der
+/// gelöschten Seite). Rekursion mit Tiefengrenze und Besucht-Set (D1).
+struct N1StructPruner {
+    std::set<QPDFObjGen> const& removed;
+    std::set<QPDFObjGen> visited;
+    std::vector<QPDFObjGen> dropped;
+    static constexpr int maxDepth = 200;
+
+    /// true = das Element bleibt.
+    bool prune(QPDFObjectHandle elem, QPDFObjectHandle inheritedPg, int depth)
+    {
+        if (!elem.isDictionary() || depth > maxDepth) { return true; }
+        if (elem.isIndirect() && !visited.insert(elem.getObjGen()).second) { return true; }
+        QPDFObjectHandle ownPg = elem.getKey("/Pg");
+        QPDFObjectHandle effPg = ownPg.isDictionary() ? ownPg : inheritedPg;
+        QPDFObjectHandle k = elem.getKey("/K");
+        std::vector<QPDFObjectHandle> kids;
+        if (k.isArray()) {
+            int n = k.getArrayNItems();
+            for (int i = 0; i < n; ++i) { kids.push_back(k.getArrayItem(i)); }
+        } else if (!k.isNull()) {
+            kids.push_back(k);
+        }
+        std::vector<QPDFObjectHandle> kept;
+        for (auto& kid : kids) {
+            bool keep = true;
+            if (kid.isInteger()) {
+                keep = !n1_is_removed(effPg, removed);            // MCID auf der Seite des Elements
+            } else if (kid.isDictionary()) {
+                QPDFObjectHandle type = kid.getKey("/Type");
+                if (n1_name_is(type, "/MCR") || n1_name_is(type, "/OBJR")) {
+                    QPDFObjectHandle pg = kid.getKey("/Pg");
+                    keep = !n1_is_removed(pg.isDictionary() ? pg : effPg, removed);
+                } else {
+                    keep = prune(kid, effPg, depth + 1);
+                    if (!keep && kid.isIndirect()) { dropped.push_back(kid.getObjGen()); }
+                }
+            }
+            if (keep) { kept.push_back(kid); }
+        }
+        if (kept.size() != kids.size()) {
+            if (kept.empty()) { elem.removeKey("/K"); }
+            else { elem.replaceKey("/K", QPDFObjectHandle::newArray(kept)); }
+        }
+        if (n1_is_removed(ownPg, removed)) { elem.removeKey("/Pg"); }
+        // Mit Kindern: bleibt, solange eines bleibt. Ohne Kinder: gehört zu
+        // seiner (ggf. geerbten) Seite.
+        return kids.empty() ? !n1_is_removed(effPg, removed) : !kept.empty();
+    }
+};
+
+/// `child` aus dem /Kids-Array von `parent` nehmen. true, wenn danach leer.
+bool n1_erase_kid(QPDFObjectHandle parent, QPDFObjGen child)
+{
+    QPDFObjectHandle kids = parent.getKey("/Kids");
+    if (!kids.isArray()) { return false; }
+    std::vector<QPDFObjectHandle> rest;
+    int n = kids.getArrayNItems();
+    for (int i = 0; i < n; ++i) {
+        QPDFObjectHandle kid = kids.getArrayItem(i);
+        if (kid.isIndirect() && kid.getObjGen() == child) { continue; }
+        rest.push_back(kid);
+    }
+    parent.replaceKey("/Kids", QPDFObjectHandle::newArray(rest));
+    return rest.empty();
+}
+
+/// Alles, was auf die entfernten Seiten zeigt, kappen und die Seiten leeren.
+/// `removedPages` sind die Handles der Seiten, die im Zielplan nicht mehr
+/// vorkommen; `kept` die Seiten der Ausgabe (inkl. flacher Kopien).
+void n1_detach_removed_pages(QPDF& qpdf,
+                             std::vector<QPDFObjectHandle> const& removedPages,
+                             std::vector<QPDFPageObjectHelper>& kept,
+                             std::set<QPDFObjGen> const& keptFields,
+                             std::set<QPDFObjGen> const& removedFields)
+{
+    std::set<QPDFObjGen> removed;
+    for (auto const& page : removedPages) { removed.insert(page.getObjGen()); }
+    QPDFObjectHandle root = qpdf.getRoot();
+    QPDFOutlineDocumentHelper odh(qpdf);
+    auto targetsRemoved = [&](QPDFObjectHandle holder) {
+        return n1_is_removed(n1_dest_page(n1_resolved_dest(holder, odh)), removed);
+    };
+
+    // 1. Links der behaltenen Seiten, deren Ziel entfernt ist. Muss VOR dem
+    //    Aufräumen der Ziele laufen – benannte Ziele werden hier aufgelöst.
+    for (auto& page : kept) {
+        QPDFObjectHandle po = page.getObjectHandle();
+        QPDFObjectHandle annots = po.getKey("/Annots");
+        if (!annots.isArray()) { continue; }
+        std::vector<QPDFObjectHandle> rest;
+        int n = annots.getArrayNItems();
+        for (int i = 0; i < n; ++i) {
+            QPDFObjectHandle annot = annots.getArrayItem(i);
+            if (annot.isDictionary() && n1_name_is(annot.getKey("/Subtype"), "/Link")
+                && targetsRemoved(annot)) { continue; }
+            rest.push_back(annot);
+        }
+        if (static_cast<int>(rest.size()) != n) {
+            po.replaceKey("/Annots", QPDFObjectHandle::newArray(rest));
+        }
+    }
+
+    // 2. /OpenAction auf eine entfernte Seite.
+    QPDFObjectHandle openAction = root.getKey("/OpenAction");
+    if (!openAction.isNull() && targetsRemoved(openAction)) { root.removeKey("/OpenAction"); }
+
+    // 3. Benannte Ziele: Namensbaum und altes /Dests-Wörterbuch.
+    QPDFObjectHandle names = root.getKey("/Names");
+    if (names.isDictionary() && names.getKey("/Dests").isDictionary()) {
+        QPDFNameTreeObjectHelper tree(names.getKey("/Dests"), qpdf);
+        std::vector<std::string> drop;
+        for (auto const& entry : tree) {
+            if (n1_is_removed(n1_dest_page(entry.second), removed)) { drop.push_back(entry.first); }
+        }
+        for (auto const& key : drop) { tree.remove(key); }
+    }
+    QPDFObjectHandle oldDests = root.getKey("/Dests");
+    if (oldDests.isDictionary()) {
+        for (auto const& key : oldDests.getKeys()) {
+            if (n1_is_removed(n1_dest_page(oldDests.getKey(key)), removed)) { oldDests.removeKey(key); }
+        }
+    }
+
+    // 4. Strukturbaum: Elemente der entfernten Seiten, ParentTree, IDTree.
+    QPDFObjectHandle structRoot = root.getKey("/StructTreeRoot");
+    if (structRoot.isDictionary()) {
+        N1StructPruner pruner{removed, {}, {}};
+        pruner.prune(structRoot, QPDFObjectHandle::newNull(), 0);
+        std::set<QPDFObjGen> droppedSet(pruner.dropped.begin(), pruner.dropped.end());
+        if (structRoot.getKey("/ParentTree").isDictionary()) {
+            QPDFNumberTreeObjectHelper parents(structRoot.getKey("/ParentTree"), qpdf);
+            for (auto const& page : removedPages) {
+                QPDFObjectHandle key = page.getKey("/StructParents");
+                if (key.isInteger()) { parents.remove(key.getIntValue()); }
+                QPDFObjectHandle annots = page.getKey("/Annots");
+                int n = annots.isArray() ? annots.getArrayNItems() : 0;
+                for (int i = 0; i < n; ++i) {
+                    QPDFObjectHandle annot = annots.getArrayItem(i);
+                    QPDFObjectHandle one = annot.isDictionary() ? annot.getKey("/StructParent")
+                                                                : QPDFObjectHandle::newNull();
+                    if (one.isInteger()) { parents.remove(one.getIntValue()); }
+                }
+            }
+        }
+        if (structRoot.getKey("/IDTree").isDictionary() && !droppedSet.empty()) {
+            QPDFNameTreeObjectHelper ids(structRoot.getKey("/IDTree"), qpdf);
+            std::vector<std::string> drop;
+            for (auto const& entry : ids) {
+                QPDFObjectHandle value = entry.second;
+                if (value.isIndirect() && droppedSet.count(value.getObjGen())) { drop.push_back(entry.first); }
+            }
+            for (auto const& key : drop) { ids.remove(key); }
+        }
+        // Herausgefallene Elemente leeren: Ihr Text darf auch über einen
+        // übersehenen Verweis (/Ref, Attribute) nicht erreichbar bleiben.
+        for (auto const& og : droppedSet) { qpdf.replaceObject(og, QPDFObjectHandle::newNull()); }
+    }
+
+    // 5. Formularfelder. Felder ausschließlich auf entfernten Seiten hat der
+    //    Aufrufer bereits aus /Fields genommen (nur oberste Ebene). Hier:
+    //    hierarchische Felder aus dem /Kids ihres Elternknotens, leere
+    //    Elternknoten nach oben, /CO – und das Feld selbst leeren (sein /V
+    //    ist Inhalt der gelöschten Seite).
+    QPDFAcroFormDocumentHelper afdh(qpdf);
+    QPDFObjectHandle acroForm = root.getKey("/AcroForm");
+    for (auto const& og : removedFields) {
+        QPDFObjectHandle field = qpdf.getObject(og);
+        QPDFObjGen child = og;
+        QPDFObjectHandle parent = field.isDictionary() ? field.getKey("/Parent")
+                                                       : QPDFObjectHandle::newNull();
+        int guard = 0;
+        while (parent.isDictionary() && parent.isIndirect() && guard++ < 64) {
+            if (!n1_erase_kid(parent, child)) { break; }
+            child = parent.getObjGen();
+            QPDFObjectHandle next = parent.getKey("/Parent");
+            if (!next.isDictionary()) {
+                afdh.removeFormFields({child});     // leerer Wurzelknoten
+                break;
+            }
+            parent = next;
+        }
+    }
+    if (acroForm.isDictionary() && acroForm.getKey("/CO").isArray() && !removedFields.empty()) {
+        QPDFObjectHandle order = acroForm.getKey("/CO");
+        std::vector<QPDFObjectHandle> rest;
+        int n = order.getArrayNItems();
+        for (int i = 0; i < n; ++i) {
+            QPDFObjectHandle item = order.getArrayItem(i);
+            if (item.isIndirect() && removedFields.count(item.getObjGen())) { continue; }
+            rest.push_back(item);
+        }
+        acroForm.replaceKey("/CO", QPDFObjectHandle::newArray(rest));
+    }
+    // Widgets entfernter Seiten, deren Feld bleibt: aus dem /Kids des Feldes.
+    for (auto const& page : removedPages) {
+        QPDFObjectHandle annots = page.getKey("/Annots");
+        int n = annots.isArray() ? annots.getArrayNItems() : 0;
+        for (int i = 0; i < n; ++i) {
+            QPDFObjectHandle annot = annots.getArrayItem(i);
+            if (!annot.isDictionary() || !annot.isIndirect()
+                || !n1_name_is(annot.getKey("/Subtype"), "/Widget")) { continue; }
+            QPDFObjectHandle parent = annot.getKey("/Parent");
+            if (parent.isDictionary() && parent.isIndirect() && keptFields.count(parent.getObjGen())) {
+                n1_erase_kid(parent, annot.getObjGen());
+            }
+        }
+    }
+    for (auto const& og : removedFields) { qpdf.replaceObject(og, QPDFObjectHandle::newNull()); }
+
+    // 6. Die Garantie: entfernte Seitenobjekte leeren.
+    for (auto const& og : removed) { qpdf.replaceObject(og, QPDFObjectHandle::newNull()); }
+}
+
+/// Nachbedingung an der geschriebenen Datei: Es gibt kein Seitenobjekt
+/// außerhalb des Seitenbaums. true = sauber.
+bool n1_output_is_clean(std::string const& path, char const* password)
+{
+    QPDF out;
+    out.setSuppressWarnings(true);
+    out.processFile(path.c_str(), password);
+    std::set<QPDFObjGen> inTree;
+    for (auto& page : QPDFPageDocumentHelper(out).getAllPages()) {
+        inTree.insert(page.getObjectHandle().getObjGen());
+    }
+    for (auto& obj : out.getAllObjects()) {
+        if (obj.isDictionary() && n1_name_is(obj.getKey("/Type"), "/Page")
+            && !inTree.count(obj.getObjGen())) { return false; }
+    }
+    return true;
+}
+
+} // namespace
+
 /* Masterplan E1: Ein-Quellen-Operation IM Quelldokument.
  *
  * Vorher baute write_pages_impl IMMER ein leeres Dokument auf und kopierte
@@ -2337,15 +2628,28 @@ int pdfcore_rewrite_single_source(const char *source_path, const char *password,
         }
     }
 
+    std::string tmp = std::string(output_path) + ".pdfcore-tmp";
+    try {
+    // Masterplan N2: Vererbtes (/MediaBox, /Resources, /Rotate, /CropBox)
+    // auf die Seiten schieben, BEVOR Kopien entstehen. Sonst verliert die
+    // Kopie es: Sie hängt beim Abflachen nicht im Baum, und danach steht es
+    // am /Pages-Knoten nicht mehr. Der Mehr-Quellen-Weg tut dasselbe.
+    pdh.pushInheritedAttributesToPage();
+
     // Zielreihenfolge; eine zweite Nutzung derselben Seite wird flach kopiert.
+    // Erst ALLE Exemplare anlegen, dann drehen (N2): Die Kopie muss vom
+    // ungedrehten Original stammen, sonst erbt sie dessen Drehung – Plan
+    // „Seite 1 +90°, Seite 1 +0°" ergab zweimal 90°.
     std::vector<QPDFPageObjectHelper> order;
     std::set<int> used;
     for (int k = 0; k < count; ++k) {
         QPDFPageObjectHelper page = pages[static_cast<size_t>(page_indices[k])];
         if (!used.insert(page_indices[k]).second) { page = page.shallowCopyPage(); }
-        int rotation = rotations ? rotations[k] : 0;
-        if (rotation % 360 != 0) { page.rotatePage(rotation, /*relative=*/true); }
         order.push_back(page);
+    }
+    for (int k = 0; k < count; ++k) {
+        int rotation = rotations ? rotations[k] : 0;
+        if (rotation % 360 != 0) { order[static_cast<size_t>(k)].rotatePage(rotation, /*relative=*/true); }
     }
 
     // Felder, deren Widgets ausschließlich auf entfernten Seiten liegen.
@@ -2435,7 +2739,15 @@ int pdfcore_rewrite_single_source(const char *source_path, const char *password,
         }
     }
 
-    std::string tmp = std::string(output_path) + ".pdfcore-tmp";
+    // Masterplan N1: Verweise auf entfernte Seiten kappen, Seiten leeren.
+    std::vector<QPDFObjectHandle> removedPages;
+    for (int i = 0; i < total; ++i) {
+        if (!used.count(i)) { removedPages.push_back(pages[static_cast<size_t>(i)].getObjectHandle()); }
+    }
+    if (!removedPages.empty()) {
+        n1_detach_removed_pages(doc->qpdf, removedPages, order, keptFields, removedFields);
+    }
+
     FILE *tmpFile = QUtil::safe_fopen(tmp.c_str(), "wb");
     bool cancelled = false;
     try {
@@ -2456,6 +2768,24 @@ int pdfcore_rewrite_single_source(const char *source_path, const char *password,
     if (cancelled) {
         std::remove(tmp.c_str());
         return PDFCORE_ERR_CANCELLED;
+    }
+    // Masterplan N1 – Nachbedingung: kein Seitenobjekt außerhalb des
+    // Seitenbaums. Sonst ist die Datei nicht auslieferbar; der Aufrufer baut
+    // dann neu auf (wie 1.0.9).
+    // Quelldokument vorher freigeben: Sonst liegen bei großen Dateien zwei
+    // vollständig geladene Dokumente gleichzeitig im Speicher (gemessen an
+    // 423 MB / 2.409 Seiten: 2,4 statt 1,3 GB).
+    doc.reset();
+    if (!n1_output_is_clean(tmp, password)) {
+        std::remove(tmp.c_str());
+        return PDFCORE_ERR_NEEDS_REBUILD;
+    }
+    } catch (const std::exception&) {
+        // Der Umbau im Quelldokument ist an dieser Datei gescheitert (etwa
+        // qpdf: „/Count is wrong after flattening pages tree“). Kein
+        // Teilergebnis – der Aufrufer nimmt den Neuaufbau.
+        std::remove(tmp.c_str());
+        return PDFCORE_ERR_NEEDS_REBUILD;
     }
     std::remove(output_path);
     if (std::rename(tmp.c_str(), output_path) != 0) {

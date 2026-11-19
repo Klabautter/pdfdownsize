@@ -7,6 +7,9 @@ enum PDFCoreAssemblerError: Error, Equatable {
     case invalidPageIndex
     case openFailed(code: UInt32)
     case internalError
+    /// Masterplan N1: Der Umbau im Quelldokument ist an dieser Datei nicht
+    /// sauber möglich – nichts geschrieben, der Aufrufer baut neu auf.
+    case needsRebuild
 }
 
 enum PDFCoreAssembler {
@@ -135,6 +138,7 @@ enum PDFCoreAssembler {
         case PDFCORE_ERR_CHECK_FAILED.rawValue: throw PDFCoreAssemblerError.invalidPageIndex
         case PDFCORE_ERR_OPEN.rawValue, PDFCORE_ERR_PASSWORD.rawValue:
             throw PDFCoreAssemblerError.openFailed(code: UInt32(bitPattern: status))
+        case PDFCORE_ERR_NEEDS_REBUILD.rawValue: throw PDFCoreAssemblerError.needsRebuild
         default: throw PDFCoreAssemblerError.internalError
         }
     }

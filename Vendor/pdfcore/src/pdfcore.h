@@ -23,8 +23,12 @@ typedef enum {
     PDFCORE_ERR_PASSWORD = 2,    /* verschlüsselt ohne Passwort */
     PDFCORE_ERR_CHECK_FAILED = 3,/* strukturelle Probleme gefunden */
     PDFCORE_ERR_INTERNAL = 4,    /* unerwarteter Fehler */
-    PDFCORE_ERR_CANCELLED = 5    /* Befund B11 – der Aufrufer hat abgebrochen;
+    PDFCORE_ERR_CANCELLED = 5,   /* Befund B11 – der Aufrufer hat abgebrochen;
                                     Zielpfad unangetastet, Temp-Datei entfernt */
+    PDFCORE_ERR_NEEDS_REBUILD = 6/* Masterplan N1 – der Umbau im Quelldokument
+                                    ist nicht sauber möglich (entfernte Seiten
+                                    blieben erreichbar oder qpdf scheiterte);
+                                    nichts geschrieben, der Aufrufer baut neu auf */
 } pdfcore_status;
 
 /* Epic Phase 7 – read-only semantische Inspection. */
@@ -303,6 +307,10 @@ int pdfcore_reencrypt_like(const char *plain_path, const char *original_path,
 /// Masterplan E1: Seiten EINER Quelle im Quelldokument entfernen, ordnen,
 /// drehen (relativ) und mehrfach nutzen – Katalog (Tags, Anhänge, XMP,
 /// Ebenen, Verschlüsselung) bleibt erhalten. `password` darf NULL sein.
+/// Masterplan N1: Entfernte Seiten verlassen die Datei – Verweise auf sie
+/// (Ziele, Links, Strukturbaum, Felder) werden gekappt, die Seitenobjekte
+/// geleert, und die geschriebene Datei wird darauf geprüft.
+/// PDFCORE_ERR_NEEDS_REBUILD, wenn das an dieser Datei nicht gelingt.
 int pdfcore_rewrite_single_source(const char *source_path, const char *password,
                                   const int *page_indices, const int *rotations,
                                   int count, const char *output_path,
