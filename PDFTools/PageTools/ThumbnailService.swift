@@ -88,7 +88,7 @@ final class ThumbnailService: @unchecked Sendable {
         // zeigt (Befund B10, Review 2026-10-09).
         let bounds = pageCopy.bounds(for: .cropBox)
         let scale = pixelHeight / max(bounds.height, 1)
-        let pxSize = CGSize(width: max(40, Int(bounds.width * scale)),
+        let pxSize = CGSize(width: max(40, PixelExtent.edge(Double(bounds.width), scale: Double(scale)) ?? 40),
                             height: max(40, Int(pixelHeight)))
 
         let thumb = pageCopy.thumbnail(of: pxSize, for: .cropBox)

@@ -446,6 +446,8 @@ struct Compressor {
             runPolicy.renderSamplePages = PDFValidator.renderSamplePages(
                 pageCount: policy.expectedPageCount ?? 0,
                 changedBytesByPage: outcome.plan.changedImageBytesByPage)
+            // Masterplan N4: „Eigene" mit Graustufen – fehlende Farbe ist gewollt.
+            runPolicy.renderSampleExpectsGrayscale = options.image.forceGrayscale
             return StageTimer.run(stageTimer, .semanticValidationMs) {
                 if let hooked = qaValidationHook?(url) { return hooked }
                 // C2, Schritt 2: Die Referenz einmal je Operation erfassen und
@@ -455,6 +457,7 @@ struct Compressor {
                 // sofort ablehnen statt bei jedem Re-Plan erneut zu warten.
                 if let unreadable = referenceUnreadable {
                     var failed = PDFValidator.Report()
+                    failed.frameworkTimedOut = true
                     failed.fail(unreadable, ValidationFinding(kind: .text, severity: .error,
                                                               pages: [], message: unreadable))
                     return failed
@@ -573,7 +576,7 @@ struct Compressor {
 
             // Masterplan D5: Ist die Referenz selbst nicht messbar, kann kein
             // Re-Plan helfen – die Kette entfällt (fail-closed wie bisher).
-            while !report.isValid, referenceUnreadable == nil,
+            while !report.isValid, referenceUnreadable == nil, !report.frameworkTimedOut,
                   replans < RollbackPlanner.maximumReplanAttempts {
                 if let isCancelled, isCancelled() { throw CancellationError() }
                 // Kostenkontrolle (§11.5): kein Re-Plan ohne Zeitbudget.
@@ -605,7 +608,7 @@ struct Compressor {
             // Endstufe (§11.5): safe lossless plan – JEDE transformierte
             // Ressource auf ihre konservativste lossless Stufe bzw. KEEP.
             // Gelingt auch das nicht, fail-closed wie bisher (Original).
-            if !report.isValid, referenceUnreadable == nil {
+            if !report.isValid, referenceUnreadable == nil, !report.frameworkTimedOut {
                 if let isCancelled, isCancelled() { throw CancellationError() }
                 let elapsed = stageMs(since: chainStart) / 1000.0
                 let safe = RollbackPlanner.forcedLosslessOverrides(plan: outcome.plan)

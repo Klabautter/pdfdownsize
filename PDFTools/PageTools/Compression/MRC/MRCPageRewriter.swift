@@ -106,8 +106,8 @@ enum MRCPageQA {
             }
 
             let scale = Double(renderDPI) / 72.0
-            var w = Int((outputDisplay.width * scale).rounded())
-            var h = Int((outputDisplay.height * scale).rounded())
+            guard var w = PixelExtent.edge(Double(outputDisplay.width), scale: scale),
+                  var h = PixelExtent.edge(Double(outputDisplay.height), scale: scale) else { return nil }
             let cap = Double(maximumRenderEdge)
                 / Double(max(w, h, 1))
             if cap < 1 {

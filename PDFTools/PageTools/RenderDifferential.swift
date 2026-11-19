@@ -109,8 +109,8 @@ struct RenderDifferential {
                 rotation: outPage.rotation)
 
             let scale = Double(dpi) / 72.0
-            var w = Int((outDisplay.width * scale).rounded())
-            var h = Int((outDisplay.height * scale).rounded())
+            guard var w = PixelExtent.edge(Double(outDisplay.width), scale: scale),
+                  var h = PixelExtent.edge(Double(outDisplay.height), scale: scale) else { return nil }
             let capFactor = min(1.0,
                 Double(maxMetricEdge) / Double(max(w, h, 1)),
                 Double(maxRenderEdge) / Double(max(w, h, 1)))
@@ -222,8 +222,8 @@ struct RenderDifferential {
                 guard abs(srcDisplay.width - outDisplay.width) < 0.01,
                       abs(srcDisplay.height - outDisplay.height) < 0.01 else { return false }
                 let scale = Double(dpi) / 72.0
-                var w = Int((outDisplay.width * scale).rounded())
-                var h = Int((outDisplay.height * scale).rounded())
+                guard var w = PixelExtent.edge(Double(outDisplay.width), scale: scale),
+                      var h = PixelExtent.edge(Double(outDisplay.height), scale: scale) else { return false }
                 let capFactor = min(1.0,
                     Double(maxMetricEdge) / Double(max(w, h, 1)),
                     Double(maxRenderEdge) / Double(max(w, h, 1)))

@@ -79,6 +79,11 @@ enum PDFValidator {
         /// Render-Stichprobe.
         var renderSamplePages: [Int]?
 
+        /// Masterplan N4: Der Lauf rechnet absichtlich nach Graustufen
+        /// („Eigene" mit Graustufen). Die Stichprobe prüft dann nur die
+        /// Struktur – fehlende Farbe ist gewollt, kein Verlust.
+        var renderSampleExpectsGrayscale = false
+
         /// Verlustfreie Strukturoptimierung desselben Dokuments: alles muss
         /// bleiben. Masterplan Schritt 8 verlangt hier die volle Liste:
         /// qpdf-check, Seitenzahl, Geometrie, Text, Annotationen, Links,
@@ -166,6 +171,10 @@ enum PDFValidator {
     // MARK: Report
 
     struct Report {
+        /// Masterplan D5: Ein Apple-Framework (Textextraktion, Zeichnen) lief
+        /// ins Zeitlimit. Ein anderer Bildplan ändert daran nichts – die
+        /// Rückfallkette endet sofort.
+        var frameworkTimedOut = false
         var failures: [String] = []
         var warnings: [String] = []
         var signatureDetected = false
@@ -284,6 +293,7 @@ enum PDFValidator {
         // zweite, ungeschützte Extraktion folgen (sie hinge genauso). Die
         // Prüfung gilt als nicht bestanden – das Original bleibt.
         if let timeout = snapshotError as? PDFSemanticSnapshot.SnapshotError {
+            report.frameworkTimedOut = true
             let message = timeout.localizedDescription
             report.fail(message, ValidationFinding(kind: .text, severity: .error, pages: [], message: message))
             return report
@@ -362,7 +372,9 @@ enum PDFValidator {
         if let pages = policy.renderSamplePages, !pages.isEmpty {
             if let referenceURL {
                 validateRenderSample(outputURL: outputURL, referenceURL: referenceURL,
-                                     pages: pages, report: &report)
+                                     pages: pages,
+                                     expectsGrayscale: policy.renderSampleExpectsGrayscale,
+                                     report: &report)
             } else {
                 report.warnings.append("Render-Stichprobe übersprungen: keine Referenzdatei")
             }
@@ -386,6 +398,32 @@ enum PDFValidator {
     /// den meisten veränderten Bildbytes). Kosten je Seite rund 60 ms.
     static let maximumRenderSamplePages = 6
     static let renderSampleDPI = 110.0
+    /// Obergrenze der Stichprobe je Seite in Pixeln. 12 MP reichen bis A1 bei
+    /// vollen 110 DPI; A0 wird mit 88 DPI gemessen. Die frühere Grenze von
+    /// 40 MP kostete je Seite 45 s (Debug) – bei sechs Stichprobenseiten
+    /// mehr als die ganze Kompression.
+    static let maximumRenderSamplePixels = 12_000_000
+    /// Kantenlänge, auf der die Strukturgrenze (SSIM 0,70) geeicht ist: A4
+    /// bei 110 DPI. Auf einem feineren Raster liegen fast alle Messfenster
+    /// in leeren Flächen; eine leer gewordene große Seite misst dort weit
+    /// über der Grenze. Große Seiten werden für die Struktur deshalb
+    /// zusätzlich auf diesem Raster gemessen (N3).
+    static let renderSampleStructureEdge = 1300
+
+    /// Masterplan N3: Maßstab (Pixel je Punkt) für eine Seite. Normal
+    /// `renderSampleDPI`; für große Seiten so weit gesenkt, dass das Raster
+    /// unter der Pixelgrenze bleibt. Vorher gab es oberhalb der Grenze kein
+    /// Bild, und die Seite galt als „nicht vergleichbar" – Plakate und
+    /// Rollenplots ließen sich nicht mehr komprimieren. nil bei einer Box
+    /// ohne brauchbare Fläche.
+    static func renderSampleScale(for box: CGRect) -> Double? {
+        let area = Double(box.width) * Double(box.height)
+        guard area.isFinite, area > 0 else { return nil }
+        // 0,995: Die Kanten werden gerundet; das Produkt soll sicher unter
+        // der Grenze bleiben.
+        let fitting = (Double(maximumRenderSamplePixels) / area).squareRoot() * 0.995
+        return min(renderSampleDPI / 72.0, fitting)
+    }
     /// Masterplan D5: Zeitlimit für das Zeichnen von Referenz und Ausgabe einer Seite.
     static let renderSampleTimeout = 30.0
     /// Strukturkollaps: dieselbe Grenze wie der Katastrophen-Floor der
@@ -419,7 +457,8 @@ enum PDFValidator {
     /// (RollbackPlanner stuft die Ressourcen dieser Seiten zurück) – keine
     /// zweite Entscheidungslogik.
     private static func validateRenderSample(outputURL: URL, referenceURL: URL,
-                                             pages: [Int], report: inout Report) {
+                                             pages: [Int], expectsGrayscale: Bool,
+                                             report: inout Report) {
         guard let source = CGPDFDocument(referenceURL as CFURL),
               let output = CGPDFDocument(outputURL as CFURL) else {
             report.fail("Render-Stichprobe nicht möglich", ValidationFinding(
@@ -435,10 +474,18 @@ enum PDFValidator {
                 // nicht weiter benutzt – die Prüfung gilt als nicht bestanden.
                 nonisolated(unsafe) let sourceDoc = source
                 nonisolated(unsafe) let outputDoc = output
-                guard let rendered = FrameworkWatchdog.run(timeout: renderSampleTimeout, {
-                    (renderPage(sourceDoc, index: index), renderPage(outputDoc, index: index))
+                guard let rendered = FrameworkWatchdog.run(timeout: renderSampleTimeout, { () -> (CGImage?, CGImage?) in
+                    // N3: EIN Maßstab für beide, bestimmt an der Quellseite.
+                    // Weicht die Seitengröße der Ausgabe ab, entstehen
+                    // verschieden große Raster – das bleibt ein Befund.
+                    guard let sourcePage = sourceDoc.page(at: index + 1),
+                          let scale = renderSampleScale(for: sourcePage.getBoxRect(.cropBox))
+                    else { return (nil, nil) }
+                    return (renderPage(sourceDoc, index: index, scale: scale),
+                            renderPage(outputDoc, index: index, scale: scale))
                 }) else {
                     timedOut = true
+                    report.frameworkTimedOut = true
                     let message = String(localized: "Seite \(index + 1) ließ sich nicht in angemessener Zeit darstellen.")
                     report.fail(message, ValidationFinding(kind: .render, severity: .error,
                                                            pages: [index + 1], message: message))
@@ -459,13 +506,25 @@ enum PDFValidator {
                       let outSample = QualityGates.sample(candidate, maxEdge: edge),
                       let measurement = QualityGates.measure(reference: refSample, candidate: outSample)
                 else { return }
-                if measurement.globalSSIM < renderSampleMinimumSSIM {
+                // N3: Struktur zusätzlich auf dem geeichten Raster; es gilt der
+                // schlechtere Wert – nie milder als die volle Auflösung allein.
+                var structureSSIM = measurement.globalSSIM
+                if edge > renderSampleStructureEdge,
+                   let refSmall = QualityGates.sample(reference, maxEdge: renderSampleStructureEdge, census: census),
+                   let outSmall = QualityGates.sample(candidate, maxEdge: renderSampleStructureEdge),
+                   let small = QualityGates.measure(reference: refSmall, candidate: outSmall) {
+                    structureSSIM = min(structureSSIM, small.globalSSIM)
+                }
+                if structureSSIM < renderSampleMinimumSSIM {
                     let message = String(format: "Seite %d: Darstellung weicht vom Original ab (SSIM %.3f)",
-                                         index + 1, measurement.globalSSIM)
+                                         index + 1, structureSSIM)
                     report.fail(message, ValidationFinding(
                         kind: .render, severity: .error, pages: [index + 1], message: message))
                 }
-                if let peak = measurement.peakDeltaE76, peak > renderSampleMaximumPeakDeltaE {
+                // N4: Rechnet der Lauf absichtlich nach Graustufen, ist fehlende
+                // Farbe gewollt. Die Strukturprüfung darüber bleibt.
+                if !expectsGrayscale,
+                   let peak = measurement.peakDeltaE76, peak > renderSampleMaximumPeakDeltaE {
                     let message = String(format: "Seite %d: Farbe geht verloren (ΔE %.1f im farbigsten Prozent)",
                                          index + 1, peak)
                     report.fail(message, ValidationFinding(
@@ -475,15 +534,17 @@ enum PDFValidator {
         }
     }
 
-    /// Seite bei `renderSampleDPI` auf Weiß, Rotation über die Zeichenmatrix.
-    private static func renderPage(_ document: CGPDFDocument, index: Int) -> CGImage? {
+    /// Seite im Maßstab `scale` (Pixel je Punkt) auf Weiß, Rotation über die
+    /// Zeichenmatrix.
+    private static func renderPage(_ document: CGPDFDocument, index: Int, scale: Double) -> CGImage? {
         guard let page = document.page(at: index + 1) else { return nil }
         let box = page.getBoxRect(.cropBox)
         let rotated = page.rotationAngle % 180 != 0
-        let scale = renderSampleDPI / 72.0
-        let w = max(8, Int(((rotated ? box.height : box.width) * scale).rounded()))
-        let h = max(8, Int(((rotated ? box.width : box.height) * scale).rounded()))
-        guard w * h <= 40_000_000,
+        guard let rawW = PixelExtent.edge(Double(rotated ? box.height : box.width), scale: scale),
+              let rawH = PixelExtent.edge(Double(rotated ? box.width : box.height), scale: scale)
+        else { return nil }
+        let w = max(8, rawW), h = max(8, rawH)
+        guard w * h <= maximumRenderSamplePixels,
               let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
                                   bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
