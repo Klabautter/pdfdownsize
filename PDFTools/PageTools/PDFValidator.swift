@@ -403,12 +403,21 @@ enum PDFValidator {
     /// 40 MP kostete je Seite 45 s (Debug) – bei sechs Stichprobenseiten
     /// mehr als die ganze Kompression.
     static let maximumRenderSamplePixels = 12_000_000
-    /// Kantenlänge, auf der die Strukturgrenze (SSIM 0,70) geeicht ist: A4
-    /// bei 110 DPI. Auf einem feineren Raster liegen fast alle Messfenster
-    /// in leeren Flächen; eine leer gewordene große Seite misst dort weit
-    /// über der Grenze. Große Seiten werden für die Struktur deshalb
-    /// zusätzlich auf diesem Raster gemessen (N3).
-    static let renderSampleStructureEdge = 1300
+    /// Kantenlänge, auf der die Grenzen der Stichprobe geeicht sind: A4 bei
+    /// 110 DPI.
+    ///
+    /// Struktur (SSIM 0,70, N3): Auf einem feineren Raster liegen fast alle
+    /// Messfenster in leeren Flächen; eine leer gewordene große Seite misst
+    /// dort weit über der Grenze. Große Seiten werden für die Struktur
+    /// deshalb zusätzlich auf diesem Raster gemessen.
+    ///
+    /// Farbe (N17): Der Farberhalt vergleicht Pixel für Pixel mit einem
+    /// Pixel Spielraum. Auf einem feineren Raster reicht der Spielraum nicht
+    /// mehr über die Kante eines dünnen Strichs, der durch erlaubtes
+    /// Verkleinern weicher wurde. Große Seiten werden für die Farbe deshalb
+    /// NUR auf diesem Raster gemessen: wie das Blatt, das sie sind
+    /// (übergroße Scan-Seiten gelten überall als A4).
+    static let renderSampleCalibratedEdge = 1300
 
     /// Masterplan N3: Maßstab (Pixel je Punkt) für eine Seite. Normal
     /// `renderSampleDPI`; für große Seiten so weit gesenkt, dass das Raster
@@ -432,11 +441,20 @@ enum PDFValidator {
     static let renderSampleMinimumSSIM = QualityGatePolicy.catastrophicGlobalFloor
     /// Farbverlust. Die Stichprobe ist ein Katastrophennetz wie die SSIM-
     /// Grenze darüber (0,70, weit unter den Stufengrenzen), keine zweite
-    /// Qualitätsentscheidung: Doppelte Bild-Gate-Grenze. Gemessen am
-    /// Review-Brief: Eine blaue Unterschrift nach JPEG-Farbunterabtastung
-    /// (sichtbar blau, nur blasser) misst 13,2; dieselbe Seite grau gemacht
-    /// liegt weit darüber (RenderSampleValidationTests).
-    static let renderSampleMaximumPeakDeltaE = 2 * QualityGatePolicy.peakDeltaE76Floor
+    /// Qualitätsentscheidung: Sie schlägt an, wenn im farbigsten Prozent der
+    /// Seite weniger als 30 % der Farbe übrig sind
+    /// (`QualityGates.peakChromaRetention`).
+    ///
+    /// Gemessen 19.11. (N17, Ausgaben von 1.0.9): Die härteste erlaubte
+    /// Ausgabe – Klein auf dünner satter Tinte, 910-px-JPEG – behält 51 %,
+    /// Smart 71 %, zwei echte übergroße Scans 73–98 %. Grau gewordene Farbe
+    /// liegt bei 0 %. Die Grenze sitzt dazwischen, näher am Verlust.
+    ///
+    /// Vorher (A3): ΔE über 24 im farbigsten Prozent. Das lehnte die
+    /// Verkleinerung von Scans mit dünner satter Tinte ab (ΔE 26–39, Smart
+    /// endete im Fehler, Klein fiel auf verlustfrei zurück) und übersah einen
+    /// echten Handschrift-Scan, der komplett grau wurde (ΔE 20).
+    static let renderSampleMinimumChromaRetention = 0.30
 
     /// Stichprobenseiten (0-basiert, sortiert): erste und letzte Seite plus die
     /// Seiten mit den meisten veränderten Bildbytes.
@@ -460,7 +478,9 @@ enum PDFValidator {
         var comparable: Bool
         /// Struktur: der schlechtere Wert aus voller Auflösung und geeichtem Raster.
         var structureSSIM: Double?
-        var peakDeltaE: Double?
+        /// Farberhalt im farbigsten Prozent (0…1), siehe
+        /// `QualityGates.peakChromaRetention`; nil ohne Farbe in der Referenz.
+        var chromaRetention: Double?
     }
 
     /// Bewertet die Stichprobenseiten von Original und Ausgabe und meldet
@@ -512,9 +532,9 @@ enum PDFValidator {
             // N4: Rechnet der Lauf absichtlich nach Graustufen, ist fehlende
             // Farbe gewollt. Die Strukturprüfung darüber bleibt.
             if !expectsGrayscale,
-               let peak = measurement.peakDeltaE, peak > renderSampleMaximumPeakDeltaE {
-                let message = String(format: "Seite %d: Farbe geht verloren (ΔE %.1f im farbigsten Prozent)",
-                                     number, peak)
+               let retention = measurement.chromaRetention, retention < renderSampleMinimumChromaRetention {
+                let message = String(format: "Seite %d: Farbe geht verloren (noch %.0f %% im farbigsten Prozent)",
+                                     number, retention * 100)
                 report.fail(message, ValidationFinding(
                     kind: .color, severity: .error, pages: [number], message: message))
             }
@@ -563,19 +583,27 @@ enum PDFValidator {
                     result.append(RenderSampleMeasurement(page: index, comparable: true))
                     return
                 }
-                // N3: Struktur zusätzlich auf dem geeichten Raster; es gilt der
-                // schlechtere Wert – nie milder als die volle Auflösung allein.
+                // Große Seiten zusätzlich auf dem geeichten Raster
+                // (`renderSampleCalibratedEdge`):
+                //  • Struktur (N3): es gilt der schlechtere Wert – nie milder
+                //    als die volle Auflösung allein.
+                //  • Farbe (N17): es gilt das geeichte Raster.
                 var structureSSIM = measurement.globalSSIM
-                if edge > renderSampleStructureEdge,
-                   let refSmall = QualityGates.sample(reference, maxEdge: renderSampleStructureEdge, census: census),
-                   let outSmall = QualityGates.sample(candidate, maxEdge: renderSampleStructureEdge),
+                var colorSamples = (refSample, outSample)
+                if edge > renderSampleCalibratedEdge,
+                   let refSmall = QualityGates.sample(reference, maxEdge: renderSampleCalibratedEdge, census: census),
+                   let outSmall = QualityGates.sample(candidate, maxEdge: renderSampleCalibratedEdge),
                    let small = QualityGates.measure(reference: refSmall, candidate: outSmall) {
                     structureSSIM = min(structureSSIM, small.globalSSIM)
+                    colorSamples = (refSmall, outSmall)
                 }
+                let chromaRetention = colorSamples.0.isColor
+                    ? QualityGates.peakChromaRetention(reference: colorSamples.0, candidate: colorSamples.1)
+                    : nil
                 result.append(RenderSampleMeasurement(
                     page: index, comparable: true,
                     structureSSIM: structureSSIM.isFinite ? structureSSIM : nil,
-                    peakDeltaE: measurement.peakDeltaE76.flatMap { $0.isFinite ? $0 : nil }))
+                    chromaRetention: chromaRetention.flatMap { $0.isFinite ? $0 : nil }))
             }
         }
         return result

@@ -18,11 +18,11 @@ import Foundation
 /// - Ein zweiter Lauf rechnet das Ergebnis weiter herunter.
 @Suite(.serialized) struct ScanPresetSpreadTests {
 
-    private enum Content { case paper, photo }
+    enum Content { case paper, photo }
 
-    /// Eine Seite mit einem JPEG; `placed` nil heißt: füllt die Seite.
-    private static func scanPDF(_ content: Content, pixels: (Int, Int), page: (Double, Double),
-                                placed: (Double, Double)? = nil, name: String) throws -> URL {
+    /// Das Bild der Vorlage: Papier mit Lineatur und blauer Tinte, oder ein
+    /// vollflächiges Foto. Auch von `RenderSampleValidationTests` (N17) genutzt.
+    static func scanImage(_ content: Content, pixels: (Int, Int)) throws -> CGImage {
         let (w, h) = pixels
         let context = try #require(CGContext(
             data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
@@ -65,10 +65,16 @@ import Foundation
                 }
             }
         }
-        let image = try #require(context.makeImage())
+        return try #require(context.makeImage())
+    }
+
+    /// Eine Seite mit einem JPEG; `placed` nil heißt: füllt die Seite.
+    private static func scanPDF(_ content: Content, pixels: (Int, Int), page: (Double, Double),
+                                placed: (Double, Double)? = nil, name: String) throws -> URL {
+        let (w, h) = pixels
+        let image = try scanImage(content, pixels: pixels)
         let jpeg = try #require(NSBitmapImageRep(cgImage: image)
             .representation(using: .jpeg, properties: [.compressionFactor: 0.92]))
-
         let (pw, ph) = page
         let (iw, ih) = placed ?? page
         var b = RawPDFBuilder()

@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import CoreGraphics
+import ImageIO
 @testable import PDFTools
 
 /// Masterplan A3 (18.11.2026): Die fertige Ausgabe wird gegen das ORIGINAL
@@ -69,11 +70,12 @@ import CoreGraphics
         #expect(finding != nil, "Kein Farbbefund: \(report.failures)")
         #expect(finding?.pages == [1], "Befund ohne richtige Seite – der Re-Plan wüsste nicht, was zurückzustufen ist")
         #expect(finding.map { $0.severity.triggersRollback } == true)
-        // Abstand zur Grenze dokumentieren: Grau muss klar darüber liegen.
+        // Abstand zur Grenze dokumentieren: Grau muss klar darunter liegen.
         let measured = finding.flatMap { message in
             message.message.split(separator: " ").compactMap { Double($0.replacingOccurrences(of: ",", with: ".")) }.first
         }
-        #expect((measured ?? 0) > 1.5 * PDFValidator.renderSampleMaximumPeakDeltaE,
+        // Die Meldung nennt den Farberhalt in Prozent.
+        #expect((measured ?? 100) < 0.5 * PDFValidator.renderSampleMinimumChromaRetention * 100,
                 "Grau liegt zu nah an der Grenze: \(finding?.message ?? "")")
     }
 
@@ -177,6 +179,128 @@ import CoreGraphics
         let other = try Self.pdf(from: page, pageSize: CGSize(width: 4000, height: 6000))
         defer { for url in [reference, other] { try? FileManager.default.removeItem(at: url) } }
         #expect(Self.validate(output: other, reference: reference).findings.contains { $0.kind == .render })
+    }
+
+    // MARK: - Masterplan N17: verkleinerter Scan auf übergroßer Seite
+
+    /// Befund (volle Suite 19.11.): Ein Papier-Scan auf übergroßer Seite
+    /// (1898 × 2645 pt, die Homework_2-Klasse) ließ sich mit Smart nicht mehr
+    /// komprimieren: „Farbe geht verloren (ΔE 25,6)". Die Tinte war sichtbar
+    /// blau geblieben, nur blasser. Das Farbnetz maß ΔE Pixel für Pixel auf
+    /// dem 110-DPI-Raster der großen Seite (2900 × 4041 px) – Helligkeit und
+    /// Kantenschärfe der dünnen Striche statt ihrer Farbe. Dasselbe Maß
+    /// übersah einen echten Handschrift-Scan, der komplett grau wurde
+    /// (ΔE 20, Grenze 24). Seit N17 misst die Stichprobe den Farberhalt
+    /// (`QualityGates.peakChromaRetention`), große Seiten auf dem geeichten
+    /// Raster.
+    ///
+    /// Vorlage ist das Bild aus `ScanPresetSpreadTests` (Lineatur, dünne
+    /// blaue Tinte), 1:1 auf der übergroßen Seite.
+    ///
+    /// Fehlermöglichkeiten: (1) die gewollte Verkleinerung gilt weiter als
+    /// Farbverlust; (2) die Korrektur macht das Netz blind – grau gewordene
+    /// Tinte auf derselben Seite muss weiter klar über der Grenze liegen.
+    static let oversizedScanPage = CGSize(width: 1898, height: 2645)
+
+    /// Auf `factor` der Kantenlänge verkleinert und als JPEG neu kodiert –
+    /// was die Stufen mit einem Papier-Scan tun.
+    static func downsampledJPEG(_ image: CGImage, factor: Double, quality: Double) throws -> CGImage {
+        let w = Int((Double(image.width) * factor).rounded())
+        let h = Int((Double(image.height) * factor).rounded())
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { throw CocoaError(.featureUnsupported) }
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let small = try #require(ctx.makeImage())
+        let data = NSMutableData()
+        let destination = try #require(CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, small,
+                                   [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+        try #require(CGImageDestinationFinalize(destination))
+        let source = try #require(CGImageSourceCreateWithData(data, nil))
+        return try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
+    }
+
+    /// 1240/1898 ist das Scan-Ziel von Smart, 910/1898 das von Klein. Vor
+    /// N17 war der Klein-Fall rot (ΔE 26,8); der Smart-Fall lag in dieser
+    /// Nachstellung knapp unter der alten Grenze, im echten Lauf darüber
+    /// (`ScanPresetSpreadTests`).
+    @Test(arguments: [1240.0 / 1898.0, 910.0 / 1898.0])
+    func verkleinerterScanAufUebergrosserSeiteIstKeinFarbverlust(factor: Double) throws {
+        let page = try ScanPresetSpreadTests.scanImage(.paper, pixels: (1898, 2645))
+        let reference = try Self.pdf(from: page, pageSize: Self.oversizedScanPage)
+        let smaller = try Self.pdf(from: Self.downsampledJPEG(page, factor: factor, quality: 0.5),
+                                   pageSize: Self.oversizedScanPage)
+        defer { for url in [reference, smaller] { try? FileManager.default.removeItem(at: url) } }
+        let report = Self.validate(output: smaller, reference: reference)
+        #expect(!report.findings.contains { $0.kind == .color },
+                "Verkleinerung als Farbverlust gewertet: \(report.failures)")
+    }
+
+    @Test func grauGewordeneTinteAufUebergrosserSeiteWirdWeiterAbgelehnt() throws {
+        let page = try ScanPresetSpreadTests.scanImage(.paper, pixels: (1898, 2645))
+        let reference = try Self.pdf(from: page, pageSize: Self.oversizedScanPage)
+        let gray = try Self.pdf(
+            from: Self.grayscale(Self.downsampledJPEG(page, factor: 1240.0 / 1898.0, quality: 0.5)),
+            pageSize: Self.oversizedScanPage)
+        defer { for url in [reference, gray] { try? FileManager.default.removeItem(at: url) } }
+        let finding = Self.validate(output: gray, reference: reference).findings.first { $0.kind == .color }
+        #expect(finding != nil, "Grau gewordene Tinte auf übergroßer Seite nicht erkannt")
+        let measured = finding.flatMap { finding in
+            finding.message.split(separator: " ")
+                .compactMap { Double($0.replacingOccurrences(of: ",", with: ".")) }.first
+        }
+        // Die Meldung nennt den Farberhalt in Prozent.
+        #expect((measured ?? 100) < 0.5 * PDFValidator.renderSampleMinimumChromaRetention * 100,
+                "Grau liegt zu nah an der Grenze: \(finding?.message ?? "")")
+    }
+
+    /// Weißes Blatt mit senkrechten, 2 px breiten Strichen in `color`.
+    static func stripes(_ color: CGColor, offset: Int = 0) throws -> QualityGates.Sample {
+        let edge = 160
+        guard let ctx = CGContext(data: nil, width: edge, height: edge, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { throw CocoaError(.featureUnsupported) }
+        ctx.setShouldAntialias(false)
+        ctx.setFillColor(.white)
+        ctx.fill(CGRect(x: 0, y: 0, width: edge, height: edge))
+        ctx.setFillColor(color)
+        for x in stride(from: 8 + offset, to: edge - 4, by: 16) {
+            ctx.fill(CGRect(x: x, y: 0, width: 2, height: edge))
+        }
+        let image = try #require(ctx.makeImage())
+        return try #require(QualityGates.sample(image))
+    }
+
+    /// Das Maß selbst: Es misst, ob die Farbe noch da ist – nicht, ob der
+    /// Strich scharf ist oder an derselben Stelle sitzt.
+    @Test func farberhaltMisstFarbeNichtSchaerfe() throws {
+        let blue = CGColor(red: 0.2, green: 0.25, blue: 0.75, alpha: 1)
+        let reference = try Self.stripes(blue)
+        func retention(_ color: CGColor, offset: Int = 0) throws -> Double {
+            let candidate = try Self.stripes(color, offset: offset)
+            return try #require(QualityGates.peakChromaRetention(reference: reference, candidate: candidate))
+        }
+        let limit = PDFValidator.renderSampleMinimumChromaRetention
+
+        let same = try retention(blue)
+        #expect(same > 0.99, "gleiches Bild: \(same)")
+        let shifted = try retention(blue, offset: 1)
+        #expect(shifted > 0.9, "um 1 px versetzt: \(shifted)")
+        // Blasser, aber blau: zur Hälfte mit Weiß gemischt.
+        let pale = try retention(CGColor(red: 0.6, green: 0.625, blue: 0.875, alpha: 1))
+        #expect(pale > limit && pale < 0.8, "blasser: \(pale)")
+        // Grau gleicher Helligkeit und eine andere Farbe: nichts erhalten.
+        let gray = try retention(CGColor(gray: 0.3, alpha: 1))
+        #expect(gray < 0.02, "grau: \(gray)")
+        let red = try retention(CGColor(red: 0.75, green: 0.25, blue: 0.2, alpha: 1))
+        #expect(red < 0.05, "rot statt blau: \(red)")
+        // Ohne Farbe in der Referenz gibt es nichts zu messen.
+        let neutral = try Self.stripes(CGColor(gray: 0.3, alpha: 1))
+        #expect(QualityGates.peakChromaRetention(reference: neutral, candidate: reference) == nil)
     }
 
     // MARK: - Masterplan N4: gewollte Graustufen

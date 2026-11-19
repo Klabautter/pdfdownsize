@@ -824,15 +824,13 @@ enum QualityGates {
     /// und verdünnten den Farbverlust unter die Grenze (A3-Test).
     static let peakMinimumChroma = ChromaCensus.strongChroma / 2
 
-    static func peakDeltaE76(reference: Sample, candidate: Sample) -> Double {
-        let rgbaA = reference.rgba
-        let rgbaB = candidate.rgba
-        let pixels = reference.width * reference.height
-        guard pixels > 0, rgbaA.count >= pixels * 4, rgbaB.count >= pixels * 4 else { return 0 }
+    /// Chroma-Schwelle (max − min der RGB-Bytes), ab der ein Referenzpixel
+    /// zum farbigsten Prozent zählt; nie unter `peakMinimumChroma`.
+    private static func peakChromaThreshold(rgba: [UInt8], pixels: Int) -> Int {
         var histogram = [Int](repeating: 0, count: 256)
         for i in 0..<pixels {
             let o = i * 4
-            let r = rgbaA[o], g = rgbaA[o + 1], b = rgbaA[o + 2]
+            let r = rgba[o], g = rgba[o + 1], b = rgba[o + 2]
             histogram[Int(max(r, g, b) - min(r, g, b))] += 1
         }
         let wanted = max(1, pixels / 100)
@@ -843,6 +841,70 @@ enum QualityGates {
             if covered >= wanted { break }
             threshold -= 1
         }
+        return threshold
+    }
+
+    /// Anteil der Farbe (0…1), der im farbigsten Prozent der Referenz
+    /// erhalten bleibt (Masterplan N17) – das Maß der Render-Stichprobe für
+    /// „Farbe geht verloren".
+    ///
+    /// Je Referenzpixel der Auswahl (wie `peakDeltaE76`) wird die Farbe des
+    /// Kandidaten auf die Farbrichtung der Referenz projiziert (a/b in
+    /// CIELAB); gewertet wird der beste Treffer in der 3×3-Umgebung, damit
+    /// ein um einen Pixel versetzter oder weicher gewordener Strich nicht als
+    /// Verlust zählt. Gemittelt wird nach Farbstärke gewichtet: Satte Tinte
+    /// zählt, schwaches Farbrauschen daneben kaum.
+    ///
+    /// Warum nicht ΔE: ΔE misst auch Helligkeit und ist absolut. Gemessen
+    /// 19.11. auf dem 110-DPI-Raster: dünne satte Tinte, verkleinert und als
+    /// JPEG – sichtbar blau, nur blasser – kam auf ΔE 36 (Erhalt 0,51); ein
+    /// echter farbiger Handschrift-Scan, komplett grau gemacht, nur auf
+    /// ΔE 20 (Erhalt 0,00). Keine ΔE-Grenze trennt das. Der Erhalt ist für
+    /// Grau immer 0, für eine andere Farbe (vertauschte Kanäle) ebenfalls.
+    ///
+    /// nil, wenn es nichts Farbiges zu messen gibt oder die Raster nicht
+    /// zusammenpassen.
+    static func peakChromaRetention(reference: Sample, candidate: Sample) -> Double? {
+        let w = reference.width, h = reference.height
+        let pixels = w * h
+        guard pixels > 0, candidate.width == w, candidate.height == h,
+              reference.rgba.count >= pixels * 4, candidate.rgba.count >= pixels * 4 else { return nil }
+        let rgbaA = reference.rgba
+        let rgbaB = candidate.rgba
+        let threshold = peakChromaThreshold(rgba: rgbaA, pixels: pixels)
+        var kept = 0.0
+        var total = 0.0
+        for y in 0..<h {
+            for x in 0..<w {
+                let o = (y * w + x) * 4
+                let r = rgbaA[o], g = rgbaA[o + 1], b = rgbaA[o + 2]
+                guard Int(max(r, g, b) - min(r, g, b)) >= threshold else { continue }
+                let labA = lab(r: r, g: g, b: b)
+                let energy = labA.1 * labA.1 + labA.2 * labA.2
+                guard energy > 0 else { continue }
+                var best = 0.0
+                for ny in max(0, y - 1)...min(h - 1, y + 1) {
+                    for nx in max(0, x - 1)...min(w - 1, x + 1) {
+                        let n = (ny * w + nx) * 4
+                        let labB = lab(r: rgbaB[n], g: rgbaB[n + 1], b: rgbaB[n + 2])
+                        best = max(best, labA.1 * labB.1 + labA.2 * labB.2)
+                    }
+                }
+                // Mehr als die Referenz zählt nicht mehr: Übersättigung an
+                // einer Stelle gleicht Verlust an anderer nicht aus.
+                kept += min(energy, best)
+                total += energy
+            }
+        }
+        return total > 0 ? kept / total : nil
+    }
+
+    static func peakDeltaE76(reference: Sample, candidate: Sample) -> Double {
+        let rgbaA = reference.rgba
+        let rgbaB = candidate.rgba
+        let pixels = reference.width * reference.height
+        guard pixels > 0, rgbaA.count >= pixels * 4, rgbaB.count >= pixels * 4 else { return 0 }
+        let threshold = peakChromaThreshold(rgba: rgbaA, pixels: pixels)
         var sum = 0.0
         var count = 0
         for i in 0..<pixels {
