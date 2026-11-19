@@ -96,6 +96,39 @@ struct QualityGatePolicy: Equatable, Sendable {
         maxDeltaE76.map { 2 * $0 }
     }
 
+    /// Farberhalt im farbigsten Prozent (`QualityGates.peakChromaRetention`),
+    /// unter dem eine überschrittene Farbspitze als Farbverlust zählt
+    /// (Masterplan N19). Je Stufe gestaffelt: Klein 0,5 · Smart 0,6 ·
+    /// Qualität 0,7 · Eigene 0,3 (die Grenze der Render-Stichprobe).
+    ///
+    /// Die Farbspitze allein (ΔE) misst auch Helligkeit: Dünne farbige
+    /// Striche werden durch JPEG blasser und liegen über jeder ΔE-Grenze,
+    /// ohne dass die Farbe verloren geht. Gemessen 19.11. an 14.912
+    /// JPEG-Stufen (Smoke-30, drei Stufen): Das ΔE-Gate allein verwarf bei
+    /// Smart 602 und bei Qualität 553 Stufen mit Farberhalt 0,70–0,95, bei
+    /// Klein 864 (Median 0,69) – fast alles Kartenkacheln mit farbigen
+    /// Linien (USGS-Karte 7 % größer als in 1.0.9) – und an einem
+    /// Papier-Scan mit dünner blauer Tinte jede JPEG-Stufe (Klein lieferte
+    /// verlustfrei 620 KB statt 80 KB, mehr als Smart).
+    ///
+    /// Umgekehrt taugt der Farberhalt allein nicht als Gate: Auf winzigen
+    /// Rastern und bei schwacher Farbe fällt er auf 0, obwohl sich kaum
+    /// etwas ändert (ΔE 8–12). Verlust ist erst beides zusammen.
+    ///
+    /// Vorgabe außerhalb der Grenzwerttabelle: unendlich – dann entscheidet
+    /// die Farbspitze allein, wie vor N19. Das gilt für die CMYK-Neukodierung
+    /// mit ihren eigenen, bewusst engen Farbgrenzen (`CMYKReencode.limits`).
+    var minPeakChromaRetention: Double = .infinity
+
+    static func peakChromaRetentionFloor(for preset: QualityGatePreset) -> Double {
+        switch preset {
+        case .small: return 0.5
+        case .smart: return 0.6
+        case .quality: return 0.7
+        case .custom: return 0.3
+        }
+    }
+
     /// Die Grenzwerttabelle (Preset × Klasse).
     ///
     /// Ableitung (gemessen an synthetischen Fixtures, siehe
@@ -113,6 +146,13 @@ struct QualityGatePolicy: Equatable, Sendable {
     /// ebenfalls durch die Kachelgrenzen.
     static func policy(preset: QualityGatePreset,
                        imageClass: QualityGateClass) -> QualityGatePolicy {
+        var policy = cell(preset: preset, imageClass: imageClass)
+        policy.minPeakChromaRetention = peakChromaRetentionFloor(for: preset)
+        return policy
+    }
+
+    private static func cell(preset: QualityGatePreset,
+                             imageClass: QualityGateClass) -> QualityGatePolicy {
         switch (preset, imageClass) {
         case (.small, .photo):
             return .init(globalSSIM: 0.86, p05TileSSIM: 0.76, edgeWeightedScore: 0.74,
@@ -268,6 +308,9 @@ struct QualityGateMeasurement: Equatable, Sendable {
     /// A1). Der Mittelwert über das ganze Bild verdünnt einen lokalen
     /// Farbverlust – eine grau gewordene Unterschrift – auf null.
     var peakDeltaE76: Double? = nil
+    /// Farberhalt im farbigsten Prozent der Referenz (0…1), siehe
+    /// `QualityGates.peakChromaRetention`. nil ohne Farbe in der Referenz.
+    var peakChromaRetention: Double? = nil
     /// Debug-Metrik (Luminanz, Stichprobe).
     let psnr: Double
     let tileSSIMs: [Double]
@@ -567,6 +610,9 @@ enum QualityGates {
         let peakDeltaE: Double? = reference.isColor
             ? peakDeltaE76(reference: reference, candidate: candidate)
             : nil
+        let retention: Double? = reference.isColor
+            ? peakChromaRetention(reference: reference, candidate: candidate)
+            : nil
 
         return QualityGateMeasurement(
             globalSSIM: Double(global),
@@ -575,6 +621,7 @@ enum QualityGates {
             textRegionScore: text,
             meanDeltaE76: deltaE,
             peakDeltaE76: peakDeltaE,
+            peakChromaRetention: retention,
             psnr: psnr(reference: reference.luma, candidate: candidate.luma),
             tileSSIMs: tileScoresAsDouble,
             tileGrid: tileGrid,
@@ -848,19 +895,21 @@ enum QualityGates {
     /// erhalten bleibt (Masterplan N17) – das Maß der Render-Stichprobe für
     /// „Farbe geht verloren".
     ///
-    /// Je Referenzpixel der Auswahl (wie `peakDeltaE76`) wird die Farbe des
-    /// Kandidaten auf die Farbrichtung der Referenz projiziert (a/b in
-    /// CIELAB); gewertet wird der beste Treffer in der 3×3-Umgebung, damit
-    /// ein um einen Pixel versetzter oder weicher gewordener Strich nicht als
-    /// Verlust zählt. Gemittelt wird nach Farbstärke gewichtet: Satte Tinte
-    /// zählt, schwaches Farbrauschen daneben kaum.
+    /// Je Referenzpixel der Auswahl (wie `peakDeltaE76`) zählt, wie weit die
+    /// Farbe des Kandidaten in der Farbebene (a/b in CIELAB) von der Referenz
+    /// abweicht, bezogen auf deren Farbstärke: 1 − |Δab| / |ab|. Blasser
+    /// (gleicher Farbton, halbe Sättigung) ergibt 0,5; grau 0; ein anderer
+    /// Farbton zählt ebenfalls als Verlust. Gewertet wird der beste Treffer
+    /// in der 3×3-Umgebung, damit ein um einen Pixel versetzter oder weicher
+    /// gewordener Strich nicht als Verlust zählt. Gemittelt wird nach
+    /// Farbstärke gewichtet: Satte Tinte zählt, schwaches Farbrauschen
+    /// daneben kaum.
     ///
     /// Warum nicht ΔE: ΔE misst auch Helligkeit und ist absolut. Gemessen
     /// 19.11. auf dem 110-DPI-Raster: dünne satte Tinte, verkleinert und als
     /// JPEG – sichtbar blau, nur blasser – kam auf ΔE 36 (Erhalt 0,51); ein
     /// echter farbiger Handschrift-Scan, komplett grau gemacht, nur auf
-    /// ΔE 20 (Erhalt 0,00). Keine ΔE-Grenze trennt das. Der Erhalt ist für
-    /// Grau immer 0, für eine andere Farbe (vertauschte Kanäle) ebenfalls.
+    /// ΔE 20 (Erhalt 0,00). Keine ΔE-Grenze trennt das.
     ///
     /// nil, wenn es nichts Farbiges zu messen gibt oder die Raster nicht
     /// zusammenpassen.
@@ -882,17 +931,17 @@ enum QualityGates {
                 let labA = lab(r: r, g: g, b: b)
                 let energy = labA.1 * labA.1 + labA.2 * labA.2
                 guard energy > 0 else { continue }
+                let strength = energy.squareRoot()
                 var best = 0.0
                 for ny in max(0, y - 1)...min(h - 1, y + 1) {
                     for nx in max(0, x - 1)...min(w - 1, x + 1) {
                         let n = (ny * w + nx) * 4
                         let labB = lab(r: rgbaB[n], g: rgbaB[n + 1], b: rgbaB[n + 2])
-                        best = max(best, labA.1 * labB.1 + labA.2 * labB.2)
+                        let da = labA.1 - labB.1, db = labA.2 - labB.2
+                        best = max(best, 1 - (da * da + db * db).squareRoot() / strength)
                     }
                 }
-                // Mehr als die Referenz zählt nicht mehr: Übersättigung an
-                // einer Stelle gleicht Verlust an anderer nicht aus.
-                kept += min(energy, best)
+                kept += best * energy
                 total += energy
             }
         }
@@ -981,9 +1030,13 @@ enum QualityGates {
            deltaE > limit {
             violated.append(.deltaE76)
         }
+        // N19: Eine überschrittene Farbspitze zählt nur als Verlust, wenn
+        // die Farbe auch wirklich fehlt. Ohne messbaren Farberhalt gilt die
+        // Spitze allein – wie vor N19.
         if let limit = policy.maxPeakDeltaE76,
            measurement.isColor, let peak = measurement.peakDeltaE76,
-           peak > limit {
+           peak > limit,
+           (measurement.peakChromaRetention ?? 0) < policy.minPeakChromaRetention {
             violated.append(.peakDeltaE76)
         }
         return violated.isEmpty ? .pass : .fail(violated)

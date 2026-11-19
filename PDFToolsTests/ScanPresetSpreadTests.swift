@@ -120,6 +120,19 @@ import Foundation
         #expect(qualitaet == 1898, "Qualität hat einen Scan unter 300 DPI verkleinert")
     }
 
+    /// Masterplan N19 (19.11.2026): Klein lieferte an dieser Vorlage 620 KB
+    /// (verlustfrei auf 910 px), Smart 163 KB, 1.0.9 für Klein 80 KB. Das
+    /// Farbspitzen-Gate (A1, ΔE) verwarf auf dem feinen Klein-Raster schon
+    /// die beste JPEG-Stufe: Die dünne blaue Tinte wird durch JPEG blasser,
+    /// bleibt aber blau. Die Breiten unterschieden sich weiter – der Test
+    /// darüber sah nichts.
+    @Test(.hangGuard) func oversizedScanKleinIsNotLargerThanSmart() throws {
+        let url = try Self.scanPDF(.paper, pixels: (1898, 2645), page: (1898, 2645), name: "klein-smart")
+        let klein = Compressor.fileSize(of: try Self.compressed(url, .small))
+        let smart = Compressor.fileSize(of: try Self.compressed(url, .smart))
+        #expect(klein <= smart, "Klein \(klein) Bytes ist größer als Smart \(smart)")
+    }
+
     /// Die Seitengröße bleibt erhalten; nur die Bewertung ändert sich.
     @Test(.hangGuard) func outputKeepsPageSize() throws {
         let url = try Self.scanPDF(.paper, pixels: (1898, 2645), page: (1898, 2645), name: "page-size")

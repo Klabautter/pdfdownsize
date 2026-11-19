@@ -289,6 +289,76 @@ import CoreGraphics
                 "Graustufen-Kandidat fiel am Gate durch: \(measurement)")
     }
 
+    // MARK: - 3b) Farbspitze nur zusammen mit fehlendem Farberhalt (Masterplan N19)
+
+    /// Weißes Blatt mit dünnen senkrechten Strichen in `color` – Tinte.
+    static func inkImage(_ color: CGColor) -> CGImage? {
+        let edge = 320
+        guard let ctx = CGContext(data: nil, width: edge, height: edge, bitsPerComponent: 8,
+                                  bytesPerRow: edge * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        ctx.setShouldAntialias(false)
+        ctx.setFillColor(.white)
+        ctx.fill(CGRect(x: 0, y: 0, width: edge, height: edge))
+        ctx.setFillColor(color)
+        for x in stride(from: 8, to: edge - 4, by: 16) {
+            ctx.fill(CGRect(x: x, y: 0, width: 2, height: edge))
+        }
+        return ctx.makeImage()
+    }
+
+    /// Befund (19.11.2026): Das Farbspitzen-Gate (ΔE) verwarf JPEG-Stufen,
+    /// deren dünne farbige Striche nur blasser geworden waren – an einem
+    /// Papier-Scan mit blauer Tinte jede Stufe (Klein lieferte verlustfrei
+    /// 620 KB statt 80 KB), an Kartenkacheln Hunderte (USGS-Karte 7 %
+    /// größer als in 1.0.9). ΔE misst auch die Helligkeit.
+    ///
+    /// Fehlermöglichkeiten: (1) blasser gewordene Tinte gilt weiter als
+    /// Farbverlust; (2) die Korrektur macht das Gate blind – grau gewordene
+    /// Tinte muss in jeder Stufe weiter durchfallen.
+    @Test(arguments: [QualityGatePreset.small, .smart, .quality])
+    func blassereTinteIstKeinFarbverlustGraueSchon(preset: QualityGatePreset) throws {
+        let reference = try #require(Self.inkImage(CGColor(red: 0.2, green: 0.25, blue: 0.75, alpha: 1)))
+        // Ein Fünftel Weiß beigemischt: sichtbar blau, nur blasser.
+        let paler = try #require(Self.inkImage(CGColor(red: 0.36, green: 0.40, blue: 0.80, alpha: 1)))
+        let gray = try #require(Self.inkImage(CGColor(gray: 0.3, alpha: 1)))
+        let policy = QualityGatePolicy.policy(preset: preset, imageClass: .graphics)
+        let peakLimit = try #require(policy.maxPeakDeltaE76)
+        func peakViolated(_ measurement: QualityGateMeasurement) -> Bool {
+            if case .fail(let violated) = QualityGates.qualityVerdict(policy: policy, measurement: measurement) {
+                return violated.contains(.peakDeltaE76)
+            }
+            return false
+        }
+
+        let palerMeasurement = try #require(QualityGates.measure(reference: reference, candidate: paler))
+        let palerPeak = try #require(palerMeasurement.peakDeltaE76)
+        let palerRetention = try #require(palerMeasurement.peakChromaRetention)
+        // Voraussetzung des Tests: Die Spitze allein hätte verworfen.
+        #expect(palerPeak > peakLimit, "Spitze \(palerPeak) liegt nicht über der Grenze \(peakLimit)")
+        #expect(palerRetention >= policy.minPeakChromaRetention,
+                "Farberhalt \(palerRetention) unter der Grenze \(policy.minPeakChromaRetention)")
+        #expect(!peakViolated(palerMeasurement), "Blassere Tinte als Farbverlust gewertet")
+
+        let grayMeasurement = try #require(QualityGates.measure(reference: reference, candidate: gray))
+        let grayRetention = try #require(grayMeasurement.peakChromaRetention)
+        #expect(grayRetention < 0.05, "Grau behält Farbe: \(grayRetention)")
+        #expect(peakViolated(grayMeasurement), "Grau gewordene Tinte wurde durchgelassen")
+    }
+
+    /// Außerhalb der Grenzwerttabelle entscheidet die Farbspitze allein
+    /// (CMYK-Neukodierung mit eigenen, engen Farbgrenzen).
+    @Test func ohneFarberhaltGrenzeEntscheidetDieSpitzeAllein() throws {
+        let reference = try #require(Self.inkImage(CGColor(red: 0.2, green: 0.25, blue: 0.75, alpha: 1)))
+        let paler = try #require(Self.inkImage(CGColor(red: 0.36, green: 0.40, blue: 0.80, alpha: 1)))
+        let measurement = try #require(QualityGates.measure(reference: reference, candidate: paler))
+        let policy = CMYKReencode.limits(preset: .smart).policy
+        guard case .fail(let violated) = QualityGates.qualityVerdict(policy: policy, measurement: measurement) else {
+            Issue.record("Blassere Tinte bestand die engen CMYK-Farbgrenzen"); return
+        }
+        #expect(violated.contains(.peakDeltaE76))
+    }
+
     // MARK: - 4) Grenzwert-Tabelle (Preset × Klasse, eine Zelle pro Test)
 
     @Test("Grenzwert-Tabelle vollständig und geordnet",

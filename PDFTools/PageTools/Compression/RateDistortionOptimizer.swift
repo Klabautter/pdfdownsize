@@ -438,7 +438,13 @@ enum RateDistortionOptimizer {
             let valueText = value.map { String(format: "%.4f", $0) } ?? "?"
             let limitText = limit.map { String(format: "%.2f", $0) } ?? "?"
             let comparator = (metric == .deltaE76 || metric == .peakDeltaE76) ? ">" : "<"
-            return "\(metric.rawValue) \(valueText)\(comparator)\(limitText)"
+            var text = "\(metric.rawValue) \(valueText)\(comparator)\(limitText)"
+            // N19: Die Farbspitze verletzt nur zusammen mit fehlendem Farberhalt.
+            if metric == .peakDeltaE76 {
+                let retention = measurement.peakChromaRetention.map { String(format: "%.2f", $0) } ?? "?"
+                text += " bei Farberhalt \(retention)<" + String(format: "%.2f", policy.minPeakChromaRetention)
+            }
+            return text
         }.joined(separator: ", ")
     }
 }

@@ -1835,6 +1835,8 @@ enum CandidateGenerator {
                         row["ssim"] = m.globalSSIM; row["tile_p05"] = m.p05TileSSIM
                         row["edge"] = m.edgeWeightedScore; row["text"] = m.textRegionScore
                         row["delta_e"] = m.meanDeltaE76
+                        row["peak_delta_e"] = m.peakDeltaE76
+                        row["peak_chroma_retention"] = m.peakChromaRetention
                         if m.psnr.isFinite { row["psnr"] = m.psnr }
                     }
                 }
