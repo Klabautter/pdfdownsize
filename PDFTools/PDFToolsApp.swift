@@ -54,7 +54,17 @@ struct PendingWork: Equatable {
     var needsConfirmation: Bool { unsavedResult || running }
 }
 
+/// Einstieg des Programms. Der Hilfsprozess (`--probe`, Masterplan N16)
+/// zweigt hier ab, BEVOR SwiftUI eine App aufbaut: kein Fenster, kein
+/// Dock-Symbol, keine Aktualisierungsprüfung.
 @main
+enum PDFdownsizeMain {
+    static func main() {
+        ProbeMode.runIfRequested()
+        PDFToolsApp.main()
+    }
+}
+
 struct PDFToolsApp: App {
     @NSApplicationDelegateAdaptor(OpenFilesDelegate.self) private var openFilesDelegate
     // intern (nicht private): Commands.swift-Erweiterung greift darauf zu.

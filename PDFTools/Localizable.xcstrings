@@ -2353,6 +2353,22 @@
         }
       }
     },
+    "Die Datei ließ sich nicht sicher prüfen.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Datei ließ sich nicht sicher prüfen."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The file could not be checked safely."
+          }
+        }
+      }
+    },
     "Die Kompressionskomponente fehlt oder ist beschädigt. Bitte installiere PDFdownsize erneut.": {
       "extractionState": "stale",
       "localizations": {

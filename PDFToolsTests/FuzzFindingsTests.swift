@@ -65,4 +65,33 @@ import Foundation
         }
         #expect(Date().timeIntervalSince(start) < 200, "Dauer \(Date().timeIntervalSince(start)) s")
     }
+
+    /// crash-108408: Link-Annotation mit /Subtype /Lin#d8 (ungültiges UTF-8).
+    /// PDFAnnotation.type warf eine Objective-C-Ausnahme – Prozessende.
+    @Test(.timeLimit(.minutes(3)), .needsLocalFiles("tmp/fuzz-findings/crash-108408.pdf"))
+    func ungueltigerAnnotationsnameStuerztNichtAb() throws {
+        let url = LocalTestData.repoRoot.appendingPathComponent("tmp/fuzz-findings/crash-108408.pdf")
+        do {
+            let result = try Compressor().compress(inputURL: url, mode: .smart)
+            if result.outputURL != url { try? FileManager.default.removeItem(at: result.outputURL) }
+        } catch {
+            // Ablehnen ist erlaubt – abstürzen nicht.
+        }
+    }
+
+    /// hang-107459: mutiertes NASA-Dokument (Original 2 s) – Text/Render liefen
+    /// bei jedem Re-Plan erneut ins Zeitlimit (Release 106 s). Die Kette endet
+    /// jetzt nach dem ersten Framework-Zeitlimit.
+    @Test(.timeLimit(.minutes(4)), .needsLocalFiles("tmp/fuzz-findings/hang-107459.pdf"))
+    func frameworkZeitlimitBeendetDieRueckfallkette() throws {
+        let url = LocalTestData.repoRoot.appendingPathComponent("tmp/fuzz-findings/hang-107459.pdf")
+        let start = Date()
+        do {
+            let result = try Compressor().compress(inputURL: url, mode: .smart)
+            if result.outputURL != url { try? FileManager.default.removeItem(at: result.outputURL) }
+        } catch {
+            // Ablehnen ist erlaubt.
+        }
+        #expect(Date().timeIntervalSince(start) < 150, "Dauer \(Date().timeIntervalSince(start)) s")
+    }
 }

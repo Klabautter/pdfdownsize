@@ -217,11 +217,17 @@ enum FontOptimizer {
     /// zurück (nur dieser Font ist weg – §14.4 „nur diesen Font keep“).
     ///
     /// `verify(preURL, candidateURL, samplePages)` ist der Testsam für die
-    /// QA; der Default ist `fontQAPasses`.
+    /// QA; der Default ist `fontQAVerdict`.
+    ///
+    /// Masterplan N16: Meldet die QA `.unmeasurable` (die Textextraktion kam
+    /// nicht zurück oder der Hilfsprozess ist abgestürzt), gilt das für jeden
+    /// weiteren Font derselben Datei auch. Dann endet die Font-Optimierung
+    /// sofort am letzten Checkpoint – vorher lief jeder Font einzeln ins
+    /// Zeitlimit (gemessen: Minuten an einer einzigen Problem-Datei).
     static func applySelectiveSubsetting(
         document: PDFCoreDocument,
         decisions: [Decision],
-        verify: (URL, URL, [Int]) -> Bool = FontOptimizer.fontQAPasses
+        verify: (URL, URL, [Int]) -> QAVerdict = FontOptimizer.fontQAVerdict
     ) throws -> Outcome {
         var outcome = Outcome(document: document)
         guard !decisions.isEmpty else { return outcome }
@@ -274,7 +280,11 @@ enum FontOptimizer {
                 let samplePages = Array(Set(decisions.flatMap {
                     renderSamplePages($0.pages)
                 })).sorted()
-                if verify(checkpointURL, candidateURL, samplePages) {
+                let verdict = verify(checkpointURL, candidateURL, samplePages)
+                if verdict == .unmeasurable {
+                    return try abandon(decisions, checkpointURL: checkpointURL, outcome: Outcome(document: active))
+                }
+                if verdict == .passes {
                     for decision in decisions {
                         // Trockenplanung = Ausführung (derselbe Kernpfad plant
                         // und fährt): die Schätzung je Font ist die der Planung.
@@ -326,7 +336,11 @@ enum FontOptimizer {
             // 2. Kandidat schreiben und je-Font-QA fahren.
             try active.save(to: candidateURL)
             let samplePages = renderSamplePages(decision.pages)
-            if verify(checkpointURL, candidateURL, samplePages) {
+            let verdict = verify(checkpointURL, candidateURL, samplePages)
+            if verdict == .unmeasurable {
+                return try abandon([decision] + pending, checkpointURL: checkpointURL, outcome: outcome)
+            }
+            if verdict == .passes {
                 // Akzeptiert: Checkpoint rollt vor (beinhaltet diesen Font).
                 try active.save(to: checkpointURL)
                 outcome.subsetted += 1
@@ -348,6 +362,30 @@ enum FontOptimizer {
             }
         }
         outcome.document = active
+        return outcome
+    }
+
+    /// Ergebnis der je-Font-QA.
+    enum QAVerdict: Sendable {
+        case passes
+        case fails
+        /// Die Datei ließ sich nicht messen (Zeitlimit oder Absturz im
+        /// Hilfsprozess) – das trifft jeden weiteren Versuch genauso.
+        case unmeasurable
+    }
+
+    /// Font-Optimierung beenden: zurück zum letzten Checkpoint, alle noch
+    /// offenen Fonts gelten als zurückgerollt.
+    private static func abandon(_ remaining: [Decision], checkpointURL: URL,
+                                outcome: Outcome) throws -> Outcome {
+        var outcome = outcome
+        outcome.document = try PDFCoreDocument(path: checkpointURL.path)
+        for decision in remaining {
+            outcome.rolledBack += 1
+            outcome.perFont.append(FontOutcome(
+                objectID: decision.objectID, pages: decision.pages,
+                result: .rolledBack, estimatedSavedBytes: 0))
+        }
         return outcome
     }
 
@@ -376,30 +414,39 @@ enum FontOptimizer {
     /// Never-Grow gegen den Stand davor, und eine Render-Stichprobe der
     /// betroffenen Seiten (kleinster gemeinsamer Nenner: jede geprüfte
     /// Seite muss pixelgleich bleiben).
-    static func fontQAPasses(_ preURL: URL, _ candidateURL: URL,
-                             _ samplePages: [Int]) -> Bool {
-        guard let before = try? PDFSemanticSnapshot.capture(preURL),
-              let after = try? PDFSemanticSnapshot.capture(candidateURL),
-              before.pageCount == after.pageCount,
+    static func fontQAVerdict(_ preURL: URL, _ candidateURL: URL,
+                              _ samplePages: [Int]) -> QAVerdict {
+        let before: PDFSemanticSnapshot
+        let after: PDFSemanticSnapshot
+        do {
+            before = try PDFSemanticSnapshot.capture(preURL)
+            after = try PDFSemanticSnapshot.capture(candidateURL)
+        } catch is PDFSemanticSnapshot.SnapshotError {
+            return .unmeasurable
+        } catch {
+            return .fails
+        }
+        guard before.pageCount == after.pageCount,
               before.pages.count == after.pages.count else {
-            return false
+            return .fails
         }
         for (b, a) in zip(before.pages, after.pages) {
-            if b.textFingerprint != a.textFingerprint { return false }
-            if b.textCharacterCount != a.textCharacterCount { return false }
+            if b.textFingerprint != a.textFingerprint { return .fails }
+            if b.textCharacterCount != a.textCharacterCount { return .fails }
         }
         let preBytes = Int(Compressor.fileSize(of: preURL))
         let candidateBytes = Int(Compressor.fileSize(of: candidateURL))
         guard candidateBytes > 0, candidateBytes <= preBytes else {
-            return false
+            return .fails
         }
-        guard !samplePages.isEmpty else { return true }
+        guard !samplePages.isEmpty else { return .passes }
         // Pixelgleichheit genügt – die vollen Seitenmetriken (SSIM, Tinte)
         // kosteten je Seite rund drei Sekunden, von denen die Entscheidung
         // nichts nutzte (2026-10-15: 55-Seiten-Formular, 10 Seiten, 32 s).
-        return (try? RenderDifferential.pagesIdentical(
+        let identical = (try? RenderDifferential.pagesIdentical(
             sourceURL: preURL, outputURL: candidateURL,
             pages: samplePages)) ?? false
+        return identical ? .passes : .fails
     }
 
     /// Deterministische Stichprobe: erste, mittlere, letzte betroffene

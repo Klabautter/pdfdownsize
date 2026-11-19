@@ -795,7 +795,7 @@ enum CompressionExecutor {
     // MARK: - Phase 5b/V2-8 – Font-QA
 
     /// Die je-Font-QA des selektiven Subsettings lebt in
-    /// `FontOptimizer.fontQAPasses` (Text-Fingerprints dokumentweit,
+    /// `FontOptimizer.fontQAVerdict` (Text-Fingerprints dokumentweit,
     /// Never-Grow, Render-Stichprobe je Font – §14.4). Der frühere globale
     /// Snapshot-Gate-Pass (`subsetGatePasses`/`applyFontSubsetting`) ist mit
     /// dem V2-Cutover entfernt (§4.18).

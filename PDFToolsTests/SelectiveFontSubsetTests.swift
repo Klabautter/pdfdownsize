@@ -71,6 +71,41 @@ import PDFKit
 
     // MARK: 2 – §14.4: Nur der schuldige Font rollt zurück
 
+    /// Masterplan N16: Ist die Datei nicht messbar (Zeitlimit oder Absturz im
+    /// Hilfsprozess), endet die Font-Optimierung nach EINEM QA-Aufruf am
+    /// Checkpoint – vorher lief jeder Font einzeln ins Zeitlimit.
+    @Test(.hangGuard) func nichtMessbareDateiBeendetDieFontOptimierungSofort() throws {
+        let url = try Self.requireFixture {
+            try PDFFixtures.twoSubsetFontsPDF()
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+        let doc = try PDFCoreDocument(path: url.path)
+        let candidates = try doc.fontSubsetCandidates()
+            .filter(\.subsettable)
+            .sorted { $0.objectID.objectNumber < $1.objectID.objectNumber }
+        #expect(candidates.count == 2)
+        var calls = 0
+        let outcome = try FontOptimizer.applySelectiveSubsetting(
+            document: doc,
+            decisions: candidates.map {
+                FontOptimizer.Decision(objectID: $0.objectID,
+                                       pages: $0.pages,
+                                       estimatedSaving: $0.estimatedBytesSaved)
+            },
+            verify: { _, _, _ in
+                calls += 1
+                return .unmeasurable
+            })
+        #expect(calls == 1, "Nach „nicht messbar“ wurde weiter geprüft (\(calls) Aufrufe)")
+        #expect(outcome.subsetted == 0)
+        #expect(outcome.rolledBack == 2)
+        // Der gelieferte Stand ist der Checkpoint: beide Fonts unangetastet.
+        let out = Self.tempURL("unmessbar")
+        defer { try? FileManager.default.removeItem(at: out) }
+        try outcome.document.save(to: out)
+        #expect(try PDFCoreDocument(path: out.path).fontSubsetCandidates().filter(\.subsettable).count == 2)
+    }
+
     @Test(.hangGuard) func qaFailRolltNurDiesenFontZurueck() throws {
         let url = try Self.requireFixture {
             try PDFFixtures.twoSubsetFontsPDF()
@@ -105,7 +140,7 @@ import PDFKit
                 // Aufruf 1 ist der Schnellweg (beide Fonts auf einmal) und
                 // scheitert; danach der Einzelweg: Font 1 besteht, Font 2
                 // scheitert (2026-10-15).
-                return calls == 2
+                return calls == 2 ? .passes : .fails
             })
 
         #expect(outcome.subsetted == 1)
@@ -146,11 +181,11 @@ import PDFKit
         defer { try? FileManager.default.removeItem(at: b) }
 
         // Identische Datei: alle Seiten gleich → QA besteht.
-        #expect(FontOptimizer.fontQAPasses(a, a, [0]))
+        #expect(FontOptimizer.fontQAVerdict(a, a, [0]) == .passes)
         // Abweichender Text: QA scheitert.
-        #expect(!FontOptimizer.fontQAPasses(a, b, [0]))
+        #expect(FontOptimizer.fontQAVerdict(a, b, [0]) == .fails)
         // Fehlende/leere Stichprobe ändert die Textpflicht nicht.
-        #expect(!FontOptimizer.fontQAPasses(a, b, []))
+        #expect(FontOptimizer.fontQAVerdict(a, b, []) == .fails)
     }
 
     @Test func stichprobeIstDeterministischUndGekappt() {

@@ -256,9 +256,9 @@ import PDFKit
         let b = try Self.requireFixture { try PDFFixtures.subsetFontPDF(text: "XYZ",
                                                                   name: "gate-b") }
         defer { try? FileManager.default.removeItem(at: b) }
-        #expect(FontOptimizer.fontQAPasses(a, a, [0]),
+        #expect(FontOptimizer.fontQAVerdict(a, a, [0]) == .passes,
                 "Identische Datei muss das Gate passieren")
-        #expect(!FontOptimizer.fontQAPasses(a, b, [0]),
+        #expect(FontOptimizer.fontQAVerdict(a, b, [0]) == .fails,
                 "Abweichender Text muss das Gate failen")
     }
 
@@ -286,7 +286,7 @@ import PDFKit
                 estimatedSaving: candidate.estimatedBytesSaved)
         ]
         let outcome = try FontOptimizer.applySelectiveSubsetting(
-            document: document, decisions: decisions, verify: { _, _, _ in false })
+            document: document, decisions: decisions, verify: { _, _, _ in .fails })
 
         #expect(outcome.rolledBack == 1,
                 "Verweigerte QA muss den Font zurückrollen")

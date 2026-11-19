@@ -424,7 +424,8 @@ enum PDFValidator {
         let fitting = (Double(maximumRenderSamplePixels) / area).squareRoot() * 0.995
         return min(renderSampleDPI / 72.0, fitting)
     }
-    /// Masterplan D5: Zeitlimit für das Zeichnen von Referenz und Ausgabe einer Seite.
+    /// Masterplan D5/N16: So lange darf der Hilfsprozess an Referenz und
+    /// Ausgabe EINER Seite arbeiten, bevor er beendet wird.
     static let renderSampleTimeout = 30.0
     /// Strukturkollaps: dieselbe Grenze wie der Katastrophen-Floor der
     /// Bildgates – darunter ist eine Seite kaputt, nicht nur komprimiert.
@@ -451,53 +452,105 @@ enum PDFValidator {
         return pages.sorted()
     }
 
-    /// Rendert jede Stichprobenseite von Original und Ausgabe und meldet
+    /// Messwerte einer Stichprobenseite – das, was der Hilfsprozess liefert.
+    /// `comparable == false`: Die Seite ließ sich nicht in zwei gleich große
+    /// Raster rendern (verschiedene Seitengrößen, Seite fehlt, Box unbrauchbar).
+    struct RenderSampleMeasurement: Codable, Equatable {
+        var page: Int               // 0-basiert
+        var comparable: Bool
+        /// Struktur: der schlechtere Wert aus voller Auflösung und geeichtem Raster.
+        var structureSSIM: Double?
+        var peakDeltaE: Double?
+    }
+
+    /// Bewertet die Stichprobenseiten von Original und Ausgabe und meldet
     /// Strukturkollaps (`.render`) oder Farbverlust (`.color`) mit Seite.
     /// Die Befunde sind `.error`: Sie lösen den vorhandenen Re-Plan aus
     /// (RollbackPlanner stuft die Ressourcen dieser Seiten zurück) – keine
     /// zweite Entscheidungslogik.
+    ///
+    /// Gerendert und gemessen wird im Hilfsprozess (Masterplan N16):
+    /// CoreGraphics kam an einem mutierten JPX-Bild nicht zurück. Hängt er an
+    /// einer Seite länger als `renderSampleTimeout`, wird er beendet und die
+    /// Prüfung gilt als nicht bestanden.
     private static func validateRenderSample(outputURL: URL, referenceURL: URL,
                                              pages: [Int], expectsGrayscale: Bool,
                                              report: inout Report) {
-        guard let source = CGPDFDocument(referenceURL as CFURL),
-              let output = CGPDFDocument(outputURL as CFURL) else {
+        let measurements: [RenderSampleMeasurement]
+        switch FrameworkProbe.renderSample(referenceURL: referenceURL, outputURL: outputURL, pages: pages) {
+        case .success(let values):
+            measurements = values
+        case .failure(.stalled(let page)):
+            report.frameworkTimedOut = true
+            let number = (page ?? pages.first ?? 0) + 1
+            let message = String(localized: "Seite \(number) ließ sich nicht in angemessener Zeit darstellen.")
+            report.fail(message, ValidationFinding(kind: .render, severity: .error,
+                                                   pages: [number], message: message))
+            return
+        case .failure:
+            // Dokumente nicht zu öffnen, Hilfsprozess abgestürzt oder nicht
+            // startbar: nichts gemessen, also nicht bestanden.
             report.fail("Render-Stichprobe nicht möglich", ValidationFinding(
                 kind: .render, severity: .error, pages: [],
                 message: "Render-Stichprobe nicht möglich"))
             return
         }
-        var timedOut = false
-        for index in pages where index < source.numberOfPages && index < output.numberOfPages && !timedOut {
+        for measurement in measurements {
+            let number = measurement.page + 1
+            guard measurement.comparable else {
+                report.fail("Seite \(number): nicht vergleichbar gerendert", ValidationFinding(
+                    kind: .render, severity: .error, pages: [number],
+                    message: "Seite \(number): nicht vergleichbar gerendert"))
+                continue
+            }
+            if let structureSSIM = measurement.structureSSIM, structureSSIM < renderSampleMinimumSSIM {
+                let message = String(format: "Seite %d: Darstellung weicht vom Original ab (SSIM %.3f)",
+                                     number, structureSSIM)
+                report.fail(message, ValidationFinding(
+                    kind: .render, severity: .error, pages: [number], message: message))
+            }
+            // N4: Rechnet der Lauf absichtlich nach Graustufen, ist fehlende
+            // Farbe gewollt. Die Strukturprüfung darüber bleibt.
+            if !expectsGrayscale,
+               let peak = measurement.peakDeltaE, peak > renderSampleMaximumPeakDeltaE {
+                let message = String(format: "Seite %d: Farbe geht verloren (ΔE %.1f im farbigsten Prozent)",
+                                     number, peak)
+                report.fail(message, ValidationFinding(
+                    kind: .color, severity: .error, pages: [number], message: message))
+            }
+        }
+    }
+
+    /// Rendert und misst die Stichprobenseiten – läuft im Hilfsprozess
+    /// (`ProbeMode`). nil, wenn sich eines der Dokumente nicht öffnen lässt.
+    /// `onPage` meldet Beginn und Ende je Seite an den Aufrufer.
+    static func measureRenderSample(referenceURL: URL, outputURL: URL, pages: [Int],
+                                    onPage: PDFSemanticSnapshot.PageProgress? = nil) -> [RenderSampleMeasurement]? {
+        guard let source = CGPDFDocument(referenceURL as CFURL),
+              let output = CGPDFDocument(outputURL as CFURL) else { return nil }
+        var result: [RenderSampleMeasurement] = []
+        for index in pages where index < source.numberOfPages && index < output.numberOfPages {
             autoreleasepool {
-                // Masterplan D5: Zeichnen mit Zeitlimit (CoreGraphics hing an
-                // einem mutierten JPX-Bild). Nach Ablauf werden die Dokumente
-                // nicht weiter benutzt – die Prüfung gilt als nicht bestanden.
-                nonisolated(unsafe) let sourceDoc = source
-                nonisolated(unsafe) let outputDoc = output
-                guard let rendered = FrameworkWatchdog.run(timeout: renderSampleTimeout, { () -> (CGImage?, CGImage?) in
-                    // N3: EIN Maßstab für beide, bestimmt an der Quellseite.
-                    // Weicht die Seitengröße der Ausgabe ab, entstehen
-                    // verschieden große Raster – das bleibt ein Befund.
-                    guard let sourcePage = sourceDoc.page(at: index + 1),
-                          let scale = renderSampleScale(for: sourcePage.getBoxRect(.cropBox))
-                    else { return (nil, nil) }
-                    return (renderPage(sourceDoc, index: index, scale: scale),
-                            renderPage(outputDoc, index: index, scale: scale))
-                }) else {
-                    timedOut = true
-                    report.frameworkTimedOut = true
-                    let message = String(localized: "Seite \(index + 1) ließ sich nicht in angemessener Zeit darstellen.")
-                    report.fail(message, ValidationFinding(kind: .render, severity: .error,
-                                                           pages: [index + 1], message: message))
-                    return
+                // Das Zeitlimit je Seite gilt dem RENDERN (CoreGraphics kann
+                // hängen). Das Messen danach ist eigener Code und zählt nicht
+                // dazu: Im Debug-Build braucht es an einer 12-MP-Seite allein
+                // über 15 s, zusammen mit dem Rendern riss es die 30 s.
+                onPage?(true, index)
+                var rendered: (CGImage, CGImage)?
+                if let sourcePage = source.page(at: index + 1),
+                   // N3: EIN Maßstab für beide, bestimmt an der Quellseite.
+                   // Weicht die Seitengröße der Ausgabe ab, entstehen
+                   // verschieden große Raster – das bleibt ein Befund.
+                   let scale = renderSampleScale(for: sourcePage.getBoxRect(.cropBox)),
+                   let reference = renderPage(source, index: index, scale: scale),
+                   let candidate = renderPage(output, index: index, scale: scale) {
+                    rendered = (reference, candidate)
                 }
-                guard let reference = rendered.0,
-                      let candidate = rendered.1,
+                onPage?(false, index)
+                guard let (reference, candidate) = rendered,
                       reference.width == candidate.width, reference.height == candidate.height
                 else {
-                    report.fail("Seite \(index + 1): nicht vergleichbar gerendert", ValidationFinding(
-                        kind: .render, severity: .error, pages: [index + 1],
-                        message: "Seite \(index + 1): nicht vergleichbar gerendert"))
+                    result.append(RenderSampleMeasurement(page: index, comparable: false))
                     return
                 }
                 let census = ChromaCensus.of(reference)
@@ -505,7 +558,11 @@ enum PDFValidator {
                 guard let refSample = QualityGates.sample(reference, maxEdge: edge, census: census),
                       let outSample = QualityGates.sample(candidate, maxEdge: edge),
                       let measurement = QualityGates.measure(reference: refSample, candidate: outSample)
-                else { return }
+                else {
+                    // Zu klein zum Messen (unter 8 px): vergleichbar, ohne Werte.
+                    result.append(RenderSampleMeasurement(page: index, comparable: true))
+                    return
+                }
                 // N3: Struktur zusätzlich auf dem geeichten Raster; es gilt der
                 // schlechtere Wert – nie milder als die volle Auflösung allein.
                 var structureSSIM = measurement.globalSSIM
@@ -515,23 +572,13 @@ enum PDFValidator {
                    let small = QualityGates.measure(reference: refSmall, candidate: outSmall) {
                     structureSSIM = min(structureSSIM, small.globalSSIM)
                 }
-                if structureSSIM < renderSampleMinimumSSIM {
-                    let message = String(format: "Seite %d: Darstellung weicht vom Original ab (SSIM %.3f)",
-                                         index + 1, structureSSIM)
-                    report.fail(message, ValidationFinding(
-                        kind: .render, severity: .error, pages: [index + 1], message: message))
-                }
-                // N4: Rechnet der Lauf absichtlich nach Graustufen, ist fehlende
-                // Farbe gewollt. Die Strukturprüfung darüber bleibt.
-                if !expectsGrayscale,
-                   let peak = measurement.peakDeltaE76, peak > renderSampleMaximumPeakDeltaE {
-                    let message = String(format: "Seite %d: Farbe geht verloren (ΔE %.1f im farbigsten Prozent)",
-                                         index + 1, peak)
-                    report.fail(message, ValidationFinding(
-                        kind: .color, severity: .error, pages: [index + 1], message: message))
-                }
+                result.append(RenderSampleMeasurement(
+                    page: index, comparable: true,
+                    structureSSIM: structureSSIM.isFinite ? structureSSIM : nil,
+                    peakDeltaE: measurement.peakDeltaE76.flatMap { $0.isFinite ? $0 : nil }))
             }
         }
+        return result
     }
 
     /// Seite im Maßstab `scale` (Pixel je Punkt) auf Weiß, Rotation über die
@@ -739,13 +786,13 @@ enum PDFValidator {
                           hardFail: policy.preservesAnnotations,
                           report: &report)
             compareCounts(in: reference, out: doc,
-                          selector: { countSubtype(.link, in: $0) },
+                          selector: { countSubtype("Link", in: $0) },
                           label: "Links",
                           kind: .link,
                           hardFail: policy.preservesLinks,
                           report: &report)
             compareCounts(in: reference, out: doc,
-                          selector: { countSubtype(.widget, in: $0) },
+                          selector: { countSubtype("Widget", in: $0) },
                           label: "Formularfelder",
                           kind: .form,
                           hardFail: policy.preservesForms,
@@ -797,8 +844,10 @@ enum PDFValidator {
                 }
             }
             tally({ $0.annotations.count }, into: &annotations)
-            tally({ $0.annotations.filter { $0.type == "Link" }.count }, into: &links)
-            tally({ $0.annotations.filter { $0.type == "Widget" }.count }, into: &widgets)
+            // Typ über den sicheren Zugriff: `PDFAnnotation.type` wirft bei einem
+            // ungültigen /Subtype eine Objective-C-Ausnahme (Fuzz-Fund crash-108408).
+            tally({ $0.annotations.filter { PDFSemanticSnapshot.subtype($0) == "Link" }.count }, into: &links)
+            tally({ $0.annotations.filter { PDFSemanticSnapshot.subtype($0) == "Widget" }.count }, into: &widgets)
         }
 
         // Bleiben ALLE Quellseiten erhalten, darf kein Verweis wegfallen –
@@ -866,9 +915,16 @@ enum PDFValidator {
         }
     }
 
-    private static func countSubtype(_ subtype: PDFAnnotationSubtype, in doc: PDFDocument) -> Int {
+    /// Zählt Anmerkungen eines Typs („Link", „Widget").
+    ///
+    /// Zwei Korrekturen (19.11.2026): Der Typ kommt über den sicheren Zugriff
+    /// (`PDFAnnotation.type` wirft bei ungültigem /Subtype – crash-108408).
+    /// Und der Vergleich traf vorher nie: `type` liefert „Link",
+    /// `PDFAnnotationSubtype.link.rawValue` ist „/Link" – die Zählung ergab
+    /// immer 0, die Prüfung auf verlorene Links und Formularfelder lief leer.
+    private static func countSubtype(_ name: String, in doc: PDFDocument) -> Int {
         (0..<doc.pageCount).reduce(0) { sum, i in
-            sum + (doc.page(at: i)?.annotations.filter { $0.type == subtype.rawValue }.count ?? 0)
+            sum + (doc.page(at: i)?.annotations.filter { PDFSemanticSnapshot.subtype($0) == name }.count ?? 0)
         }
     }
 
