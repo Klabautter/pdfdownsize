@@ -27,6 +27,8 @@ enum FrameworkProbe {
         case failed(code: Int32)
         /// Beendet ohne lesbares Ergebnis.
         case noResult
+        /// Vom Aufrufer abgebrochen (N27); der Prozess wurde beendet.
+        case cancelled
     }
 
     /// Exit-Codes des Hilfsprozesses.
@@ -69,12 +71,16 @@ enum FrameworkProbe {
         }
     }
 
-    static func snapshot(_ url: URL, backend: PDFSemanticSnapshot.Backend) throws -> PDFSemanticSnapshot {
+    static func snapshot(_ url: URL, backend: PDFSemanticSnapshot.Backend,
+                         isCancelled: (@Sendable () -> Bool)? = nil) throws -> PDFSemanticSnapshot {
         let readable = readableForHelper(url)
         defer { readable.cleanup() }
         let result = run(["snapshot", readable.url.path, backend.rawValue],
-                         pageTimeout: PDFSemanticSnapshot.pageTextTimeout)
+                         pageTimeout: PDFSemanticSnapshot.pageTextTimeout,
+                         isCancelled: isCancelled)
         switch result {
+        case .failure(.cancelled):
+            throw CancellationError()
         case .success(let data):
             do { return try JSONDecoder().decode(PDFSemanticSnapshot.self, from: data) }
             catch { throw PDFSemanticSnapshot.SnapshotError.probeFailed(reason: "Ergebnis nicht lesbar") }
@@ -159,9 +165,12 @@ enum FrameworkProbe {
     }
 
     /// Startet `--probe <arguments> <ergebnisdatei>`, überwacht den
-    /// Fortschritt und liefert den Inhalt der Ergebnisdatei.
-    static func run(_ arguments: [String], pageTimeout: Double) -> Result<Data, Failure> {
+    /// Fortschritt und liefert den Inhalt der Ergebnisdatei. `isCancelled`
+    /// wird alle 0,2 s gefragt; `true` beendet den Prozess (N27).
+    static func run(_ arguments: [String], pageTimeout: Double,
+                    isCancelled: (@Sendable () -> Bool)? = nil) -> Result<Data, Failure> {
         guard let executable = executableURL() else { return .failure(.launchFailed("kein Programmpfad")) }
+        if let isCancelled, isCancelled() { return .failure(.cancelled) }
         let resultURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdfdownsize-probe-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: resultURL) }
@@ -194,6 +203,10 @@ enum FrameworkProbe {
         defer { output.fileHandleForReading.readabilityHandler = nil }
 
         while exited.wait(timeout: .now() + 0.2) == .timedOut {
+            if let isCancelled, isCancelled() {
+                stop(process, exited: exited)
+                return .failure(.cancelled)
+            }
             if let stalledPage = progress.stall(pageTimeout: pageTimeout, stageTimeout: stageTimeout) {
                 stop(process, exited: exited)
                 return .failure(.stalled(page: stalledPage))

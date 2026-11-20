@@ -50,6 +50,16 @@ struct CompressionView: View {
 
                 }
             }
+            // Sichern-Fehler des Stapels (⌘S oder Knopf). N28: Hier statt an
+            // der Stapelliste – sonst blieb ⌘S in der Vorher/Nachher-Ansicht
+            // einer Stapelzeile ohne sichtbaren Fehler.
+            .alert("Sichern fehlgeschlagen", isPresented: Binding(
+                get: { viewModel.bulkSaveError != nil },
+                set: { if !$0 { viewModel.bulkSaveError = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(viewModel.bulkSaveError ?? "")
+            }
             // onOpenURL liegt zentral auf RootView (Routing ins aktive Tool).
             .focusedSceneObject(viewModel)
     }
@@ -971,10 +981,14 @@ private struct BulkComparisonStage: View {
         .task(id: input) {
             // N14 (C6): beide Dokumente abseits des Main Threads öffnen.
             let output = viewModel.bulkResult(for: input)?.outputURL
-            let source = input
+            // N23: eine entsperrte Datei über ihre Arbeitskopie (die Ausgabe
+            // ist wieder verschlüsselt – PDFKit braucht dafür das Passwort).
+            let source = viewModel.bulkUnlocked[input]?.workingCopy ?? input
+            let password = viewModel.bulkUnlocked[input]?.password
             let loaded = await Task.detached(priority: .userInitiated) {
-                (SendableDocument(PDFDocument(url: source)),
-                 SendableDocument(output.flatMap { PDFDocument(url: $0) }))
+                let compared = output.flatMap { PDFDocument(url: $0) }
+                if let password, compared?.isLocked == true { compared?.unlock(withPassword: password) }
+                return (SendableDocument(PDFDocument(url: source)), SendableDocument(compared))
             }.value
             guard !Task.isCancelled else { return }
             original = loaded.0.value
@@ -998,7 +1012,8 @@ private struct BulkStage: View {
 
     // Sichern-Fehler als System-Alert (Befunde M7/S6) – Aktionsfehler
     // gehören nicht in eine Fußzeile. Seit N14 (B4) im ViewModel
-    // (`bulkSaveError`), damit ⌘S ihn ebenfalls zeigt.
+    // (`bulkSaveError`), damit ⌘S ihn ebenfalls zeigt; der Alert hängt an
+    // `CompressionView` (N28).
 
     private var rows: [BulkRow] {
         viewModel.bulkInputs.enumerated().map { BulkRow(index: $0.offset, url: $0.element) }
@@ -1112,13 +1127,6 @@ private struct BulkStage: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(unlockError ?? "")
-        }
-        .alert("Sichern fehlgeschlagen", isPresented: Binding(
-            get: { viewModel.bulkSaveError != nil },
-            set: { if !$0 { viewModel.bulkSaveError = nil } })) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(viewModel.bulkSaveError ?? "")
         }
     }
 

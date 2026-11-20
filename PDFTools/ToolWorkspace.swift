@@ -350,7 +350,6 @@ enum ProgressText {
         case "Optimiere Struktur …": return String(localized: "Struktur wird optimiert …")
         case "Validiere Ergebnis …": return String(localized: "Ergebnis wird geprüft …")
         case "Erstelle PDF …": return String(localized: "PDF wird erstellt …")
-        case "Smart komprimieren …": return String(localized: "Wird mit Smart komprimiert …")
         default: break
         }
         if label.hasPrefix("Qualitätsprüfung") || label.hasPrefix("Optimiere Bilder (") {
@@ -433,15 +432,19 @@ struct DocumentPreview: View {
     private func loadDocument() async {
         ownSelected = 0   // eine gebundene Seite behält ihren Stand (z. B. Quelle → Ergebnis)
         thumbs = [:]
+        // N28: Solange die neue Datei lädt, nicht das alte Dokument zeigen.
+        document = nil
         // N14 (C6): Öffnen abseits des Main Threads.
         let target = url
         let loaded = await Task.detached(priority: .userInitiated) {
             SendableDocument(PDFDocument(url: target))
         }.value
-        guard url == target, !Task.isCancelled else { return }
+        // N28: `.task(id: url)` bricht diese Aufgabe beim Wechsel ab – nur das
+        // zählt. (`url == target` verglich die eigene Kopie und war immer wahr.)
+        guard !Task.isCancelled else { return }
         document = loaded.value
         let samples = CompressionViewModel.samplePageCount
-        thumbs = await Task.detached(priority: .utility) { () -> [Int: NSImage] in
+        let loadedThumbs = await Task.detached(priority: .utility) { () -> [Int: NSImage] in
             guard let doc = PDFDocument(url: target) else { return [:] }
             var out: [Int: NSImage] = [:]
             for index in 0..<min(doc.pageCount, samples) {
@@ -451,5 +454,8 @@ struct DocumentPreview: View {
             }
             return out
         }.value
+        // Miniaturen der vorigen Datei dürfen die neue nicht überschreiben.
+        guard !Task.isCancelled else { return }
+        thumbs = loadedThumbs
     }
 }

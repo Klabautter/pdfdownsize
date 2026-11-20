@@ -205,6 +205,11 @@ while IFS= read -r -d '' bin; do
         echo "Nicht mit Developer ID und Hardened Runtime signiert: ${bin#$APP/}" >&2; exit 1; }
 done < <(find "$APP" -type f -perm +111 -print0)
 
+# Masterplan N22: Der Release-Check läuft am auszuliefernden, signierten
+# Bundle – mit Sandbox-, Helfer- und Abnahme-Prüfung (im Gate übersprungen,
+# weil dessen Messbuild absichtlich ohne Sandbox ist).
+"$ROOT/Scripts/release-check.sh" "$APP" || { echo "Release-Check rot – kein Release." >&2; exit 1; }
+
 # Kein Pfad des Entwicklungsrechners im veröffentlichten Bundle.
 if grep -rlaF "$HOME/" "$APP" >/dev/null 2>&1; then
     echo "Das Bundle enthält Pfade unter $HOME – Release abgebrochen:" >&2

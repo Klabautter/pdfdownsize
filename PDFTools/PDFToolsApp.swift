@@ -87,11 +87,7 @@ struct PDFToolsApp: App {
         // Nicht gesicherte Ergebnisse: Reste beendeter Sitzungen weg, die
         // eigenen verschwinden beim Beenden.
         SessionScratch.cleanupAbandoned()
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification, object: nil, queue: nil
-        ) { _ in
-            SessionScratch.removeOwnDirectory()
-        }
+        SessionScratch.removeOnTermination()
     }
 
     var body: some Scene {

@@ -271,10 +271,13 @@ struct Compressor {
     static func finalize(result: CompressionResult, destination: URL,
                          preservingSource: Bool = false) throws -> CompressionResult {
         let fm = FileManager.default
+        // Masterplan N22: Nur das Ziel selbst wird geschrieben. In der Sandbox
+        // gibt der Sichern-Dialog genau diese Datei frei – eine Zwischenkopie
+        // daneben (vorher `.pdftools-<uuid>.pdf` im Zielordner) schlug fehl.
+        // Die Kopie für „Quelle behalten“ liegt deshalb im eigenen Temp-Ordner.
         let source: URL
         if preservingSource {
-            source = destination.deletingLastPathComponent()
-                .appendingPathComponent(".pdftools-\(UUID().uuidString).pdf")
+            source = fm.temporaryDirectory.appendingPathComponent("save-\(UUID().uuidString).pdf")
             try fm.copyItem(at: result.outputURL, to: source)
         } else {
             source = result.outputURL
@@ -283,6 +286,8 @@ struct Compressor {
             if preservingSource { try? fm.removeItem(at: source) }
         }
         if fm.fileExists(atPath: destination.path) {
+            // Atomar ersetzen (Apples Weg für Sandbox-Apps); die Hilfsdatei
+            // legt das System selbst an, nicht im Zielordner.
             _ = try fm.replaceItemAt(destination, withItemAt: source)
         } else {
             try fm.moveItem(at: source, to: destination)
@@ -316,7 +321,10 @@ struct Compressor {
     ) throws -> CompressionResult {
         let fm = FileManager.default
         let inputBytes = Self.fileSize(of: inputURL)
-        let workDir = fm.temporaryDirectory
+        // N23: im Sitzungsordner – er verschwindet beim Beenden, und Reste
+        // abgestürzter Läufe räumt der nächste Start weg. Vorher lagen die
+        // Zwischenstände (bei entsperrten Quellen Klartext) lose im Temp-Stamm.
+        let workDir = SessionScratch.directory
             .appendingPathComponent("compress-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: workDir, withIntermediateDirectories: true)
         // Das Ergebnis wird am Ende aus dem Workspace HERAUS verschoben;
@@ -346,7 +354,8 @@ struct Compressor {
         // der Quelle. Ihr Snapshot läuft deshalb gleich jetzt im Hilfsprozess,
         // parallel zur Kompression, statt erst danach (statab: rund 3,8 s).
         let earlyReference = qaValidationHook == nil
-            ? EarlyReferenceSnapshot(inputURL) : nil
+            ? EarlyReferenceSnapshot(inputURL, isCancelled: isCancelled) : nil
+        defer { earlyReference?.cancel() }
 
         progress?(0.05, "Analysiere Dokument …")
         let imageOutput = workDir.appendingPathComponent("images.pdf")
@@ -1011,15 +1020,36 @@ private final class MonotonicProgress: @unchecked Sendable {
 /// Masterplan C5: Snapshot der Quelle, gestartet vor der Kompression und bei
 /// der ersten Validierung abgeholt. Gleiche Fehler wie ein Aufruf an dieser
 /// Stelle (Zeitlimit → `SnapshotError`), nur früher begonnen.
+///
+/// Masterplan N27: `cancel()` beendet den Hilfsprozess. Der Kompressor ruft
+/// es beim Verlassen auf – sonst lief der Snapshot nach einem Abbruch, einem
+/// Fehler oder einer entfallenen Validierung weiter und rechnete im Stapel
+/// neben der nächsten Datei.
 final class EarlyReferenceSnapshot: @unchecked Sendable {
     private let done = DispatchSemaphore(value: 0)
     private var result: Result<PDFSemanticSnapshot, Error>?   // gesetzt vor `done.signal()`
+    private let lock = NSLock()
+    private var cancelled = false
 
-    init(_ url: URL) {
+    init(_ url: URL, isCancelled: (@Sendable () -> Bool)? = nil) {
         DispatchQueue(label: "pdftools.reference-snapshot", qos: .userInitiated).async {
-            self.result = Result { try PDFSemanticSnapshot.capture(url) }
+            self.result = Result {
+                try PDFSemanticSnapshot.capture(url, isCancelled: { [self] in
+                    self.isCancelled || (isCancelled?() ?? false)
+                })
+            }
             self.done.signal()
         }
+    }
+
+    private var isCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return cancelled
+    }
+
+    /// Beendet einen noch laufenden Snapshot; ein fertiger bleibt abholbar.
+    func cancel() {
+        lock.lock(); cancelled = true; lock.unlock()
     }
 
     /// Wartet auf den Snapshot (einmal; danach sofort).

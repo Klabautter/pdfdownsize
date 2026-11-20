@@ -226,6 +226,13 @@ import PDFKit
             try viewModel.saveAllBulk(to: root.appendingPathComponent("missing"))
         }
         #expect(results.allSatisfy { fm.fileExists(atPath: $0.outputURL.path) })
+        // N28: Derselbe Fehler auf dem Weg von Knopf und ⌘S landet sichtbar in
+        // `bulkSaveError` (vorher ohne Test).
+        #expect(viewModel.bulkSaveError == nil)
+        let reported = viewModel.saveAllBulkReportingError(to: root.appendingPathComponent("missing"))
+        #expect(reported != nil)
+        #expect(viewModel.bulkSaveError == reported)
+        viewModel.bulkSaveError = nil
 
         let occupied = root.appendingPathComponent(
             Compressor.suggestedOutputName(for: inputs[0], mode: .smart))

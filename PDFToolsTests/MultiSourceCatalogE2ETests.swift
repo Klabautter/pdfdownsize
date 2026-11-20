@@ -126,7 +126,9 @@ import PDFKit
         defer { try? FileManager.default.removeItem(at: plain) }
 
         let losses = MergeLossSummary.losses(for: [rich, plain])
-        #expect(Set(losses.map(\.feature)) == [.tags, .attachments, .layers, .encryption])
+        // N24: Die Vorlage trägt XMP-Metadaten – auch die übernimmt der
+        // Neuaufbau nicht, und seitdem nennt der Hinweis sie.
+        #expect(Set(losses.map(\.feature)) == [.tags, .attachments, .layers, .encryption, .metadata])
         #expect(losses.allSatisfy { $0.files == [rich.lastPathComponent] })
         #expect(MergeLossSummary.losses(for: [rich]).isEmpty, "Eine Quelle verliert nichts (E1)")
         #expect(MergeLossSummary.losses(for: [plain, plain]).isEmpty)

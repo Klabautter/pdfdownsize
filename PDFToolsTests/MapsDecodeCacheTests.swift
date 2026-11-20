@@ -458,11 +458,22 @@ import CoreGraphics
             ["PDFTOOLS_DECODE_CACHE_BUDGET": "33554432"])
         #expect(config.budgetBytes == 32 * 1_048_576)
         // Masterplan C5 (3954a63) hat die Vorgabe bewusst geändert: ein
-        // Viertel des Pixel-Budgets statt fest 192 MB (N12). Auf 8 GB sind das
-        // 128 MB; ohne Umgebung folgt der Wert dem Rechner.
-        #expect(PixelDecodeCache.Config.resolved(env: [:]).budgetBytes
-                == PixelWorkScheduler.resolvedBudget() / 4)
-        #expect(PixelWorkScheduler.defaultBudget(physicalMemory: 8 << 30) / 4 == 128 * 1_048_576)
+        // Viertel des Pixel-Budgets statt fest 192 MB (N12). Das Pixel-Budget
+        // ist ein Sechzehntel des Arbeitsspeichers, mindestens 256 MB, höchstens
+        // 2 GB – hier mit den Zahlen des Plans gerechnet, nicht mit dem
+        // Ausdruck des Produktivcodes (N28).
+        let mb: Int64 = 1_048_576
+        let pixelBudget: Int64
+        if let raw = ProcessInfo.processInfo.environment["PDFTOOLS_PIXEL_BUDGET"], let bytes = Int64(raw), bytes > 0 {
+            pixelBudget = bytes
+        } else {
+            let share = Int64(ProcessInfo.processInfo.physicalMemory / 16)
+            pixelBudget = min(max(share, 256 * mb), 2048 * mb)
+        }
+        #expect(PixelDecodeCache.Config.resolved(env: [:]).budgetBytes == pixelBudget / 4)
+        #expect(PixelWorkScheduler.defaultBudget(physicalMemory: 8 << 30) / 4 == 128 * mb)
+        #expect(PixelWorkScheduler.defaultBudget(physicalMemory: 2 << 30) / 4 == 64 * mb)
+        #expect(PixelWorkScheduler.defaultBudget(physicalMemory: 128 << 30) / 4 == 512 * mb)
     }
 
     // MARK: - 4) Ressourcen-Grenze

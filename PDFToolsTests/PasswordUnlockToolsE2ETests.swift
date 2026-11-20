@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import PDFKit
+import AppKit
 @testable import PDFTools
 
 /// Masterplan B2 für OCR, Konvertieren und Organisieren.
@@ -206,5 +207,35 @@ import PDFKit
         #expect(merged.url.standardizedFileURL.path.hasPrefix(session), "Ergebnis außerhalb: \(merged.url.path)")
         vm.discardOutcome()
         #expect(!FileManager.default.fileExists(atPath: merged.url.path))
+    }
+
+    /// N28 (Testlücke N10): Beenden lässt keinen Klartext zurück. Die
+    /// entsperrte Arbeitskopie liegt im Sitzungsordner und ist Klartext; das
+    /// Aufräumen, das die App an `willTerminate` hängt, entfernt den Ordner
+    /// samt Inhalt. Geprüft mit eigenem Center und Ordner, damit parallel
+    /// laufende Tests ihren Sitzungsordner behalten.
+    @Test func beendenLaesstKeinenKlartextZurueck() async throws {
+        let url = try Self.lockedThreePages()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let vm = try await Self.unlockedOrganizer(url)
+        let session = SessionScratch.directory.standardizedFileURL.path
+        let workingCopy = try #require(vm.project.documents.first?.url)
+        #expect(workingCopy.standardizedFileURL.path.hasPrefix(session), "Arbeitskopie außerhalb: \(workingCopy.path)")
+        #expect(DocumentProbe.inspect(workingCopy) == .ok(pageCount: 3), "Arbeitskopie ist nicht entsperrt – Test prüft nichts")
+
+        // Derselbe Aufbau wie der Sitzungsordner, mit der Klartext-Kopie darin.
+        let fm = FileManager.default
+        let directory = fm.temporaryDirectory.appendingPathComponent("n10-quit-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: directory) }
+        try fm.createDirectory(at: directory.appendingPathComponent("compress-x"), withIntermediateDirectories: true)
+        let plaintext = directory.appendingPathComponent("compress-x/unlocked.pdf")
+        try fm.copyItem(at: workingCopy, to: plaintext)
+
+        let center = NotificationCenter()
+        let token = SessionScratch.removeOnTermination(center: center, directory: directory)
+        defer { center.removeObserver(token) }
+        center.post(name: NSApplication.willTerminateNotification, object: nil)
+        #expect(!fm.fileExists(atPath: plaintext.path), "Klartext überlebt das Beenden")
+        #expect(!fm.fileExists(atPath: directory.path))
     }
 }

@@ -919,18 +919,26 @@ final class CompressionViewModel: ObservableObject {
                 })
             // Kein checkCancellation mehr (B4): Ein globaler Abbruch behält,
             // was fertig ist; der Rest steht als „Abgebrochen“ in der Liste.
+            // N23: Neu verschlüsseln abseits des Main Threads (große Dateien).
+            let relockedOutcomes: [Result<CompressionResult, Error>] = await Task.detached(priority: .userInitiated) {
+                outcomes.enumerated().map { index, outcome in
+                    outcome.flatMap { r in
+                        Result {
+                            do { return try Self.relocked(r, unlockedFor[urls[index]]) } catch {
+                                try? FileManager.default.removeItem(at: r.outputURL)
+                                throw error
+                            }
+                        }
+                    }
+                }
+            }.value
             var successes: [BulkSuccess] = []
             var errors: [URL: String] = [:]
-            for (index, outcome) in outcomes.enumerated() {
+            for (index, outcome) in relockedOutcomes.enumerated() {
                 let url = urls[index]
                 switch outcome {
                 case .success(let r):
-                    do {
-                        successes.append(BulkSuccess(input: url, result: try Self.relocked(r, unlockedFor[url])))
-                    } catch {
-                        try? FileManager.default.removeItem(at: r.outputURL)
-                        errors[url] = Self.userFacingMessage(for: error)
-                    }
+                    successes.append(BulkSuccess(input: url, result: r))
                 case .failure(let error):
                     if error is CancellationError {
                         // Einzeln oder global abgebrochen (B4): kein Fehler,
@@ -1148,12 +1156,14 @@ final class CompressionViewModel: ObservableObject {
                         self.bulkLabels[index] = label
                     }
                 })
+            // N23: Neu verschlüsseln noch hier, abseits des Main Threads.
+            let relocked = outcomes?.first.map { outcome in
+                outcome.flatMap { r in Result { try Self.relocked(r, unlocked) } }
+            }
             await MainActor.run {
                 defer { self.endRun(flag) }
                 self.bulkFractions[index] = 1
-                switch outcomes?.first.map({ outcome in
-                    outcome.flatMap { r in Result { try Self.relocked(r, unlocked) } }
-                }) {
+                switch relocked {
                 case .success(let result):
                     // Eingabereihenfolge der Erfolge beibehalten.
                     let order = Dictionary(uniqueKeysWithValues: self.bulkInputs.enumerated().map { ($1, $0) })
@@ -1245,7 +1255,22 @@ final class CompressionViewModel: ObservableObject {
     /// hinzufügen“).
     func add(_ urls: [URL]) {
         let existing = bulkInputs.isEmpty ? (inputURL.map { [$0] } ?? []) : bulkInputs
+        // N23: Entsperrte Stapeldateien bleiben entsperrt, wenn weitere dazukommen –
+        // vorher stand die Zeile wieder auf „Passwortgeschützt“.
+        let keptUnlocked = bulkUnlocked
+        let keptVerdicts = bulkVerdicts.filter { keptUnlocked[$0.key] != nil }
+        let keptPages = bulkPageCounts.filter { keptUnlocked[$0.key] != nil }
+        bulkUnlocked = [:]   // nicht verwerfen: die Arbeitskopien gehen gleich zurück
         selectMany(existing + urls)
+        for (url, unlocked) in keptUnlocked {
+            if bulkInputs.contains(url) {
+                bulkUnlocked[url] = unlocked
+                if let verdict = keptVerdicts[url] { bulkVerdicts[url] = verdict }
+                if let pages = keptPages[url] { bulkPageCounts[url] = pages }
+            } else {
+                unlocked.discard()
+            }
+        }
     }
 
     /// Schnellschätzung je Datei (Millisekunden je Dokument), neu bei
@@ -1376,6 +1401,13 @@ final class CompressionViewModel: ObservableObject {
         panel.prompt = String(localized: "Hier sichern")
         panel.message = String(localized: "Ordner für die komprimierten PDFs wählen")
         guard panel.runModal() == .OK, let folder = panel.url else { return nil }
+        return saveAllBulkReportingError(to: folder)
+    }
+
+    /// Sichert alle Ergebnisse in `folder`; ein Fehler landet in
+    /// `bulkSaveError` (Alert der Komprimieren-Ansicht) und wird zurückgegeben.
+    @discardableResult
+    func saveAllBulkReportingError(to folder: URL) -> String? {
         do {
             _ = try saveAllBulk(to: folder)
             return nil

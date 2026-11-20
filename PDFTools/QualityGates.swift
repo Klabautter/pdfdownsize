@@ -869,6 +869,10 @@ enum QualityGates {
     /// Ist weniger als 1 % der Fläche farbig – eine Unterschrift auf einer
     /// gerenderten A4-Seite –, füllten sonst fast graue Pixel das Prozent auf
     /// und verdünnten den Farbverlust unter die Grenze (A3-Test).
+    ///
+    /// Masterplan N26: Dazu kommen Pixel, die in der Referenz grau sind
+    /// (Chroma unter `peakMinimumChroma`) und im Kandidaten mindestens die
+    /// Schwelle erreichen – neu entstandene Farbe sah die Spitze sonst nie.
     static let peakMinimumChroma = ChromaCensus.strongChroma / 2
 
     /// Chroma-Schwelle (max − min der RGB-Bytes), ab der ein Referenzpixel
@@ -959,9 +963,15 @@ enum QualityGates {
         for i in 0..<pixels {
             let o = i * 4
             let r = rgbaA[o], g = rgbaA[o + 1], b = rgbaA[o + 2]
-            guard Int(max(r, g, b) - min(r, g, b)) >= threshold else { continue }
+            let rb = rgbaB[o], gb = rgbaB[o + 1], bb = rgbaB[o + 2]
+            let sourceChroma = Int(max(r, g, b) - min(r, g, b))
+            // N26: Auch Farbe, die erst im Kandidaten entsteht – Schwarz oder
+            // Grau, das eine Farbmaske umgefärbt hat –, zählt zur Spitze.
+            let addedColor = sourceChroma < peakMinimumChroma
+                && Int(max(rb, gb, bb) - min(rb, gb, bb)) >= threshold
+            guard sourceChroma >= threshold || addedColor else { continue }
             let labA = lab(r: r, g: g, b: b)
-            let labB = lab(r: rgbaB[o], g: rgbaB[o + 1], b: rgbaB[o + 2])
+            let labB = lab(r: rb, g: gb, b: bb)
             let dl = labA.0 - labB.0, da = labA.1 - labB.1, db = labA.2 - labB.2
             sum += sqrt(dl * dl + da * da + db * db)
             count += 1

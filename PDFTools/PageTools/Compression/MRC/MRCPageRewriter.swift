@@ -244,9 +244,10 @@ enum MRCPageRewriter {
     /// (`pdfcore_replace_page_image_draw_with_layers`, gleiche Grenze).
     static let maximumPageLayers = 64
 
-    /// Ebenen eines Bündels: Hintergrund + Foto-Regionen + Maske.
-    static func fitsLayerLimit(photoRegionCount: Int) -> Bool {
-        photoRegionCount + 2 <= maximumPageLayers
+    /// Ebenen eines Bündels: Hintergrund + Foto-Regionen + Maske + Farbmasken
+    /// (N26: Die Farbmasken sind eigene Ebenen und zählen mit).
+    static func fitsLayerLimit(photoRegionCount: Int, colorMaskCount: Int) -> Bool {
+        photoRegionCount + colorMaskCount + 2 <= maximumPageLayers
     }
 
     /// Eine MRC-faehige Seite: Scan-Klassifikation, dominantes Raster,
@@ -497,7 +498,8 @@ enum MRCPageRewriter {
         guard let segmentation = MRCSegmenter.segment(raster) else { return nil }
         // Zu viele Regionen scheitern sicher an der Rekonstruktion – erst
         // nach Maske und allen Stufen zu scheitern wäre vergebene Arbeit.
-        guard fitsLayerLimit(photoRegionCount: segmentation.photoRegions.count) else {
+        guard fitsLayerLimit(photoRegionCount: segmentation.photoRegions.count,
+                             colorMaskCount: segmentation.colorMasks.count) else {
             return nil
         }
         guard let mask = MRCEncoder.encodeMask(segmentation.mask),

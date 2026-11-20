@@ -159,4 +159,27 @@ import PDFKit
         vm.clearBulk()
         #expect(!FileManager.default.fileExists(atPath: workingCopy.path), "Arbeitskopie blieb liegen")
     }
+
+    /// N23: Kommen Dateien dazu, bleibt eine entsperrte Datei entsperrt (vorher
+    /// wieder „Passwortgeschützt“, der Lauf übersprang sie).
+    @Test func entsperrtBleibtBeimHinzufuegen() async throws {
+        let dir = try Self.workDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let healthy = try Self.healthy("a.pdf", in: dir)
+        let more = try Self.healthy("b.pdf", in: dir)
+        let locked = try PasswordUnlockE2ETests.lockedLetter()
+        defer { try? FileManager.default.removeItem(at: locked) }
+        let vm = CompressionViewModel(defaults: .isolatedForTest())
+        vm.selectMany([healthy, locked])
+        _ = try await vm.runBulkCompression(vm.bulkInputs)
+        #expect(await vm.unlockBulkFile(locked, password: PasswordUnlockE2ETests.password) == nil)
+        let copy = try #require(vm.bulkUnlocked[locked]?.workingCopy)
+        vm.add([more])
+        #expect(vm.bulkInputs.count == 3)
+        #expect(vm.bulkUnlocked[locked]?.workingCopy == copy, "Entsperren nach dem Hinzufügen vergessen")
+        #expect(FileManager.default.fileExists(atPath: copy.path))
+        _ = try await vm.runBulkCompression(vm.bulkInputs)
+        #expect(vm.bulkResult(for: locked) != nil, "entsperrte Datei übersprungen")
+        vm.clearBulk()
+    }
 }

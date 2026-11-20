@@ -272,7 +272,8 @@ import Compression
     }
 
     @Test func schriftEinesKontrollkaestchenZustandsBleibtGanz() throws {
-        guard let fontData = PDFFixtures.systemTrueTypeFontBytes else { return }
+        // N28: Ohne Systemschrift scheitert der Test, statt ungeprüft zu bestehen.
+        let fontData = try #require(PDFFixtures.systemTrueTypeFontBytes, "Keine TrueType-Systemschrift gefunden")
         var b = RawPDFBuilder()
         let pages = b.reserveNumber()
         let fontFile = b.addStream(dictionary: "/Length1 \(fontData.count)", data: fontData)
@@ -405,7 +406,8 @@ import Compression
     /// Lässt sich ein Inline-Bild nicht sicher überspringen, darf die Schrift
     /// nicht subsettet werden – dahinter stehender Text wäre ungelesen.
     @Test func schriftHinterUnlesbaremInlineBildBleibtGanz() throws {
-        guard let fontData = PDFFixtures.systemTrueTypeFontBytes else { return }
+        // N28: Ohne Systemschrift scheitert der Test, statt ungeprüft zu bestehen.
+        let fontData = try #require(PDFFixtures.systemTrueTypeFontBytes, "Keine TrueType-Systemschrift gefunden")
         var b = RawPDFBuilder()
         let pages = b.reserveNumber()
         let fontFile = b.addStream(dictionary: "/Length1 \(fontData.count)", data: fontData)

@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Darwin
 
 /// Temporäre Ergebnisse der laufenden App-Sitzung (Kompression, OCR,
@@ -48,9 +49,21 @@ enum SessionScratch {
         }
     }
 
-    /// Beim Beenden: eigener Ordner samt nicht gesicherter Ergebnisse.
-    static func removeOwnDirectory() {
-        try? FileManager.default.removeItem(at: directory)
+    /// Beim Beenden: eigener Ordner samt nicht gesicherter Ergebnisse – und
+    /// samt entsperrter Arbeitskopien und Zwischenstände (N10, N23).
+    static func removeOwnDirectory(_ url: URL = directory) {
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Hängt das Aufräumen an `willTerminate`. Die App ruft das einmal beim
+    /// Start mit den Vorgaben; ein Test mit eigenem Center und Ordner (N28).
+    @discardableResult
+    static func removeOnTermination(center: NotificationCenter = .default,
+                                    directory url: URL = directory) -> NSObjectProtocol {
+        center.addObserver(forName: NSApplication.willTerminateNotification,
+                           object: nil, queue: nil) { _ in
+            removeOwnDirectory(url)
+        }
     }
 
     private static func isRunning(_ pid: Int32) -> Bool {

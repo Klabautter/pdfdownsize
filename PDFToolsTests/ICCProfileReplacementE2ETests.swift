@@ -83,7 +83,7 @@ import UniformTypeIdentifiers
         return lab(sum.0 / n / 255, sum.1 / n / 255, sum.2 / n / 255)
     }
 
-    static func lab(_ r: Double, _ g: Double, _ b: Double) -> (Double, Double, Double) {
+    nonisolated static func lab(_ r: Double, _ g: Double, _ b: Double) -> (Double, Double, Double) {
         func lin(_ c: Double) -> Double { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
         let (R, G, B) = (lin(r), lin(g), lin(b))
         let X = (0.4124 * R + 0.3576 * G + 0.1805 * B) / 0.95047
@@ -230,6 +230,82 @@ import UniformTypeIdentifiers
             let o = try Self.meanLabP3(result.outputURL, region: region)
             let dE = ((a.0 - o.0) * (a.0 - o.0) + (a.1 - o.1) * (a.1 - o.1) + (a.2 - o.2) * (a.2 - o.2)).squareRoot()
             #expect(dE < 2, "\(mode) \(filter): ΔE76 \(dE) in \(region) – Original \(a), Ausgabe \(o)")
+        }
+    }
+
+    // MARK: Masterplan N20 – Grau aus einem Bild mit eigenem Profil
+
+    /// Sechs graue Felder (15–90 %) in einem Bild mit Profil `space` – neutral,
+    /// damit Klein und Smart es grau rechnen. Mit leichtem Rauschen
+    /// (fotoartig), damit es nicht als Grafik verlustfrei bleibt.
+    static func grayPatchDocument(space: CFString, name: String) throws -> URL {
+        let (w, h) = (2400, 3396)
+        let profile = try #require(CGColorSpace(name: space))
+        let ctx = try #require(CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                         space: profile, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        let base = try #require(ctx.data).assumingMemoryBound(to: UInt8.self)
+        let levels: [Double] = [0.15, 0.3, 0.45, 0.6, 0.75, 0.9]
+        let rowsPer = h / levels.count
+        var state: UInt32 = 11
+        for y in 0..<h {
+            let level = levels[min(levels.count - 1, y / rowsPer)]
+            let row = base + y * ctx.bytesPerRow
+            for x in 0..<w {
+                state = state &* 1_664_525 &+ 1_013_904_223
+                let noise = Double(Int(state >> 24) - 128) / 255 * 0.04
+                let v = UInt8(max(0, min(1, level + noise)) * 255)
+                row[x * 4] = v; row[x * 4 + 1] = v; row[x * 4 + 2] = v; row[x * 4 + 3] = 255
+            }
+        }
+        let image = try #require(ctx.makeImage())
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("n20-\(name)-\(UUID().uuidString).pdf")
+        var box = CGRect(x: 0, y: 0, width: 595, height: 842)
+        let pdf = try #require(CGContext(url as CFURL, mediaBox: &box, nil))
+        pdf.beginPDFPage(nil)
+        pdf.draw(image, in: box)
+        pdf.endPDFPage()
+        pdf.closePDF()
+        return url
+    }
+
+    /// Lab je Feld, Seite in sRGB gerendert (Feld i liegt oben beginnend).
+    static func patchLabs(_ url: URL) throws -> [(Double, Double, Double)] {
+        let page = try #require(PDFDocument(url: url)?.page(at: 0))
+        let (w, h) = (595, 842)
+        let ctx = try #require(CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                         space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                         bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        page.draw(with: .mediaBox, to: ctx)
+        let data = try #require(ctx.data).assumingMemoryBound(to: UInt8.self)
+        let rowsPer = h / 6
+        return (0..<6).map { i in
+            var sum = (0.0, 0.0, 0.0), n = 0.0
+            for y in (i * rowsPer + rowsPer / 4)..<(i * rowsPer + 3 * rowsPer / 4) {
+                for x in (w / 4)..<(3 * w / 4) {
+                    let o = (y * w + x) * 4
+                    sum.0 += Double(data[o]); sum.1 += Double(data[o + 1]); sum.2 += Double(data[o + 2]); n += 1
+                }
+            }
+            return lab(sum.0 / n / 255, sum.1 / n / 255, sum.2 / n / 255)
+        }
+    }
+
+    /// N20: Klein und Smart rechnen das neutrale Bild grau. Die Rohwerte
+    /// liegen im Quellprofil (N5); nach Grau müssen sie über das Profil, sonst
+    /// stimmt die Helligkeit nicht (Prüfung 20.11.: ROMM ΔE bis 8,0).
+    @Test(arguments: [CompressionMode.small, .smart], [CGColorSpace.rommrgb, CGColorSpace.adobeRGB1998])
+    func grauAusBildMitProfilBehaeltDieHelligkeit(_ mode: CompressionMode, _ space: CFString) throws {
+        let input = try Self.grayPatchDocument(space: space, name: "\(mode)")
+        defer { try? FileManager.default.removeItem(at: input) }
+        let result = try Compressor().compress(inputURL: input, mode: mode)
+        defer { try? FileManager.default.removeItem(at: result.outputURL) }
+        let replaced = try #require(try PDFCoreDocument(path: result.outputURL.path).imageResources().first)
+        #expect(replaced.pixelColorSpace.componentCount == 1, "Test misst nichts: Bild nicht grau (\(replaced.colorSpace))")
+        let before = try Self.patchLabs(input)
+        let after = try Self.patchLabs(result.outputURL)
+        for (i, (a, o)) in zip(before, after).enumerated() {
+            let dE = ((a.0 - o.0) * (a.0 - o.0) + (a.1 - o.1) * (a.1 - o.1) + (a.2 - o.2) * (a.2 - o.2)).squareRoot()
+            #expect(dE < 2, "\(mode) \(space) Feld \(i): ΔE \(dE)")
         }
     }
 }

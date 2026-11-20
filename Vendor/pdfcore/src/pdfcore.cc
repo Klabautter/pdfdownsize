@@ -141,54 +141,123 @@ size_t pdfcore_decode_limit(QPDFObjectHandle stream)
 /// 117 → 18 Links beim Drehen einer Seite). Außerdem rekursierte die Suche
 /// ohne Zyklusschutz; ein Kind, das auf sich selbst zeigt, brachte den
 /// Prozess zum Absturz.
-QPDFObjectHandle lookup_named_dest(QPDF& qpdf, std::string const& name)
+namespace {
+
+/// Ein Wert im Namensbaum oder in /Dests ist das Array selbst oder ein
+/// Wörterbuch mit /D (ISO 32000-1, 12.3.2.3).
+QPDFObjectHandle unwrap_named_dest_value(QPDFObjectHandle v)
 {
-    // Ein Wert im Namensbaum oder in /Dests ist das Array selbst oder ein
-    // Wörterbuch mit /D (ISO 32000-1, 12.3.2.3).
-    auto unwrap = [](QPDFObjectHandle v) -> QPDFObjectHandle {
-        if (v.isDictionary()) { v = v.getKey("/D"); }
-        return v.isArray() ? v : QPDFObjectHandle::newNull();
-    };
-    auto matches = [&](QPDFObjectHandle key) {
-        if (!key.isString()) { return false; }
-        std::string candidate = key.getStringValue();
-        if (!candidate.empty() && candidate.front() == '/') { candidate.erase(candidate.begin()); }
-        return candidate == name;
-    };
-    QPDFObjectHandle catalog = qpdf.getRoot();
-    QPDFObjectHandle namesDict = catalog.getKey("/Names");
-    if (namesDict.isDictionary()) {
-        QPDFObjectHandle tree = namesDict.getKey("/Dests");
-        // Iterative Tiefensuche über ALLE Kinder, Besucht-Set gegen Zyklen.
-        // /Limits werden bewusst nicht genutzt – sie sind in der Praxis oft
-        // falsch, und ein übersehenes Ziel kostet einen Link.
-        std::vector<QPDFObjectHandle> stack;
-        std::set<QPDFObjGen> visited;
-        if (tree.isDictionary()) { stack.push_back(tree); }
-        while (!stack.empty()) {
-            QPDFObjectHandle node = stack.back();
-            stack.pop_back();
-            if (!node.isDictionary()) { continue; }
-            if (node.isIndirect() && !visited.insert(node.getObjGen()).second) { continue; }
-            QPDFObjectHandle arr = node.getKey("/Names");
-            if (arr.isArray()) {
-                int n = arr.getArrayNItems();
-                for (int i = 0; i + 1 < n; i += 2) {
-                    if (matches(arr.getArrayItem(i))) {
-                        QPDFObjectHandle v = unwrap(arr.getArrayItem(i + 1));
-                        if (!v.isNull()) { return v; }
-                    }
-                }
+    if (v.isDictionary()) { v = v.getKey("/D"); }
+    return v.isArray() ? v : QPDFObjectHandle::newNull();
+}
+
+/// Läuft den Namensbaum /Names /Dests in Dokumentreihenfolge ab und meldet
+/// jedes Paar (Name ohne führenden Slash, aufgelöstes Ziel-Array). `visit`
+/// gibt `false` zurück, um abzubrechen. Iterativ, mit Besucht-Set gegen
+/// Zyklen; /Limits werden bewusst nicht genutzt – sie sind in der Praxis oft
+/// falsch, und ein übersehenes Ziel kostet einen Link.
+template <typename Visit>
+void walk_named_dest_tree(QPDF& qpdf, Visit&& visit)
+{
+    QPDFObjectHandle namesDict = qpdf.getRoot().getKey("/Names");
+    if (!namesDict.isDictionary()) { return; }
+    QPDFObjectHandle tree = namesDict.getKey("/Dests");
+    std::vector<QPDFObjectHandle> stack;
+    std::set<QPDFObjGen> visited;
+    if (tree.isDictionary()) { stack.push_back(tree); }
+    while (!stack.empty()) {
+        QPDFObjectHandle node = stack.back();
+        stack.pop_back();
+        if (!node.isDictionary()) { continue; }
+        if (node.isIndirect() && !visited.insert(node.getObjGen()).second) { continue; }
+        QPDFObjectHandle arr = node.getKey("/Names");
+        if (arr.isArray()) {
+            int n = arr.getArrayNItems();
+            for (int i = 0; i + 1 < n; i += 2) {
+                QPDFObjectHandle key = arr.getArrayItem(i);
+                if (!key.isString()) { continue; }
+                std::string candidate = key.getStringValue();
+                if (!candidate.empty() && candidate.front() == '/') { candidate.erase(candidate.begin()); }
+                QPDFObjectHandle v = unwrap_named_dest_value(arr.getArrayItem(i + 1));
+                if (v.isNull()) { continue; }
+                if (!visit(candidate, v)) { return; }
             }
-            QPDFObjectHandle kids = node.getKey("/Kids");
-            if (kids.isArray()) {
-                // Rückwärts auflegen, damit die Kinder in Reihenfolge besucht werden.
-                for (int i = kids.getArrayNItems() - 1; i >= 0; --i) {
-                    stack.push_back(kids.getArrayItem(i));
-                }
+        }
+        QPDFObjectHandle kids = node.getKey("/Kids");
+        if (kids.isArray()) {
+            // Rückwärts auflegen, damit die Kinder in Reihenfolge besucht werden.
+            for (int i = kids.getArrayNItems() - 1; i >= 0; --i) {
+                stack.push_back(kids.getArrayItem(i));
             }
         }
     }
+}
+
+/// Masterplan N25: Index der benannten Ziele für einen Durchlauf.
+///
+/// Ohne Index läuft jede Auflösung den ganzen Baum ab – je Link einmal; bei
+/// 10⁴ Links und 10⁴ Zielen sind das 10⁸ Vergleiche je Pass. Ein Durchlauf,
+/// der viele Ziele auflöst und den Baum dabei NICHT ändert, legt einen
+/// `NamedDestScope` an; `lookup_named_dest` baut den Index dann beim ersten
+/// Aufruf einmal und antwortet danach aus der Tabelle. Der erste Treffer in
+/// Baumreihenfolge gewinnt – wie bei der Suche ohne Index. Der Bereich ist
+/// je Thread und je Dokument; ändert ein Durchlauf den Baum, endet der
+/// Bereich vorher.
+struct NamedDestScope {
+    explicit NamedDestScope(QPDF& q) : qpdf(&q), outer(current) { current = this; }
+    ~NamedDestScope() { current = outer; }
+    NamedDestScope(NamedDestScope const&) = delete;
+    NamedDestScope& operator=(NamedDestScope const&) = delete;
+
+    static NamedDestScope* forDocument(QPDF& q)
+    {
+        for (NamedDestScope* s = current; s; s = s->outer) {
+            if (s->qpdf == &q) { return s; }
+        }
+        return nullptr;
+    }
+
+    /// Ziel aus dem Namensbaum oder ein Null-Objekt.
+    QPDFObjectHandle find(std::string const& name)
+    {
+        if (!built) {
+            walk_named_dest_tree(*qpdf, [&](std::string const& key, QPDFObjectHandle v) {
+                index.emplace(key, v);   // erster Treffer bleibt
+                return true;
+            });
+            built = true;
+        }
+        auto it = index.find(name);
+        return it == index.end() ? QPDFObjectHandle::newNull() : it->second;
+    }
+
+    QPDF* qpdf;
+    NamedDestScope* outer;
+    bool built = false;
+    std::map<std::string, QPDFObjectHandle> index;
+    static thread_local NamedDestScope* current;
+};
+
+thread_local NamedDestScope* NamedDestScope::current = nullptr;
+
+} // namespace
+
+QPDFObjectHandle lookup_named_dest(QPDF& qpdf, std::string const& name)
+{
+    if (NamedDestScope* scope = NamedDestScope::forDocument(qpdf)) {
+        QPDFObjectHandle v = scope->find(name);
+        if (!v.isNull()) { return v; }
+    } else {
+        QPDFObjectHandle found = QPDFObjectHandle::newNull();
+        walk_named_dest_tree(qpdf, [&](std::string const& key, QPDFObjectHandle v) {
+            if (key != name) { return true; }
+            found = v;
+            return false;
+        });
+        if (!found.isNull()) { return found; }
+    }
+    QPDFObjectHandle catalog = qpdf.getRoot();
+    auto unwrap = unwrap_named_dest_value;
     // Alt: /Dests-Wörterbuch; Schlüssel können mit oder ohne Slash vorliegen.
     QPDFObjectHandle dests = catalog.getKey("/Dests");
     if (dests.isDictionary()) {
@@ -728,11 +797,17 @@ void collect_outline_labels(std::vector<QPDFOutlineObjectHelper> kids,
 /// Masterplan Finding 6 – Sammelt alle Einträge eines Names-Trees als
 /// (Name, Wert)-Paare in Baumreihenfolge. Ergänzt das reine Zählen, weil der
 /// vollständige Snapshot die NAMEN braucht, nicht nur ihre Anzahl.
+///
+/// Masterplan N25: Ein Knoten wird nur einmal besucht. Ohne Besucht-Set
+/// verdoppelt `/Kids [selbst selbst]` die Aufrufe je Ebene – bis Tiefe 32
+/// rund 2³³ Aufrufe.
 void collect_name_tree_entries(
     QPDFObjectHandle node, int depth,
-    std::vector<std::pair<std::string, QPDFObjectHandle>>& out)
+    std::vector<std::pair<std::string, QPDFObjectHandle>>& out,
+    std::set<QPDFObjGen>& visited)
 {
     if (node.isNull() || !node.isDictionary() || depth > 32) { return; }
+    if (node.isIndirect() && !visited.insert(node.getObjGen()).second) { return; }
     QPDFObjectHandle names = node.getKey("/Names");
     if (names.isArray()) {
         auto v = names.getArrayAsVector();
@@ -746,9 +821,17 @@ void collect_name_tree_entries(
     QPDFObjectHandle kids = node.getKey("/Kids");
     if (kids.isArray()) {
         for (auto const& kid : kids.getArrayAsVector()) {
-            collect_name_tree_entries(kid, depth + 1, out);
+            collect_name_tree_entries(kid, depth + 1, out, visited);
         }
     }
+}
+
+void collect_name_tree_entries(
+    QPDFObjectHandle node, int depth,
+    std::vector<std::pair<std::string, QPDFObjectHandle>>& out)
+{
+    std::set<QPDFObjGen> visited;
+    collect_name_tree_entries(node, depth, out, visited);
 }
 
 /// Löst ein Destination-Objekt (Array, oder Dict mit /D) auf die 0-basierte
@@ -873,9 +956,11 @@ std::string field_value_string(QPDFObjectHandle v)
 }
 
 /// Zählt Einträge eines PDF-Names-Trees (/Names-Arrays: [name, val, name, val…]).
-int count_name_tree_entries(QPDFObjectHandle node, int depth)
+/// Jeder Knoten zählt einmal (Masterplan N25, siehe collect_name_tree_entries).
+int count_name_tree_entries(QPDFObjectHandle node, int depth, std::set<QPDFObjGen>& visited)
 {
-    if (node.isNull() || depth > 32) { return 0; }
+    if (node.isNull() || !node.isDictionary() || depth > 32) { return 0; }
+    if (node.isIndirect() && !visited.insert(node.getObjGen()).second) { return 0; }
     int total = 0;
     QPDFObjectHandle names = node.getKey("/Names");
     if (names.isArray()) {
@@ -885,10 +970,16 @@ int count_name_tree_entries(QPDFObjectHandle node, int depth)
     QPDFObjectHandle kids = node.getKey("/Kids");
     if (kids.isArray()) {
         for (auto const& kid : kids.getArrayAsVector()) {
-            total += count_name_tree_entries(kid, depth + 1);
+            total += count_name_tree_entries(kid, depth + 1, visited);
         }
     }
     return total;
+}
+
+int count_name_tree_entries(QPDFObjectHandle node, int depth)
+{
+    std::set<QPDFObjGen> visited;
+    return count_name_tree_entries(node, depth, visited);
 }
 
 } // namespace
@@ -1518,6 +1609,8 @@ static std::vector<std::string> const& ensure_list(pdfcore_document_t& doc, int 
     auto it = doc.stringLists.find(list_id);
     if (it != doc.stringLists.end()) { return it->second; }
 
+    // Listen lesen nur; viele Links lösen dieselben Ziele auf (N25).
+    NamedDestScope destScope(doc.qpdf);
     std::vector<std::string> list;
     if (list_id == PDFCORE_LIST_LINKS) {
         for (auto const& ph : doc.qpdf.getAllPages()) {
@@ -1988,6 +2081,14 @@ static std::vector<std::string> const& ensure_list(pdfcore_document_t& doc, int 
             || (open.isDictionary() && open.getKey("/S").isName() && open.getKey("/S").getName() == "/JavaScript");
         if (scripts) { list.push_back("scripts"); }
         if (doc.qpdf.isEncrypted()) { list.push_back("encryption"); }
+        // Masterplan N24: auch XMP-Metadaten und verschachtelte Lesezeichen
+        // übernimmt der Neuaufbau nicht (Lesezeichen nur die erste Ebene).
+        if (root.getKey("/Metadata").isStream()) { list.push_back("metadata"); }
+        bool nested = false;
+        for (auto& top : QPDFOutlineDocumentHelper(doc.qpdf).getTopLevelOutlines()) {
+            if (!top.getKids().empty()) { nested = true; break; }
+        }
+        if (nested) { list.push_back("nestedOutlines"); }
     } else if (list_id == PDFCORE_LIST_OUTLINE_LABELS) {
         QPDFOutlineDocumentHelper oh(doc.qpdf);
         if (oh.hasOutlines()) {
@@ -2523,6 +2624,9 @@ void n1_detach_removed_pages(QPDF& qpdf,
     std::set<QPDFObjGen> removed;
     for (auto const& page : removedPages) { removed.insert(page.getObjGen()); }
     QPDFObjectHandle root = qpdf.getRoot();
+    // Schritte 1 und 2 lösen Ziele auf, ohne den Namensbaum zu ändern; der
+    // Index endet vor Schritt 3, der Ziele entfernt (N25).
+    auto destScope = std::make_unique<NamedDestScope>(qpdf);
     auto targetsRemoved = [&](QPDFObjectHandle holder) {
         return n1_is_removed(n1_dest_page(n1_resolved_dest(holder, qpdf)), removed);
     };
@@ -2549,6 +2653,7 @@ void n1_detach_removed_pages(QPDF& qpdf,
     // 2. /OpenAction auf eine entfernte Seite.
     QPDFObjectHandle openAction = root.getKey("/OpenAction");
     if (!openAction.isNull() && targetsRemoved(openAction)) { root.removeKey("/OpenAction"); }
+    destScope.reset();
 
     // 3. Benannte Ziele: Namensbaum und altes /Dests-Wörterbuch.
     QPDFObjectHandle names = root.getKey("/Names");
@@ -2819,6 +2924,7 @@ int pdfcore_rewrite_single_source(const char *source_path, const char *password,
     // Einträge ohne auflösbares Ziel bleiben.
     std::set<QPDFObjGen> keptPages;
     for (auto& page : order) { keptPages.insert(page.getObjectHandle().getObjGen()); }
+    NamedDestScope destScope(doc->qpdf);   // N25: Lesezeichen ändern den Namensbaum nicht
     auto targetIsRemoved = [&](QPDFObjectHandle item) {
         QPDFObjectHandle dest = item.getKey("/Dest");
         if (dest.isNull()) {
@@ -3386,6 +3492,7 @@ static int write_pages_impl(const char *const *source_paths,
                     // Iterativ: (erstes Kind der Kette, Elternknoten).
                     std::vector<std::pair<QPDFObjectHandle, int>> work{{outlines.getKey("/First"), groupIndex}};
                     std::set<QPDFObjGen> visited;
+                    NamedDestScope destScope(src);   // N25
                     while (!work.empty()) {
                         auto [item, parent] = work.back();
                         work.pop_back();
@@ -3480,6 +3587,11 @@ static int write_pages_impl(const char *const *source_paths,
         if (remove_dangling_links) {
             // Phase-11-Policy direkt im Ausgabedokument.
             auto pages = out.getAllPages();
+            // N25: Ziele über einen Index und eine Seitenmenge prüfen statt je
+            // Link den Namensbaum und alle Seiten abzulaufen.
+            NamedDestScope destScope(out);
+            std::set<QPDFObjGen> outPageGens;
+            for (auto const& op : pages) { outPageGens.insert(op.getObjGen()); }
             int removedTotal = 0;
             for (auto& p : pages) {
                 QPDFObjectHandle annots = p.getKey("/Annots");
@@ -3508,10 +3620,7 @@ static int write_pages_impl(const char *const *source_paths,
                     if (target.isArray()) {
                         auto v = target.getArrayAsVector();
                         if (!v.empty() && v[0].isIndirect()) {
-                            QPDFObjGen og = v[0].getObjGen();
-                            for (auto const& op : out.getAllPages()) {
-                                if (op.getObjGen() == og) { dangling = false; break; }
-                            }
+                            if (outPageGens.count(v[0].getObjGen())) { dangling = false; }
                         }
                     } else if (target.isString() || target.isName()) {
                         // Named Destination: Ziel muss auflösbar UND im Output vorhanden sein.
@@ -3522,10 +3631,7 @@ static int write_pages_impl(const char *const *source_paths,
                         if (v.isArray()) {
                             auto vv = v.getArrayAsVector();
                             if (!vv.empty() && vv[0].isIndirect()) {
-                                QPDFObjGen og = vv[0].getObjGen();
-                                for (auto const& op : out.getAllPages()) {
-                                    if (op.getObjGen() == og) { dangling = false; break; }
-                                }
+                                if (outPageGens.count(vv[0].getObjGen())) { dangling = false; }
                             }
                         }
                     }
@@ -3603,6 +3709,7 @@ int pdfcore_internal_link_targets(pdfcore_document_t *doc,
     if (!doc || !out_indices || !count) { return -1; }
     *count = 0;
     try {
+        NamedDestScope destScope(doc->qpdf);   // N25
         auto pages = doc->qpdf.getAllPages();
         std::vector<std::pair<int, int>> results; // (pageIndexOfAnnot, target)
 
@@ -3686,6 +3793,7 @@ int pdfcore_remove_dangling_link_annots(pdfcore_document_t *doc, int *removed)
     if (!doc) { return -1; }
     if (removed) { *removed = 0; }
     try {
+        NamedDestScope destScope(doc->qpdf);   // N25: entfernt nur Links, keine Ziele
         int removedTotal = 0;
         for (auto& p : doc->qpdf.getAllPages()) {
             QPDFObjectHandle annots = p.getKey("/Annots");
@@ -4724,6 +4832,51 @@ int pdfcore_replace_image_object_cmyk(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
+}
+
+// ============================================================================
+// Masterplan N20 – ICC-Profil eines Bildes (für den Grau-Weg)
+// ============================================================================
+
+namespace {
+
+
+/// Das ICCBased-Profil eines Bildfarbraums (auch als Basis von /Indexed),
+/// sonst null.
+QPDFObjectHandle image_icc_stream(QPDFObjectHandle image)
+{
+    QPDFObjectHandle cs = image.getDict().getKey("/ColorSpace");
+    if (cs.isArray() && cs.getArrayNItems() > 1 && cs.getArrayItem(0).isName()
+        && cs.getArrayItem(0).getName() == "/Indexed") {
+        cs = cs.getArrayItem(1);
+    }
+    if (cs.isArray() && cs.getArrayNItems() > 1 && cs.getArrayItem(0).isName()
+        && cs.getArrayItem(0).getName() == "/ICCBased" && cs.getArrayItem(1).isStream()) {
+        return cs.getArrayItem(1);
+    }
+    return QPDFObjectHandle::newNull();
+}
+
+} // namespace
+
+int pdfcore_get_image_icc_profile(pdfcore_document_t *doc, int obj, int gen,
+                                  unsigned char **out, size_t *out_len)
+{
+    PDFCORE_GUARD_BEGIN
+    if (!doc || !out || !out_len) { return PDFCORE_ERR_INTERNAL; }
+    *out = nullptr; *out_len = 0;
+    QPDFObjectHandle image = find_image_object(doc->qpdf, obj, gen);
+    if (!image.isStream()) { return PDFCORE_ERR_CHECK_FAILED; }
+    QPDFObjectHandle icc = image_icc_stream(image);
+    if (!icc.isStream()) { return PDFCORE_ERR_CHECK_FAILED; }
+    std::shared_ptr<Buffer> data = icc.getStreamData(qpdf_dl_generalized);
+    if (!data || data->getSize() == 0) { return PDFCORE_ERR_CHECK_FAILED; }
+    *out = static_cast<unsigned char*>(std::malloc(data->getSize()));
+    if (!*out) { return PDFCORE_ERR_INTERNAL; }
+    std::memcpy(*out, data->getBuffer(), data->getSize());
+    *out_len = data->getSize();
+    return PDFCORE_OK;
     PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
@@ -6376,7 +6529,7 @@ int pdfcore_get_image_ccitt_parms(pdfcore_document_t *doc,
         if (!parms.isDictionary()) { return PDFCORE_ERR_CHECK_FAILED; }
         out->present = 1;
 
-        static const char const *known_keys[] = {
+        static const char *const known_keys[] = {
             "/K", "/Columns", "/Rows", "/BlackIs1", "/EncodedByteAlign",
             "/EndOfLine", "/EndOfBlock", "/DamagedRowsBeforeError",
         };
@@ -11312,16 +11465,21 @@ std::string mrc_unique_name(QPDFObjectHandle const& xobjs,
 
 /// Masterplan A2 Stufe 2: Füllfarbe einer Maske – schwarz („0 g“) wie
 /// bisher oder die Farbe der Tinte („r g b rg“).
-static std::string mrc_mask_fill(pdfcore_mrc_layer_t const& layer)
+static std::string mrc_mask_fill(pdfcore_mrc_layer_t const& layer,
+                                 std::string const& iccName = "")
 {
     if (!layer.has_fill) { return "0 g"; }
-    return mrc_num(layer.fill[0]) + " " + mrc_num(layer.fill[1]) + " "
-        + mrc_num(layer.fill[2]) + " rg";
+    std::string values = mrc_num(layer.fill[0]) + " " + mrc_num(layer.fill[1]) + " "
+        + mrc_num(layer.fill[2]);
+    // Masterplan N21: Füllfarben sind Rohwerte im Quellprofil.
+    if (!iccName.empty()) { return iccName + " cs " + values + " sc"; }
+    return values + " rg";
 }
 
 /// Erzeugt EINEN Layer-XObject-Stream (indirekt) gemäß kind/is_mask.
 QPDFObjectHandle mrc_make_layer(pdfcore_document_t* doc,
-                                pdfcore_mrc_layer_t const& layer)
+                                pdfcore_mrc_layer_t const& layer,
+                                QPDFObjectHandle const& sourceICC)
 {
     std::string data(reinterpret_cast<const char*>(layer.bytes), layer.len);
     QPDFObjectHandle stream =
@@ -11370,8 +11528,14 @@ QPDFObjectHandle mrc_make_layer(pdfcore_document_t* doc,
 
     // Bildlayer (Hintergrund/Photos): 8 Bit, JPEG.
     d.replaceKey("/BitsPerComponent", QPDFObjectHandle::newInteger(8));
-    d.replaceKey("/ColorSpace", QPDFObjectHandle::newName(
-        layer.components == 1 ? "/DeviceGray" : "/DeviceRGB"));
+    // Masterplan N21: Ein Quellbild mit eigenem Profil liefert Rohwerte in
+    // diesem Profil (N5) – die RGB-Ebenen tragen es weiter statt /DeviceRGB.
+    if (layer.components == 3 && sourceICC.isArray()) {
+        d.replaceKey("/ColorSpace", sourceICC);
+    } else {
+        d.replaceKey("/ColorSpace", QPDFObjectHandle::newName(
+            layer.components == 1 ? "/DeviceGray" : "/DeviceRGB"));
+    }
     d.replaceKey("/Filter", QPDFObjectHandle::newName("/DCTDecode"));
     return indirect;
 }
@@ -11497,13 +11661,18 @@ int pdfcore_replace_page_image_draw_with_layers(
 
         // Layer in ZEICHNUNGSREIHENFOEGE des Aufrufers (Hintergrund zuerst,
         // Maske zuletzt) unter eindeutigen Namen anlegen.
+        // Masterplan N21: dreikanaliges /ICCBased der Quelle für die Ebenen.
+        QPDFObjectHandle sourceICC = imageDict.getKey("/ColorSpace");
+        if (!(is_icc_based(sourceICC) && replacement_components(sourceICC) == 3)) {
+            sourceICC = QPDFObjectHandle::newNull();
+        }
         std::vector<std::string> names;
         std::vector<QPDFObjectHandle> streams;
         for (int i = 0; i < layer_count; ++i) {
             std::string name = mrc_unique_name(xobjs, names, "MRCL");
             if (name.empty()) { return PDFCORE_ERR_INTERNAL; }
             names.push_back(name);
-            streams.push_back(mrc_make_layer(doc, layers[i]));
+            streams.push_back(mrc_make_layer(doc, layers[i], sourceICC));
         }
 
         // Copy-on-Write für /Resources (geteilte Dicts bleiben unberührt):
@@ -11524,6 +11693,24 @@ int pdfcore_replace_page_image_draw_with_layers(
         }
         newResources.replaceKey("/XObject", newXobjs);
 
+        // Masterplan N21: Farbmasken malen in Rohwerten des Quellprofils –
+        // dafür ein Farbraum-Eintrag in den Seitenressourcen (Copy-on-Write).
+        std::string iccName;
+        bool anyFill = false;
+        for (int i = 0; i < layer_count; ++i) { anyFill = anyFill || layers[i].has_fill; }
+        if (anyFill && sourceICC.isArray()) {
+            QPDFObjectHandle oldSpaces = resources.getKey("/ColorSpace");
+            QPDFObjectHandle spaces = QPDFObjectHandle::newDictionary();
+            if (oldSpaces.isDictionary()) {
+                for (auto const& key : oldSpaces.getKeys()) { spaces.replaceKey(key, oldSpaces.getKey(key)); }
+            }
+            std::vector<std::string> none;
+            iccName = mrc_unique_name(spaces, none, "MRCCS");
+            if (iccName.empty()) { return PDFCORE_ERR_INTERNAL; }
+            spaces.replaceKey(iccName, sourceICC);
+            newResources.replaceKey("/ColorSpace", spaces);
+        }
+
         // Ersetzungstext: ursprüngliche cm-Transform bewahren (die Layer
         // füllen dieselbe Fläche wie das Raster), Photo-Sub-Rects über eine
         // innere cm-Multiplikation (Bildpixelraum, oben-links → Bildraum),
@@ -11540,7 +11727,7 @@ int pdfcore_replace_page_image_draw_with_layers(
                 && layer.rect[2] == 0 && layer.rect[3] == 0;
             if (fullFrame) {
                 // Vollbild-Layer teilen die cm-Transform des Rasters.
-                if (layer.is_mask) { replacement += mrc_mask_fill(layer) + "\n"; }
+                if (layer.is_mask) { replacement += mrc_mask_fill(layer, iccName) + "\n"; }
                 replacement += names[i] + " Do\n";
             } else {
                 // Sub-Rect (Photo-Region): EIGENE q/Q-Klammer – ein cm würde
@@ -11552,7 +11739,7 @@ int pdfcore_replace_page_image_draw_with_layers(
                 double ty = (imgH - layer.rect[3]) / imgH;
                 replacement += "q " + mrc_num(sx) + " 0 0 " + mrc_num(sy) + " "
                     + mrc_num(tx) + " " + mrc_num(ty) + " cm";
-                if (layer.is_mask) { replacement += " " + mrc_mask_fill(layer); }
+                if (layer.is_mask) { replacement += " " + mrc_mask_fill(layer, iccName); }
                 replacement += " " + names[i] + " Do Q\n";
             }
         }

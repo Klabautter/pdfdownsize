@@ -78,4 +78,42 @@ import PDFKit
         #expect(sentence?.contains(MergeLossSummary.Feature.attachments.label) == true)
         #expect(MergeLossSummary.rebuildSentence(for: []) == nil)
     }
+
+    /// N24: XMP-Metadaten und verschachtelte Lesezeichen gehen beim Neuaufbau
+    /// verloren – der Hinweis muss sie nennen.
+    @Test func neuaufbauNenntXMPUndVerschachtelteLesezeichen() throws {
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let page = b.addPage(parent: pages)
+        b.fill(pages, "<</Type/Pages/Kids[\(page) 0 R]/Count 1>>")
+        let outlines = b.reserveNumber(), top = b.reserveNumber(), child = b.reserveNumber()
+        b.fill(child, "<</Title(Kind)/Parent \(top) 0 R/Dest[\(page) 0 R/Fit]>>")
+        b.fill(top, "<</Title(Oben)/Parent \(outlines) 0 R/First \(child) 0 R/Last \(child) 0 R/Count 1/Dest[\(page) 0 R/Fit]>>")
+        b.fill(outlines, "<</Type/Outlines/First \(top) 0 R/Last \(top) 0 R/Count 2>>")
+        let xmp = b.addStream(dictionary: "/Type/Metadata/Subtype/XML", content: "<x:xmpmeta xmlns:x='adobe:ns:meta/'/>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R/Outlines \(outlines) 0 R/Metadata \(xmp) 0 R>>")
+        let url = try b.write(rootObject: root, prefix: "n24")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let features = MergeLossSummary.rebuildLosses(for: url).map(\.feature)
+        #expect(features.contains(.metadata) && features.contains(.nestedOutlines), "\(features)")
+    }
+
+    /// N23: Eine Quelle nur mit Besitzer-Passwort öffnet ohne Entsperren; nach
+    /// einem Neuaufbau ist sie unverschlüsselt – der Hinweis nennt das. Eine
+    /// entsperrte Quelle (Arbeitskopie) wird beim Sichern neu verschlüsselt.
+    @Test func neuaufbauNenntVerschluesselungNurOhneEntsperren() throws {
+        let doc = PDFFixtures.document(pages: [PDFFixtures.textPage("N23")])
+        let plain = try PDFFixtures.write(doc, name: "n23-plain")
+        defer { try? FileManager.default.removeItem(at: plain) }
+        let locked = FileManager.default.temporaryDirectory.appendingPathComponent("n23-owner-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: locked) }
+        let process = Process()
+        process.executableURL = Compressor.bundledQPDFURL()
+        process.arguments = ["--encrypt", "--user-password=", "--owner-password=besitzer", "--bits=256", "--",
+                             plain.path, locked.path]
+        try process.run(); process.waitUntilExit()
+        try #require(process.terminationStatus == 0)
+        #expect(MergeLossSummary.rebuildLosses(for: locked).contains { $0.feature == .encryption })
+        #expect(!MergeLossSummary.rebuildLosses(for: locked, displayName: "orig.pdf").contains { $0.feature == .encryption })
+    }
 }

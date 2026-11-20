@@ -172,9 +172,10 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
     /// werfen eine Objective-C-Ausnahme. Ein Thread im eigenen Prozess lässt
     /// sich dann nicht stoppen – der Hilfsprozess schon. `.libQPDF` ist der
     /// eigene Kern und bleibt im Prozess.
-    static func capture(_ url: URL, backend: Backend = .merged) throws -> PDFSemanticSnapshot {
+    static func capture(_ url: URL, backend: Backend = .merged,
+                        isCancelled: (@Sendable () -> Bool)? = nil) throws -> PDFSemanticSnapshot {
         if backend == .libQPDF { return try captureViaLibQPDF(url) }
-        return try FrameworkProbe.snapshot(url, backend: backend)
+        return try FrameworkProbe.snapshot(url, backend: backend, isCancelled: isCancelled)
     }
 
     /// Meldet Beginn und Ende der Arbeit an einer Seite (0-basiert). Der

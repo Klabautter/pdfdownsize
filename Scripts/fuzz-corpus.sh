@@ -45,6 +45,12 @@ while [ $# -gt 0 ]; do
         *) echo "Unbekannt: $1" >&2; exit 2 ;;
     esac
 done
+# N28: `--timeout abc` hieß „kein Limit" (perl alarm mit 0). Nur auto oder
+# eine ganze Zahl ab 1 gilt.
+case "$TIMEOUT" in
+    auto) ;;
+    ''|*[!0-9]*|0*) echo "✗ --timeout erwartet auto oder Sekunden ≥ 1, nicht „$TIMEOUT“" >&2; exit 2 ;;
+esac
 [ -x "$APP/Contents/MacOS/PDFdownsize" ] || { echo "✗ --app fehlt oder ist kein PDFdownsize.app" >&2; exit 2; }
 [ -d "$CORPUS" ] || { echo "✗ Korpus fehlt: $CORPUS" >&2; exit 2; }
 case "$CORPUS$WORK" in *"$HOME/Desktop"*) echo "✗ Korpus und Arbeitsordner nie auf dem Schreibtisch" >&2; exit 2 ;; esac

@@ -666,7 +666,11 @@ enum CompressionPlanner {
             let projected = Double(sampledOriginal - sampledBest)
                 * Double(members.count) / Double(picks.count)
             guard denominator > 0, projected / Double(denominator) < Self.sampleMinimumGain else { continue }
-            let scan = picks.contains { precomputed[$0]?.documentScan == true }
+            // N27: Die Mehrheit der Stichprobe entscheidet. Mit „ein Treffer
+            // genügt“ galten auch die Fotoseiten einer gemischten Gruppe als
+            // Papier.
+            let scanPicks = picks.filter { precomputed[$0]?.documentScan == true }.count
+            let scan = scanPicks * 2 > picks.count
             for member in members where precomputed[member] == nil {
                 keepOnly[member] = .sampledNoGain(sampled: picks.count, groupSize: members.count)
                 groupDocumentScan[member] = scan
@@ -1267,9 +1271,45 @@ enum ImageResampler {
         return drawResize(current, to: size, components: components)
     }
 
+    // MARK: Quellprofil (Masterplan N20)
+
+    /// Profil, in dem die RGB-Rohwerte eines Bildes gemeint sind (N5: ein
+    /// `/ICCBased`-Bild behält seine Werte, sie stehen als Gerätewerte im
+    /// Raster). RGB-Wege rechnen weiter mit den Rohwerten; erst der Weg nach
+    /// Grau deutet sie über dieses Profil. Ohne das wurden sie wie sRGB nach
+    /// Grau gerechnet – ROMM-/„Generic RGB“-Scans bekamen ΔE bis 8.
+    private final class SourceProfileTag {
+        let profile: CGColorSpace
+        init(_ profile: CGColorSpace) { self.profile = profile }
+    }
+
+    nonisolated(unsafe) private static let sourceProfileKey = UnsafeRawPointer(
+        UnsafeMutablePointer<UInt8>.allocate(capacity: 1))
+
+    /// Markiert `image` mit dem Profil seiner Rohwerte (nur dreikanalig).
+    static func tagSourceProfile(_ image: CGImage, _ profile: CGColorSpace) {
+        guard profile.model == .rgb, image.colorSpace?.model == .rgb else { return }
+        objc_setAssociatedObject(image, sourceProfileKey, SourceProfileTag(profile),
+                                 .OBJC_ASSOCIATION_RETAIN)
+    }
+
+    static func sourceProfile(of image: CGImage) -> CGColorSpace? {
+        (objc_getAssociatedObject(image, sourceProfileKey) as? SourceProfileTag)?.profile
+    }
+
+    /// Für den Weg nach Grau: die Rohwerte in ihrem Profil gedeutet.
+    private static func grayReady(_ image: CGImage) -> CGImage {
+        guard let profile = sourceProfile(of: image),
+              let interpreted = image.copy(colorSpace: profile) else { return image }
+        return interpreted
+    }
+
     /// Zeichnet per CoreGraphics in einen frischen Kontext (weißer Grund).
     private static func drawResize(_ image: CGImage, to size: PixelSize,
                                    components: Int) -> CGImage? {
+        // N20: nach Grau über das Quellprofil; RGB-Ergebnisse tragen es weiter.
+        let profile = sourceProfile(of: image)
+        let image = components == 1 ? grayReady(image) : image
         let colorSpace: CGColorSpace
         let bitmapInfo: UInt32
         switch components {
@@ -1301,6 +1341,7 @@ enum ImageResampler {
         guard let result = ctx.makeImage() else { return nil }
         objc_setAssociatedObject(result, flatBitmapKey, FlatBitmapTag(components: components),
                                  .OBJC_ASSOCIATION_RETAIN)
+        if components == 3, let profile { tagSourceProfile(result, profile) }
         return result
     }
 
@@ -1549,6 +1590,7 @@ enum ImageResampler {
     }
 
     static func rawBitmap(_ image: CGImage, components: Int) -> Data? {
+        let image = components == 1 ? grayReady(image) : image   // N20
         let width = image.width, height = image.height
         let bytesPerRow = width * components
         var buffer = [UInt8](repeating: 0, count: bytesPerRow * height)

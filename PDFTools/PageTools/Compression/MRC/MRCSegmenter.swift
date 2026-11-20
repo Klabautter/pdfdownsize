@@ -340,7 +340,10 @@ enum MRCSegmenter {
     /// `colorSplitHueDegrees`); danach fünf Zuordnungsschritte mit
     /// Kreismittel. Füllfarbe = Median je Kanal über den gesättigten Kern
     /// der Gruppe (Chroma mindestens Gruppenmedian) – die hellen Kanten
-    /// würden die Farbe sonst ausbleichen.
+    /// würden die Farbe sonst ausbleichen. In eine Gruppe kommen nur Pixel
+    /// höchstens `colorSplitHueDegrees` von ihrem Zentrum, in die Maske nur
+    /// solche mit mindestens der halben Farbstärke der Füllung (N26); der
+    /// Rest bleibt im Hintergrund wie in Stufe 1.
     static func colorMasks(coloredInk: [Bool], rgb: Data, width: Int,
                            height: Int) -> [ColorMask] {
         let count = width * height
@@ -382,7 +385,10 @@ enum MRCSegmenter {
                 for (n, center) in centers.enumerated() where gap(hues[k], center) < bestGap {
                     bestGap = gap(hues[k], center); best = n
                 }
-                assignment[k] = best
+                // N26: Ein Farbton weit von jedem Zentrum (der vierte) gehört
+                // zu keiner Gruppe und zieht auch kein Zentrum zu sich – sonst
+                // verschmolzen Rot und Gelb zu einer orangen Maske.
+                assignment[k] = bestGap <= colorSplitHueDegrees ? best : -1
             }
             for n in centers.indices {
                 var sx = 0.0, sy = 0.0
@@ -400,19 +406,27 @@ enum MRCSegmenter {
         for n in centers.indices {
             let members = indices.indices.filter { assignment[$0] == n }.map { indices[$0] }
             guard members.count >= minimumColorMaskPixels else { continue }
-            var bits = [UInt8](repeating: 0, count: rowBytes * height)
-            for i in members {
-                let x = i % width, y = i / width
-                bits[y * rowBytes + x / 8] |= 0x80 >> UInt8(x % 8)
-            }
-            guard let buffer = BilevelBuffer(width: width, height: height, data: Data(bits)) else { continue }
             let medianChroma = members.map(chroma).sorted()[members.count / 2]
             let core = members.filter { chroma($0) >= medianChroma }
             func channel(_ c: Int) -> Double {
                 let values = core.map { bytes[$0 * 3 + c] }.sorted()
                 return Double(values[values.count / 2]) / 255
             }
-            masks.append(ColorMask(mask: buffer, fill: (channel(0), channel(1), channel(2))))
+            let fill = (channel(0), channel(1), channel(2))
+            // N26: Die Maske malt jedes Pixel in der Füllfarbe. Ein Pixel mit
+            // deutlich weniger Farbe – Schwarz neben Farbe, das durch JPEG-
+            // Säume einen Farbton trägt – bliebe sonst nicht schwarz. Solche
+            // Pixel bleiben im Hintergrund wie in Stufe 1.
+            let fillChroma = Int(((max(fill.0, fill.1, fill.2) - min(fill.0, fill.1, fill.2)) * 255).rounded())
+            let painted = members.filter { chroma($0) * 2 >= fillChroma }
+            guard painted.count >= minimumColorMaskPixels else { continue }
+            var bits = [UInt8](repeating: 0, count: rowBytes * height)
+            for i in painted {
+                let x = i % width, y = i / width
+                bits[y * rowBytes + x / 8] |= 0x80 >> UInt8(x % 8)
+            }
+            guard let buffer = BilevelBuffer(width: width, height: height, data: Data(bits)) else { continue }
+            masks.append(ColorMask(mask: buffer, fill: fill))
         }
         return masks
     }

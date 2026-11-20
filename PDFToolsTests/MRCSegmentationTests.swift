@@ -413,4 +413,97 @@ extension MRCSegmentationTests {
         let old = try #require(MRCEncoder.Bundle.decode(v1))
         #expect(old.first?.fill == nil && old.first?.data == Data([1, 2, 3]))
     }
+
+    // MARK: N26 – Farbmasken färben nicht um
+
+    /// Farbige Pixel als RGB-Raster 40×40; jede Gruppe ein eigener Block.
+    static func colorBlocks(_ blocks: [(rgb: (UInt8, UInt8, UInt8), count: Int)])
+        -> (ink: [Bool], rgb: Data, width: Int, height: Int, offsets: [Range<Int>]) {
+        let (w, h) = (40, 40)
+        var ink = [Bool](repeating: false, count: w * h)
+        var rgb = [UInt8](repeating: 245, count: w * h * 3)
+        var next = 0
+        var offsets: [Range<Int>] = []
+        for block in blocks {
+            offsets.append(next..<(next + block.count))
+            for i in next..<(next + block.count) {
+                ink[i] = true
+                rgb[i * 3] = block.rgb.0; rgb[i * 3 + 1] = block.rgb.1; rgb[i * 3 + 2] = block.rgb.2
+            }
+            next += block.count
+        }
+        return (ink, Data(rgb), w, h, offsets)
+    }
+
+    static func isSet(_ mask: BilevelBuffer, _ i: Int) -> Bool {
+        let row = BilevelBuffer.rowBytes(width: mask.width)
+        let x = i % mask.width, y = i / mask.width
+        return mask.data[y * row + x / 8] & (0x80 >> UInt8(x % 8)) != 0
+    }
+
+    /// Vier Farbtöne, höchstens drei Masken: Der vierte kam vorher in die
+    /// nächste Gruppe, zog deren Zentrum zu sich (Rot + Gelb → Orange) und
+    /// wurde in der Mischfarbe gemalt. Jetzt bleibt genau ein Farbton ganz im
+    /// Hintergrund, und jede Maske trägt die Farbe ihres eigenen Blocks.
+    @Test func vierterFarbtonWirdNichtUmgefaerbt() throws {
+        let colors: [(UInt8, UInt8, UInt8)] = [(220, 200, 20), (30, 170, 40), (30, 40, 220), (220, 30, 30)]
+        let page = Self.colorBlocks(colors.map { ($0, 100) })
+        let masks = MRCSegmenter.colorMasks(coloredInk: page.ink, rgb: page.rgb,
+                                            width: page.width, height: page.height)
+        #expect(masks.count == 3)
+        var unmasked = 0
+        for (block, color) in zip(page.offsets, colors) {
+            let holders = masks.filter { mask in block.contains { Self.isSet(mask.mask, $0) } }
+            if holders.isEmpty { unmasked += 1; continue }
+            #expect(holders.count == 1)
+            let mask = try #require(holders.first)
+            #expect(block.allSatisfy { Self.isSet(mask.mask, $0) })
+            let want = (Double(color.0) / 255, Double(color.1) / 255, Double(color.2) / 255)
+            let off = max(abs(mask.fill.red - want.0), abs(mask.fill.green - want.1), abs(mask.fill.blue - want.2))
+            #expect(off < 0.02, "Block \(color) gemalt als \(mask.fill)")
+        }
+        #expect(unmasked == 1, "\(unmasked) Farbtöne ohne Maske")
+    }
+
+    /// Rote Tinte und daneben fast schwarze Pixel mit rotem Stich (JPEG-Saum
+    /// an schwarzer Schrift): Die dunklen Pixel tragen denselben Farbton und
+    /// kamen in die rote Maske – gemalt wurden sie leuchtend rot.
+    @Test func schwarzNebenFarbeWirdNichtMitgefaerbt() throws {
+        let page = Self.colorBlocks([((220, 30, 30), 120), ((60, 25, 25), 60)])
+        let masks = MRCSegmenter.colorMasks(coloredInk: page.ink, rgb: page.rgb,
+                                            width: page.width, height: page.height)
+        let red = try #require(masks.first)
+        #expect(masks.count == 1)
+        #expect(page.offsets[0].allSatisfy { Self.isSet(red.mask, $0) })
+        #expect(!page.offsets[1].contains { Self.isSet(red.mask, $0) },
+                "Dunkle Pixel in der roten Maske")
+    }
+
+    /// Das Farbspitzen-Maß sieht Farbe, die erst im Kandidaten entsteht:
+    /// Referenz mit roter Unterschrift und schwarzem Text, Kandidat malt den
+    /// schwarzen Text rot. Vorher zählten nur die roten Referenzpixel – und
+    /// die waren unverändert, die Spitze blieb 0.
+    @Test func farbspitzeSiehtFarbeAufSchwarz() throws {
+        func page(textRed: Bool) throws -> CGImage {
+            let srgb = try #require(CGColorSpace(name: CGColorSpace.sRGB))
+            let ctx = try #require(CGContext(
+                data: nil, width: 160, height: 160, bitsPerComponent: 8, bytesPerRow: 0,
+                space: srgb,
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+            let red = CGColor(srgbRed: 0.82, green: 0.12, blue: 0.12, alpha: 1)
+            ctx.setFillColor(CGColor(srgbRed: 0.98, green: 0.98, blue: 0.98, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: 0, width: 160, height: 160))
+            ctx.setFillColor(red)
+            ctx.fill(CGRect(x: 10, y: 140, width: 60, height: 4))              // Unterschrift
+            ctx.setFillColor(textRed ? red : CGColor(srgbRed: 0.06, green: 0.06, blue: 0.06, alpha: 1))
+            for row in 0..<8 { ctx.fill(CGRect(x: 10, y: 10 + row * 14, width: 140, height: 6)) }
+            return try #require(ctx.makeImage())
+        }
+        let plain = try page(textRed: false), red = try page(textRed: true)
+        let reference = try #require(QualityGates.sample(plain, maxEdge: 160))
+        let recolored = try #require(QualityGates.sample(red, maxEdge: 160))
+        #expect(QualityGates.peakDeltaE76(reference: reference, candidate: reference) == 0)
+        let peak = QualityGates.peakDeltaE76(reference: reference, candidate: recolored)
+        #expect(peak > QualityGatePolicy.peakDeltaE76Floor, "Farbspitze \(peak)")
+    }
 }

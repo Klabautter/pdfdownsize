@@ -591,6 +591,19 @@ enum CandidateGenerator {
             }
         }
 
+        /// Ein verlustbehafteter Kandidat, der die Katastrophen-Grenze hält –
+        /// eine schon bestandene Stufe einer früheren Leiter (N12). Anders als
+        /// `hasSafeCandidate` zählt verlustfrei NICHT: Den verlustfreien
+        /// Kandidaten gibt es fast immer, das Zeitbudget (C3) galt mit ihm nie
+        /// (Masterplan N27).
+        var hasPassingLossyCandidate: Bool {
+            transforms.contains {
+                !$0.candidate.isLossless
+                    && ($0.candidate.metrics.perceptualScore ?? 0)
+                        <= PerceptualScore.catastrophicLimit
+            }
+        }
+
         init(resource: PDFImageResource, options: ImageCompressionOptions,
              pixels: ImagePixelSource, store: CandidateStore,
              pageContext: [Int: PageAnalysis], stageTimer: StageTimer?,
@@ -1269,7 +1282,8 @@ enum CandidateGenerator {
                             grayscale: grayscale,
                             jpegOptions: options,
                             gateClass: gateClass,
-                            rungIndexOffset: ladder.count)
+                            rungIndexOffset: ladder.count,
+                            honorsTimeBudget: false)
                     }
                     // Starkes Rauschen: Auch die Sicherheitsstufen scheitern mit
                     // Kleins Qualitäten an der Grenze. Das Original blieb dann in
@@ -1297,7 +1311,8 @@ enum CandidateGenerator {
                             grayscale: grayscale,
                             jpegOptions: smartLike,
                             gateClass: gateClass,
-                            rungIndexOffset: ladder.count + rungs.count)
+                            rungIndexOffset: ladder.count + rungs.count,
+                            honorsTimeBudget: false)
                     }
                 }
             }
@@ -1531,7 +1546,8 @@ enum CandidateGenerator {
             jpegOptions: ImageCompressionOptions,
             gateClass: QualityGateClass,
             rungIndexOffset: Int = 0,
-            perceptualLimitIsGate: Bool = false) {
+            perceptualLimitIsGate: Bool = false,
+            honorsTimeBudget: Bool = true) {
 
             var sawPassingRung = false
             var bestFailedSSIM: Double?
@@ -1631,8 +1647,13 @@ enum CandidateGenerator {
                 // N12: „ohne bestandenen Kandidaten“ gilt für das Bild, nicht
                 // nur für diese Leiter. Hatte eine Sicherheitsstufe schon
                 // bestanden, schnitt das Budget Smarts Rückfall ab – je nach
-                // Rechnerlast (Debug immer, Release knapp).
-                if !sawPassingRung, !hasSafeCandidate,
+                // Rechnerlast (Debug immer, Release knapp). N27: Nur eine
+                // bestandene verlustbehaftete Stufe zählt, nicht der stets
+                // vorhandene verlustfreie Kandidat. Die beiden Klein-Rückfälle
+                // (Sicherheitsstufen, Smarts Ziel) laufen ohne Budget: Sie
+                // kommen nur, wenn Klein sonst nichts Sicheres oder Kleines
+                // hat, und das Budget schnitt sie je nach Last ab.
+                if honorsTimeBudget, !sawPassingRung, !hasPassingLossyCandidate,
                    ContinuousClock.now - startedAt > CandidateGenerator.ladderTimeBudget {
                     for skipped in [rungIndex] + pending.sorted() {
                         traceJPEG(target: ladder[skipped], result: nil, disposition: "time-budget-skipped")

@@ -469,6 +469,51 @@ import PDFKit
         #expect(try targets(out) == before)
     }
 
+    /// Masterplan N25: Namensbaum mit einem Knoten `/Kids [selbst selbst]`
+    /// (ohne Besucht-Set verdoppeln sich die Aufrufe je Ebene, 2³³ bis Tiefe
+    /// 32) und 2000 Links über 2000 benannte Ziele (ohne Index läuft jede
+    /// Auflösung den ganzen Baum ab). Seite 4 wird entfernt: genau der eine
+    /// Link auf sie fällt weg, alle anderen bleiben – und der Lauf endet
+    /// zügig, statt zu hängen.
+    @Test(.timeLimit(.minutes(1))) func vieleBenannteZieleUndZyklischerBaumEndenZuegig() async throws {
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let first = b.reserveNumber()
+        var ids = [first]
+        for _ in 1...3 { ids.append(b.addPage(parent: pages)) }
+        let n = 2000
+        let pairs = (0..<n).map { i in "(z\(String(format: "%05d", i)))[\(ids[1 + i % 2]) 0 R/Fit]" }
+        let leaf = b.addObject("<</Names[\(pairs.joined()) (zEntfernt)[\(ids[3]) 0 R/Fit]]>>")
+        let doubling = b.reserveNumber()
+        b.fill(doubling, "<</Kids[\(doubling) 0 R \(doubling) 0 R]>>")
+        let tree = b.addObject("<</Kids[\(doubling) 0 R \(leaf) 0 R]>>")
+        let rect = "/Rect[72 600 200 620]/Border[0 0 0]"
+        var links = (0..<n).map { i in
+            b.addObject("<</Type/Annot/Subtype/Link\(rect)/Dest(z\(String(format: "%05d", i)))>>")
+        }
+        links.append(b.addObject("<</Type/Annot/Subtype/Link\(rect)/Dest(zEntfernt)>>"))
+        b.fillPage(first, parent: pages, extra: "/Annots[\(links.map { "\($0) 0 R" }.joined(separator: " "))]")
+        b.fill(pages, "<</Type/Pages/Kids[\(ids.map { "\($0) 0 R" }.joined(separator: " "))]/Count 4>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R/Names<</Dests \(tree) 0 R>>>>")
+        let input = try b.write(rootObject: root, prefix: "n25-viele-ziele")
+        defer { try? FileManager.default.removeItem(at: input) }
+        #expect(Self.linkCount(input, page: 0) == n + 1)
+
+        let source = SourceDocument(url: input, pageCount: 4)
+        let items = (0..<3).map { PageItem(source: source, pageIndex: $0) }
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("n25-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: out) }
+        let start = Date()
+        try await PageAssemblyService.assemble(pages: items, to: out) { _ in }
+        let seconds = Date().timeIntervalSince(start)
+        #expect(Self.linkCount(out, page: 0) == n, "Links nach dem Entfernen: \(Self.linkCount(out, page: 0))")
+        #expect(seconds < 20, "Zusammenstellen dauerte \(seconds) s")
+        // Die Validierung liest Ziele über den Snapshot – dieser Weg zählt und
+        // sammelt den Namensbaum der QUELLE samt Zyklus.
+        let snapshot = try PDFSemanticSnapshot.capture(input)
+        #expect(snapshot.navigation.namedDestinations.count == n + 1)
+    }
+
     /// Echte pdfLaTeX-Datei mit hyperref: Seite 1 drehen, alle Seiten
     /// behalten – Zahl der Links je Seite unverändert.
     @Test(.needsLocalFiles(latexFile)) func latexLinksUeberlebenDasDrehen() async throws {

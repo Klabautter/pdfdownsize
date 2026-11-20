@@ -41,14 +41,22 @@ fail=0
 while IFS='|' read -r name file mode goalS goalMB; do
     [ -f "$file" ] || { echo "✗ fehlt: $file" >&2; fail=1; continue; }
     report="$OUT/$name.json"; out="$OUT/$name.out.pdf"
+    # N28: Ein Bericht eines früheren Laufs darf nie für diesen gelten.
+    rm -f "$report" "$out"
     /usr/bin/time -l "$BIN" --bench "$file" --mode "$mode" --report "$report" --out "$out" \
         > /dev/null 2> "$OUT/$name.time"
+    status=$?
     secs=$(python3 -c "import json;print(round(json.load(open('$report'))['wall_ms']/1000,1))" 2>/dev/null || echo NaN)
     inb=$(python3 -c "import json;print(json.load(open('$report'))['input_bytes'])" 2>/dev/null || echo 0)
     outb=$(python3 -c "import json;print(json.load(open('$report'))['output_bytes'])" 2>/dev/null || echo 0)
     peak=$(awk '/maximum resident set size/ {printf "%d", $1/1048576}' "$OUT/$name.time")
     saved=$(python3 -c "print(round(100*(1-$outb/max($inb,1)),1))")
     ok=1
+    # N28: Ein gescheiterter Lauf besteht nie, auch wenn ein Bericht da ist.
+    if [ "$status" -ne 0 ] || [ ! -s "$report" ]; then
+        echo "✗ $name: Lauf endete mit Code $status$([ -s "$report" ] || echo ', ohne Bericht')" >&2
+        ok=0
+    fi
     python3 -c "import sys; sys.exit(0 if $secs <= $goalS else 1)" 2>/dev/null || ok=0
     [ "$goalMB" -gt 0 ] && [ "${peak:-0}" -gt "$goalMB" ] && ok=0
     [ "$ok" = 0 ] && fail=1

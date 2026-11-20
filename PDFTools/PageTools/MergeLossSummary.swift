@@ -9,6 +9,8 @@ enum MergeLossSummary {
 
     enum Feature: String, CaseIterable, Sendable {
         case tags, attachments, layers, scripts, encryption
+        /// N24: XMP-Metadaten und Lesezeichen unterhalb der ersten Ebene.
+        case metadata, nestedOutlines
 
         var label: String {
             switch self {
@@ -17,6 +19,8 @@ enum MergeLossSummary {
             case .layers: return String(localized: "Ebenen")
             case .scripts: return String(localized: "Skripte")
             case .encryption: return String(localized: "Verschlüsselung")
+            case .metadata: return String(localized: "XMP-Metadaten")
+            case .nestedOutlines: return String(localized: "Lesezeichen unterhalb der ersten Ebene")
             }
         }
     }
@@ -43,9 +47,14 @@ enum MergeLossSummary {
     /// Kern meldete `needsRebuild`). Die Verschlüsselung zählt nicht – ein
     /// Ergebnis aus einer entsperrten Quelle wird beim Sichern wieder
     /// verschlüsselt (N10).
+    /// N23: Nur bei einer ENTSPERRTEN Quelle fällt die Verschlüsselung nicht
+    /// weg (Sichern verschlüsselt neu). Eine Quelle nur mit Besitzer-Passwort
+    /// öffnet ohne Entsperren – nach dem Neuaufbau ist sie unverschlüsselt,
+    /// und das muss der Hinweis sagen.
     nonisolated static func rebuildLosses(for url: URL, displayName: String? = nil) -> [Loss] {
         let unlocked = displayName.map { [url: $0] } ?? [:]
-        return detect([url], unlocked: unlocked).filter { $0.feature != .encryption }
+        let losses = detect([url], unlocked: unlocked)
+        return displayName == nil ? losses : losses.filter { $0.feature != .encryption }
     }
 
     /// Ein Satz für das Ergebnis nach einem Neuaufbau einer einzelnen Quelle.

@@ -29,6 +29,12 @@ actor PDFDocumentPool {
         return DetachedPage(page: copy, rotation: page.rotation)
     }
 
+    /// Eigene Drehung der Seite – genug für den Cache-Schlüssel, ohne die
+    /// Seite zu kopieren (N28).
+    func rotation(for url: URL, pageIndex: Int) -> Int? {
+        document(for: url)?.page(at: pageIndex)?.rotation
+    }
+
     func evictAll() {
         cache.removeAll()
         order.removeAll()
@@ -86,15 +92,17 @@ final class ThumbnailService: @unchecked Sendable {
     func thumbnail(sourceID: UUID, url: URL, pageIndex: Int,
                    additionalRotation: Int, pixelHeight: CGFloat = 320) async -> NSImage? {
 
-        guard let detached = await pool.detachedPage(for: url, pageIndex: pageIndex) else { return nil }
-
-        let absolute = RotationNormalizer.normalized(detached.rotation + additionalRotation)
+        // N28: Erst den Cache fragen, dann die Seite kopieren – vorher kostete
+        // jeder Treffer eine Seitenkopie im Actor.
+        guard let rotation = await pool.rotation(for: url, pageIndex: pageIndex) else { return nil }
+        let absolute = RotationNormalizer.normalized(rotation + additionalRotation)
         let key = ThumbnailKey(sourceID: sourceID, pageIndex: pageIndex,
                                absoluteRotation: absolute, pixelHeight: pixelHeight)
 
         if let hit = cached(key: key) { return hit }
         // Weggescrollt, während das Dokument geöffnet wurde: nicht rendern.
         if Task.isCancelled { return nil }
+        guard let detached = await pool.detachedPage(for: url, pageIndex: pageIndex) else { return nil }
 
         let pageCopy = detached.page
         pageCopy.rotation = absolute

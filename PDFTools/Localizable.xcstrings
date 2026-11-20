@@ -4050,6 +4050,22 @@
         }
       }
     },
+    "Lesezeichen unterhalb der ersten Ebene": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lesezeichen unterhalb der ersten Ebene"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bookmarks below the first level"
+          }
+        }
+      }
+    },
     "Linearisiert das PDF, damit die erste Seite im Browser sofort erscheint.": {
       "localizations": {
         "de": {
@@ -6707,22 +6723,6 @@
         }
       }
     },
-    "Wird mit Smart komprimiert …": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Wird mit Smart komprimiert …"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Compressing with Smart…"
-          }
-        }
-      }
-    },
     "Wird verarbeitet …": {
       "localizations": {
         "de": {
@@ -6751,6 +6751,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Preparing…"
+          }
+        }
+      }
+    },
+    "XMP-Metadaten": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "XMP-Metadaten"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "XMP metadata"
           }
         }
       }

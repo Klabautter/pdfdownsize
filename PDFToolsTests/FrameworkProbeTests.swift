@@ -72,13 +72,18 @@ import Darwin
     static func runningProbes() -> [String] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        process.arguments = ["-P", String(getpid()), "-fl", "--probe"]
+        // „--" vor dem Muster: Ohne es las pgrep „--probe" als Option, brach
+        // mit „illegal option" ab, und die Liste war IMMER leer – jede
+        // Erwartung „kein Hilfsprozess mehr" galt ungeprüft (N28).
+        process.arguments = ["-P", String(getpid()), "-fl", "--", "--probe"]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         guard (try? process.run()) != nil else { return [] }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        // 0 = Treffer, 1 = keiner; alles andere ist ein Aufruffehler.
+        if process.terminationStatus > 1 { Issue.record("pgrep scheiterte mit \(process.terminationStatus)") }
         return String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
     }
 
@@ -90,6 +95,24 @@ import Darwin
         #expect(throws: (any Error).self) { try PDFSemanticSnapshot.capture(url) }
         // Ein Zeitlimit je Seite plus Start – nicht die Summe über Rückfallstufen.
         #expect(Date().timeIntervalSince(started) < PDFSemanticSnapshot.pageTextTimeout + 20)
+        #expect(Self.runningProbes().isEmpty, "Hilfsprozess läuft noch: \(Self.runningProbes())")
+    }
+
+    /// Masterplan N27: Der früh gestartete Referenz-Snapshot (C5) endet mit
+    /// `cancel()` – vorher lief er nach Abbruch, Fehler oder entfallener
+    /// Validierung bis zu seinem Zeitlimit weiter. Die hängende Datei hält
+    /// den Hilfsprozess über 150 s fest; nach dem Abbruch ist er binnen
+    /// Sekunden weg.
+    @Test(.timeLimit(.minutes(2)), .needsLocalFiles("tmp/fuzz-findings/hang-107468.pdf"))
+    func fruehenSnapshotAbbrechenBeendetDenHilfsprozess() throws {
+        let url = LocalTestData.repoRoot.appendingPathComponent("tmp/fuzz-findings/hang-107468.pdf")
+        let early = EarlyReferenceSnapshot(url)
+        Thread.sleep(forTimeInterval: 2)
+        #expect(!Self.runningProbes().isEmpty, "Kein Hilfsprozess – Test prüft nichts")
+        let started = Date()
+        early.cancel()
+        #expect(throws: CancellationError.self) { try early.value() }
+        #expect(Date().timeIntervalSince(started) < 3)
         #expect(Self.runningProbes().isEmpty, "Hilfsprozess läuft noch: \(Self.runningProbes())")
     }
 

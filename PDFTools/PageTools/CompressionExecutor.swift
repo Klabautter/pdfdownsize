@@ -973,7 +973,21 @@ struct LibQPDFPixelSource: ImagePixelSource {
         return false
     }
 
+    /// Masterplan N20: Das Raster eines Bildes mit eigenem Profil trägt das
+    /// Profil als Markierung – der Weg nach Grau deutet die Rohwerte darüber.
+    private func tagged(_ image: CGImage?, _ resource: PDFImageResource) -> CGImage? {
+        guard let image, Self.keepsSourceValues(resource),
+              let icc = document.imageICCProfile(objectID: resource.objectID),
+              let profile = CGColorSpace(iccData: icc as CFData) else { return image }
+        ImageResampler.tagSourceProfile(image, profile)
+        return image
+    }
+
     func decodedImage(for resource: PDFImageResource) -> CGImage? {
+        tagged(untaggedImage(for: resource), resource)
+    }
+
+    private func untaggedImage(for resource: PDFImageResource) -> CGImage? {
         switch resource.terminalFilter {
         case .dct:
             guard let data = jpegData(for: resource) else { return nil }
@@ -1138,10 +1152,10 @@ struct LibQPDFPixelSource: ImagePixelSource {
     func decodedImage(for resource: PDFImageResource, target: PixelSize) -> CGImage? {
         if resource.terminalFilter == .dct, target.width > 0, target.height > 0 {
             guard let data = jpegData(for: resource) else { return nil }
-            return ImageResampler.decodeJPEG(
+            return tagged(ImageResampler.decodeJPEG(
                 data, level: Self.dctLevel(resource: resource, target: target),
                 maximumPixels: CompressionPlanner.maximumDecodablePixels,
-                keepSourceValues: Self.keepsSourceValues(resource))
+                keepSourceValues: Self.keepsSourceValues(resource)), resource)
         }
         guard resource.terminalFilter == .jpx,
               target.width > 0, target.height > 0 else {
@@ -1149,7 +1163,7 @@ struct LibQPDFPixelSource: ImagePixelSource {
         }
         let reduce = Self.reduceLevel(resource: resource, target: target)
         guard reduce > 0 else { return decodedImage(for: resource) }
-        return jpxImage(resource: resource, reduce: reduce)
+        return tagged(jpxImage(resource: resource, reduce: reduce), resource)
     }
 
     /// V2-Maps-Perf – die Ebene des Raster-Caches IST die cp_reduce-Stufe:

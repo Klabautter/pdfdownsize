@@ -142,6 +142,13 @@ int pdfcore_named_destination_count(pdfcore_document_t *doc);
 /// Embedded-Files-Einträge im Names-Baum. -1=Fehler.
 int pdfcore_attachment_count(pdfcore_document_t *doc);
 
+/// Masterplan N20: Bytes des ICCBased-Profils eines Bildes (auch als Basis
+/// von /Indexed). Puffer mit free() freigeben. CHECK_FAILED = kein Profil.
+/// Gebraucht, wenn ein Bild mit eigenem Profil grau wird (N5 behält sonst die
+/// Rohwerte, die erst über das Profil richtig nach Grau gehen).
+int pdfcore_get_image_icc_profile(pdfcore_document_t *doc, int obj, int gen,
+                                  unsigned char **out, size_t *out_len);
+
 /// Masterplan E4: PDF/A-Teil laut XMP (pdfaid:part), 0 = keine Behauptung.
 int pdfcore_pdfa_part(pdfcore_document_t *doc);
 

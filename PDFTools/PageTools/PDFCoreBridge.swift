@@ -1172,6 +1172,22 @@ extension PDFCoreDocument {
     /// - `decoded: true`  → von libqpdf aufgelöste Bytes (Flate/LZW/RunLength
     ///   inkl. Predictor). Kann libqpdf nicht ALLE Filter auflösen, wird
     ///   `nil` geliefert – niemals Ersatzdaten.
+    /// Masterplan N20: Das ICCBased-Profil eines Bildes (auch als Basis von
+    /// /Indexed), nil ohne Profil.
+    func imageICCProfile(objectID: PDFObjectID) -> Data? {
+        gate.lock(); defer { gate.unlock() }
+        var ptr: UnsafeMutablePointer<UInt8>?
+        var len: Int = 0
+        let rc = pdfcore_get_image_icc_profile(
+            handle, Int32(objectID.objectNumber), Int32(objectID.generation), &ptr, &len)
+        guard rc == PDFCORE_OK.rawValue, let base = ptr, len > 0 else {
+            if let base = ptr { free(base) }
+            return nil
+        }
+        defer { free(base) }
+        return Data(bytes: base, count: len)
+    }
+
     func imageStreamData(objectID: PDFObjectID, decoded: Bool) -> Data? {
         imageStreamData(objectID: objectID, level: decoded ? 1 : 0)
     }

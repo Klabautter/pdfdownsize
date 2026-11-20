@@ -680,10 +680,16 @@ final class MergeViewModel: ObservableObject {
     /// Schreibt die Teile als einzelne PDFs in den Zielordner.
     /// Kollisionsfreie Namen, Progress über die vorhandene Anzeige;
     /// bei Abbruch werden bereits geschriebene Teile wieder entfernt.
+    /// N24: Hinweis, wenn beim Aufteilen eine Quelle neu aufgebaut werden
+    /// musste (wie beim Ergebnis von „PDF erstellen“). nil = alles im Original.
+    @Published private(set) var splitRebuildNotice: String?
+
     func writeChunks(_ chunks: [[PageItem]],
                      to folder: URL,
                      baseName: String) async throws -> [URL] {
         guard !chunks.isEmpty else { return [] }
+        splitRebuildNotice = nil
+        var rebuiltSource: URL?
         activity = .processing(cancelling: false)
         progress = 0
         processingLabel = "Vorbereiten …"
@@ -720,7 +726,7 @@ final class MergeViewModel: ObservableObject {
 
                 // Befund B11: Abbruch greift innerhalb eines Teils; der
                 // Fortschritt eines abgebrochenen Laufs übermalt nichts.
-                try await PageAssemblyService.assemble(pages: chunk, to: staging) { [weak self] fraction in
+                let assembly = try await PageAssemblyService.assemble(pages: chunk, to: staging) { [weak self] fraction in
                     guard !Task.isCancelled else { return }
                     Task { @MainActor [weak self] in
                         guard let self, self.isProcessing, self.activeRunID == runID else { return }
@@ -746,6 +752,7 @@ final class MergeViewModel: ObservableObject {
                 }
                 do {
                     try fm.moveItem(at: payload, to: dest)
+                    if assembly.rebuiltSingleSource { rebuiltSource = chunk.first?.sourceURL }
                 } catch {
                     if payload != staging { try? fm.removeItem(at: payload) }
                     throw error
@@ -753,6 +760,13 @@ final class MergeViewModel: ObservableObject {
                 written.append(dest)
             }
             progress = 1
+            if let source = rebuiltSource {
+                let shownName = unlockedSources[source]?.original.lastPathComponent
+                let losses = await Task.detached(priority: .userInitiated) {
+                    MergeLossSummary.rebuildLosses(for: source, displayName: shownName)
+                }.value
+                splitRebuildNotice = MergeLossSummary.rebuildSentence(for: losses)
+            }
             return written
         } catch {
             // Keine halben Ergebnisse im Zielordner hinterlassen.
@@ -813,70 +827,6 @@ final class MergeViewModel: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
             return nil
-        }
-    }
-
-    func compressOutcomeWithSmart() {
-        // Nur ein ungesichertes Ergebnis: Nach dem Sichern liegt das Temp
-        // nicht mehr unter `current.url`.
-        guard case .unsaved(let current) = outcomeState, !isProcessing else { return }
-        activity = .processing(cancelling: false)
-        processingLabel = "Smart komprimieren …"
-        progress = 0
-        errorMessage = nil
-
-        let url = current.url
-        let kind = current.kind
-        let engine = Task.detached(priority: .userInitiated) { [weak self] in
-            try Compressor().compress(
-                inputURL: url,
-                mode: .smart,
-                isCancelled: { Task.isCancelled },
-                progress: { fraction, label in
-                    Task { @MainActor [weak self] in
-                        self?.progress = fraction
-                        self?.processingLabel = label
-                    }
-                })
-        }
-        engineTask = engine
-
-        workTask = Task { @MainActor in
-            defer {
-                activity = .idle
-                engineTask = nil
-            }
-            do {
-                let result = try await engine.value
-
-                guard !Task.isCancelled else {
-                    // Teil-Ergebnis verwerfen, altes Outcome bleibt bestehen.
-                    try? FileManager.default.removeItem(at: result.outputURL)
-                    return
-                }
-
-                // Regel wie im Compress-Tool: < 1 % Ersparnis gilt als bereits optimiert.
-                if result.alreadyOptimized {
-                    errorMessage = String(localized: "Keine weitere Verkleinerung möglich.")
-                    return
-                }
-
-                if url.path.hasPrefix(FileManager.default.temporaryDirectory.path) {
-                    try? FileManager.default.removeItem(at: url)
-                }
-                progress = 1
-                outcomeState = .unsaved(MergeOutcome(url: result.outputURL,
-                                                     pageCount: current.pageCount,
-                                                     outputBytes: result.outputBytes,
-                                                     combinedInputBytes: current.combinedInputBytes,
-                                                     kind: kind,
-                                                     encryption: current.encryption,
-                                                     rebuildNotice: current.rebuildNotice))
-            } catch is CancellationError {
-                errorMessage = nil
-            } catch {
-                errorMessage = error.localizedDescription
-            }
         }
     }
 

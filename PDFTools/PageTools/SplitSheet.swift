@@ -94,10 +94,18 @@ struct SplitSheet: View {
     @ViewBuilder
     private var footer: some View {
         if let written {
-            SavedResultBlock(title: String(localized: "\(written.count) Teile gesichert"),
-                             detail: written[0].deletingLastPathComponent().path,
-                             urls: [written[0]],
-                             followUp: (String(localized: "Fertig"), { dismiss() }))
+            VStack(alignment: .leading, spacing: 10) {
+                // N24: Neuaufbau einer Quelle auch hier ansagen.
+                if let notice = vm.splitRebuildNotice {
+                    Label(notice, systemImage: "exclamationmark.triangle")
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                SavedResultBlock(title: String(localized: "\(written.count) Teile gesichert"),
+                                 detail: written[0].deletingLastPathComponent().path,
+                                 urls: [written[0]],
+                                 followUp: (String(localized: "Fertig"), { dismiss() }))
+            }
         } else if isWriting {
             WorkProgressBar(progress: vm.progress,
                             label: vm.processingLabel,

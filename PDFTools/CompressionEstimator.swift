@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 struct CompressionEstimate {
@@ -223,6 +224,10 @@ enum CompressionEstimator {
         /// Terme rechnen mit `Stufe / Bezug` (Klein 0,83 · Smart 1 · Qualität
         /// 1,42) – die unterste Stufe nennt der Planner (`qualityFloor`).
         static let referenceFloor = 0.60
+        /// B5: Probekodierung (Kante, Hochrechnungs-Exponent, Bilder je Dokument).
+        static let probeEdge = 1024.0
+        static let probeScaleExponent = 0.85
+        static let probeImagesPerDocument = 3
         /// Bilevel (1 bpc): G4/JBIG2-Race.
         static let bilevelRetention = 0.03
         /// JPEG ohne Verkleinerung: verlustfreier Repack/Strukturgewinn;
@@ -373,6 +378,22 @@ enum CompressionEstimator {
             paperVotes.append(verdict)
             return verdict
         }
+        // Masterplan B5: Probekodierung für Qualität und Eigene – die drei
+        // größten JPEGs je Dokument (Reihenfolge nach Bytes).
+        let probeLadder = Self.probeLadder(for: options.image)
+        let probeTargets = probeLadder == nil ? Set<PDFObjectID>() : Set(
+            resources.filter { $0.terminalFilter == .dct && $0.transformCapability.isSafe }
+                .sorted { $0.encodedByteCount > $1.encodedByteCount }
+                .prefix(QuickModel.probeImagesPerDocument).map(\.objectID))
+        func probed(_ retention: Double, _ resource: PDFImageResource, _ target: PixelSize?) -> Double {
+            guard let ladder = probeLadder, probeTargets.contains(resource.objectID),
+                  let jpeg = pixels.jpegData(for: resource),
+                  let probe = Self.probeRetention(resource: resource, jpeg: jpeg, target: target,
+                                                  qualities: ladder.qualities,
+                                                  minimumSSIM: ladder.minimumSSIM)
+            else { return retention }
+            return min(retention, probe)
+        }
         for resource in resources {
             let bytes = Double(max(resource.encodedByteCount, 0))
             let target = CompressionPlanner.plannedSize(for: resource, options: options.image)
@@ -387,7 +408,7 @@ enum CompressionEstimator {
                 resource: resource, options: modelOptions, target: target,
                 allowsPaperScanRule: CompressionPlanner.adaptivePreset(for: options.image) != nil,
                 pageHasVisibleText: pageHasVisibleText, looksLikePaper: looksLikePaper) {
-                imagesOut += bytes * retention * hull
+                imagesOut += bytes * probed(retention, resource, target) * hull
                 continue
             }
             // Das MRC-Scan-Modell gilt nicht für feste Nutzerparameter
@@ -405,7 +426,8 @@ enum CompressionEstimator {
                                      contentIsNeutral: contentIsNeutral)
                 : nil
             imagesOut += bytes * (scanRetention
-                ?? quickRetention(resource: resource, ratio: ratio, qualityFloor: floor) * hull)
+                ?? probed(quickRetention(resource: resource, ratio: ratio, qualityFloor: floor),
+                          resource, target) * hull)
         }
 
         let modeled = Int64(max(structural + imagesOut, 1).rounded())
@@ -572,6 +594,64 @@ enum CompressionEstimator {
     /// (`CompressionPlanner.estimateModelOptions`, Masterplan B5). Die frühere Sonderregel „JPEGs
     /// im Budget bleiben“ stimmte nicht: Der Generator kodiert sie ungegated
     /// neu und behält das Kleinere (Eigene 0,9 geschätzt 15 %, geliefert 51 %).
+    /// Masterplan B5: Qualitäten der Probekodierung – die feste Qualität
+    /// (Eigene, ohne Prüfung: der Nutzer hat gewählt) oder die Qualitäts-
+    /// Leiter von unten mit ihrer SSIM-Schwelle. Klein und Smart nehmen
+    /// weiter die Kurven (dort lagen sie im Mittel unter 7 Punkten).
+    static func probeLadder(for options: ImageCompressionOptions)
+        -> (qualities: [Double], minimumSSIM: Double?)? {
+        switch options.qualityPolicy {
+        case .fixed(let quality): return ([quality], nil)
+        case .adaptive(let ladder, let minimumSSIM):
+            // Smart bleibt bei den Kurven: Mit der Probe gemessen (20.11.)
+            // Ø 6,9 → 8,7 und größte Abweichung 20,6 → 24,7 – Smarts Lauf
+            // weicht (MRC, Anker) stärker von einer reinen JPEG-Probe ab.
+            guard CompressionPlanner.adaptivePreset(for: options) == .quality, !ladder.isEmpty else { return nil }
+            return (ladder.sorted(), minimumSSIM)
+        }
+    }
+
+    /// Masterplan B5: Anteil der Bytes, der nach dem Neukodieren bleibt –
+    /// GEMESSEN an einer verkleinerten Probe (höchstens rund 1024 px Kante,
+    /// reduziert dekodiert) statt aus festen Erfahrungswerten. Die Kurven
+    /// nahmen für neu kodierte JPEGs pauschal 75–78 % an; gemessen waren es
+    /// 19 % (synthetisch), 58 % und 72 % bei denselben Einstellungen.
+    /// Hochgerechnet mit (Zielpixel / Probenpixel)^0,85 – geeicht am
+    /// Smoke-Satz (20.11.). nil, wenn die Probe nicht gelingt.
+    ///
+    /// Mit `minimumSSIM` nimmt die Probe – wie die Leiter im Lauf – die
+    /// unterste Qualität, deren Ergebnis die Schwelle hält; hält keine, die
+    /// oberste. Vorher galt immer die unterste Stufe, und ein Bild, das erst
+    /// höher besteht, wurde zu gut geschätzt.
+    static func probeRetention(resource: PDFImageResource, jpeg: Data, target: PixelSize?,
+                               qualities: [Double], minimumSSIM: Double?) -> Double? {
+        // Bezug sind die JPEG-Bytes OHNE Transporthülle: Den Wegfall von
+        // ASCII85/ASCIIHex rechnet der Aufrufer selbst ein (`hull`). Gegen
+        // die gespeicherten Bytes zählte er doppelt – 4486eb00f7 (JPEG in
+        // ASCII85): geschätzt 59 %, geliefert 43 %.
+        let source = Double(jpeg.count)
+        guard source > 0, resource.pixelCount > 0, !qualities.isEmpty else { return nil }
+        let edge = Double(max(resource.width, resource.height))
+        let level = max(0, Int(log2(edge / QuickModel.probeEdge).rounded(.down)))
+        guard let small = ImageResampler.decodeJPEG(jpeg, level: level,
+                                                    maximumPixels: CompressionPlanner.maximumDecodablePixels)
+        else { return nil }
+        var chosen: Data?
+        for quality in qualities {
+            guard let attempt = ImageResampler.encodeJPEG(small, quality: quality) else { return nil }
+            chosen = attempt
+            guard let minimumSSIM else { break }
+            if let decoded = ImageResampler.decodeJPEG(attempt, level: 0,
+                                                       maximumPixels: CompressionPlanner.maximumDecodablePixels),
+               QualityMetrics.ssim(original: small, candidate: decoded) >= minimumSSIM { break }
+        }
+        guard let encoded = chosen else { return nil }
+        let probePixels = Double(max(small.width * small.height, 1))
+        let targetPixels = Double(target.map { $0.width * $0.height } ?? resource.pixelCount)
+        let predicted = Double(encoded.count) * pow(targetPixels / probePixels, QuickModel.probeScaleExponent)
+        return min(1, predicted / source)
+    }
+
     static func quickRetention(resource: PDFImageResource, ratio: Double,
                                qualityFloor: Double) -> Double {
         guard resource.transformCapability.isSafe, !resource.isImageMask else { return 1 }
