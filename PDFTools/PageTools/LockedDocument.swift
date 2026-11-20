@@ -55,4 +55,19 @@ struct UnlockedDocument: Equatable {
     func discard() {
         try? FileManager.default.removeItem(at: workingCopy)
     }
+
+    /// N14 (B2): Meldung zu einem gescheiterten Entsperren. Vorher hieß jeder
+    /// Fehler „Das Passwort stimmt nicht“ – auch eine volle Platte beim
+    /// Schreiben der Arbeitskopie. Nur ein abgelehntes Passwort heißt so.
+    nonisolated static func failureMessage(for error: Error) -> String {
+        if case PDFCoreError.openFailed(let code) = error {
+            if code == PDFCORE_ERR_PASSWORD.rawValue {
+                return String(localized: "Das Passwort stimmt nicht.")
+            }
+            if code == PDFCORE_ERR_INTERNAL.rawValue {
+                return String(localized: "Die entsperrte Arbeitskopie ließ sich nicht schreiben. Ist genug Speicherplatz frei?")
+            }
+        }
+        return error.localizedDescription
+    }
 }

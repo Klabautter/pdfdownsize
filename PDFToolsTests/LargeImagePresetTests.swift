@@ -236,8 +236,10 @@ import UniformTypeIdentifiers
         let sizes = try Self.presets.map {
             Compressor.fileSize(of: try Compressor().compress(inputURL: url, mode: $0.mode).outputURL)
         }
-        // Bewusst nicht Klein <= Smart: Der Rückfall landet auf Smarts Raster,
-        // wählt aber eine etwas höhere Qualität als Smart (noch ungeklärt).
+        // Bewusst nicht Klein <= Smart: Der Rückfall misst auf Smarts Raster
+        // mit Kleins Grenzen, die Wahl kann eine Stufe über Smart liegen.
+        // N12: Vorher kam der Rückfall nicht zum Zug, sobald eine größere
+        // Sicherheitsstufe bestand (Klein 3,4 MB, Smart 0,9 MB).
         #expect(Double(sizes[0]) <= Double(sizes[1]) * 1.5 && sizes[1] <= sizes[2],
                 "Größen je Stufe: \(sizes)")
     }

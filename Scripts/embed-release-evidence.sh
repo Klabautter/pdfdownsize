@@ -14,7 +14,11 @@ for path in \
     test -s "$ROOT/$path"
     cp -f "$ROOT/$path" "$DEST/"
 done
-# Die Abnahme schreibt Scripts/gate.sh (G1) über die versionierte Vorgabe
-# (accepted = false). release.sh stellt die Vorgabe nach dem Build wieder her.
-/usr/bin/plutil -lint "$ROOT/Scripts/release-acceptance.plist" >/dev/null
-cp -f "$ROOT/Scripts/release-acceptance.plist" "$DEST/"
+# Die Abnahme schreibt Scripts/gate.sh (G1, N8) nach tmp/ (ignoriert); ohne
+# sie gilt die versionierte Vorgabe (accepted = false). release-check.sh
+# vergleicht den eingebetteten Commit mit HEAD – eine alte Abnahme in tmp/
+# gibt also keinen anderen Stand frei.
+ACCEPTANCE="$ROOT/tmp/release-acceptance.plist"
+[ -f "$ACCEPTANCE" ] || ACCEPTANCE="$ROOT/Scripts/release-acceptance.plist"
+/usr/bin/plutil -lint "$ACCEPTANCE" >/dev/null
+cp -f "$ACCEPTANCE" "$DEST/release-acceptance.plist"

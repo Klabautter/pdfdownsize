@@ -110,8 +110,8 @@ final class CompressionViewModel: ObservableObject {
                     self.originalDocument = document.value
                     self.documentStatus = .ready(pageCount: pages)
                     self.refreshEstimate()
-                case .failure:
-                    self.passwordError = String(localized: "Das Passwort stimmt nicht.")
+                case .failure(let error):
+                    self.passwordError = UnlockedDocument.failureMessage(for: error)
                 }
             }
         }
@@ -160,7 +160,7 @@ final class CompressionViewModel: ObservableObject {
     private var thumbnailTask: Task<Void, Never>?
     /// Seitenleiste als Stichprobe: Ein 300-Seiten-PDF lädt nicht 300
     /// Miniaturen; weitere Seiten erreicht man in der Ansicht selbst.
-    static let samplePageCount = 3
+    nonisolated static let samplePageCount = 3
 
     /// Inspector-Wunschzustand – überlebt Toolwechsel, da im VM gehalten.
     @Published var inspectorPinned = false
@@ -452,7 +452,10 @@ final class CompressionViewModel: ObservableObject {
         }
     }
 
-    func select(_ url: URL) {
+    /// `password` (Masterplan N10): Übergabe eines geschützten Ergebnisses
+    /// aus Organisieren – entsperrt ohne erneute Frage, sichert wieder
+    /// geschützt. Das Passwort bleibt nur im Speicher.
+    func select(_ url: URL, password: String? = nil) {
         guard !isWorking else { return }
         workTask?.cancel()
         workTask = nil
@@ -485,6 +488,7 @@ final class CompressionViewModel: ObservableObject {
                 guard self.inputURL == currentURL, !Task.isCancelled else { return }
                 self.originalDocument = document.value
                 self.applyProbe(verdict)
+                if verdict == .locked, let password { self.unlock(password: password) }
             }
         }
         pageThumbnails = [:]
@@ -838,8 +842,10 @@ final class CompressionViewModel: ObservableObject {
         guard !urls.isEmpty, !isWorking else { return nil }
         // Alte Bulk-Temps entsorgen, bevor neue entstehen.
         discardBulkResults()
+        discardBulkUnlocked(keeping: urls)
         bulkInputs = urls
         bulkMode = mode
+        bulkRunOptions = currentOptions
         bulkFractions = Dictionary(uniqueKeysWithValues: urls.indices.map { ($0, 0.0) })
         bulkLabels = [:]
         bulkErrors = [:]
@@ -882,15 +888,20 @@ final class CompressionViewModel: ObservableObject {
         // Zielgröße und Linearize gelten für JEDE Bulk-Datei.
         let options = currentOptions
         let progress = BulkProgressAccumulator(count: urls.count)
+        // N14 (B2): Entsperrte Dateien rechnen auf ihrer Arbeitskopie.
+        let working = urls.map { bulkWorkingURL($0) }
+        let originalFor = Dictionary(uniqueKeysWithValues: zip(working, urls).map { ($0, $1) })
+        let unlockedFor = bulkUnlocked
         do {
             let outcomes = try await CompressionConcurrency.compressDocumentsCollecting(
-                inputURLs: urls,
+                inputURLs: working,
                 options: options,
                 isCancelled: { flag.isCancelled || Task.isCancelled },
                 isCancelledFor: { [cancelledFiles] _, url in
-                    cancelledFiles.contains(url)
+                    cancelledFiles.contains(originalFor[url] ?? url)
                 },
-                onDocumentProgress: { index, url, fraction, label in
+                onDocumentProgress: { [weak self] index, workingURL, fraction, label in
+                    let url = originalFor[workingURL] ?? workingURL
                     let overall = progress.update(index: index, fraction: fraction)
                     let row = rowIndex[url] ?? index
                     Task { @MainActor [weak self] in
@@ -914,7 +925,12 @@ final class CompressionViewModel: ObservableObject {
                 let url = urls[index]
                 switch outcome {
                 case .success(let r):
-                    successes.append(BulkSuccess(input: url, result: r))
+                    do {
+                        successes.append(BulkSuccess(input: url, result: try Self.relocked(r, unlockedFor[url])))
+                    } catch {
+                        try? FileManager.default.removeItem(at: r.outputURL)
+                        errors[url] = Self.userFacingMessage(for: error)
+                    }
                 case .failure(let error):
                     if error is CancellationError {
                         // Einzeln oder global abgebrochen (B4): kein Fehler,
@@ -944,6 +960,58 @@ final class CompressionViewModel: ObservableObject {
         } catch {
             if isCurrent(flag) { errorMessage = error.localizedDescription }
             throw error
+        }
+    }
+
+    // MARK: Entsperren im Stapel (N14, B2)
+
+    /// Entsperrte Stapeldateien: Original → Arbeitskopie samt Passwort (nur
+    /// im Speicher). Gerechnet wird auf der Kopie, das Ergebnis geht mit der
+    /// Verschlüsselung des Originals zurück – wie im Einzelweg.
+    @Published private(set) var bulkUnlocked: [URL: UnlockedDocument] = [:]
+
+    /// Entsperrt eine gesperrte Stapeldatei. Liefert die Fehlermeldung oder nil.
+    @discardableResult
+    func unlockBulkFile(_ url: URL, password: String) async -> String? {
+        guard !isWorking, bulkInputs.contains(url), bulkVerdicts[url] == .locked,
+              !password.isEmpty else { return nil }
+        let outcome: Result<(UnlockedDocument, Int), Error> = await Task.detached(priority: .userInitiated) {
+            do {
+                guard case .ok(let pages) = DocumentProbe.inspect(url, password: password) else {
+                    throw PDFCoreError.openFailed(code: PDFCORE_ERR_PASSWORD.rawValue)
+                }
+                return .success((try UnlockedDocument.unlock(url, password: password), pages))
+            } catch {
+                return .failure(error)
+            }
+        }.value
+        switch outcome {
+        case .success(let (unlocked, pages)):
+            guard bulkInputs.contains(url) else { unlocked.discard(); return nil }
+            bulkUnlocked[url]?.discard()
+            bulkUnlocked[url] = unlocked
+            bulkVerdicts[url] = .ok(pageCount: pages)
+            bulkPageCounts[url] = pages
+            return nil
+        case .failure(let error):
+            return UnlockedDocument.failureMessage(for: error)
+        }
+    }
+
+    /// Datei, auf der der Stapel für `url` rechnet.
+    private func bulkWorkingURL(_ url: URL) -> URL { bulkUnlocked[url]?.workingCopy ?? url }
+
+    /// Ergebnis einer entsperrten Datei → wieder verschlüsselt (sonst unverändert).
+    nonisolated private static func relocked(_ result: CompressionResult,
+                                             _ unlocked: UnlockedDocument?) throws -> CompressionResult {
+        guard let unlocked else { return result }
+        return try unlocked.reencrypted(result)
+    }
+
+    private func discardBulkUnlocked(keeping urls: [URL] = []) {
+        for (url, unlocked) in bulkUnlocked where !urls.contains(url) {
+            unlocked.discard()
+            bulkUnlocked[url] = nil
         }
     }
 
@@ -982,6 +1050,7 @@ final class CompressionViewModel: ObservableObject {
             bulkSuccesses.remove(at: i)
         }
         bulkInputs.remove(at: index)
+        bulkUnlocked.removeValue(forKey: url)?.discard()
         bulkErrors.removeValue(forKey: url)
         bulkCancelledURLs.remove(url)
         bulkPageCounts.removeValue(forKey: url)
@@ -1013,11 +1082,43 @@ final class CompressionViewModel: ObservableObject {
     /// B4: Moduswechsel nach einem Stapellauf startet den Stapel neu – wie
     /// „Mit anderem Modus versuchen“ im Einzelweg. Die Rückfrage für
     /// ungesicherte Ergebnisse stellt der Aufrufer (DiscardGuard).
+    ///
+    /// N14 (B4): „Eigene“ startet NICHT sofort – sonst liefe der Stapel mit
+    /// Werten, die noch niemand eingestellt hat. Die alten Ergebnisse gehören
+    /// zum alten Modus und fallen weg; gestartet wird über
+    /// `startBulkWithCurrentSettings()` (Knopf unter den Einstellungen).
     func changeBulkMode(to newMode: CompressionMode) {
         guard !isWorking, newMode != mode else { return }
         let hadRun = !bulkSuccesses.isEmpty || !bulkErrors.isEmpty || !bulkCancelledURLs.isEmpty
         mode = newMode
-        if hadRun { compressAll(bulkInputs) }
+        guard hadRun else { return }
+        if newMode == .custom {
+            discardBulkResults()
+            bulkErrors = [:]
+            bulkCancelledURLs = []
+            bulkFractions = Dictionary(uniqueKeysWithValues: bulkInputs.indices.map { ($0, 0.0) })
+            bulkLabels = [:]
+            bulkRunOptions = nil
+        } else {
+            compressAll(bulkInputs)
+        }
+    }
+
+    /// Optionen des letzten Stapellaufs (nil = mit den aktuellen Einstellungen
+    /// lief noch nichts).
+    @Published private(set) var bulkRunOptions: CompressionOptions?
+
+    /// N14 (B4): Die Einstellungen von „Eigene“ weichen vom letzten Lauf ab
+    /// (oder es gab keinen) – dann bietet der Stapel „Mit diesen
+    /// Einstellungen komprimieren“ an. Vorher waren die Felder nach dem Lauf
+    /// editierbar, aber ohne Wirkung.
+    var bulkNeedsCustomStart: Bool {
+        mode == .custom && !isWorking && !bulkInputs.isEmpty && bulkRunOptions != currentOptions
+    }
+
+    func startBulkWithCurrentSettings() {
+        guard bulkNeedsCustomStart else { return }
+        compressAll(bulkInputs)
     }
 
     /// B4: Eine fehlgeschlagene oder abgebrochene Datei allein wiederholen.
@@ -1033,11 +1134,13 @@ final class CompressionViewModel: ObservableObject {
         let options = currentOptions
         let flag = beginRun()
         let cancelled = cancelledFiles
+        let workingURL = bulkWorkingURL(url)
+        let unlocked = bulkUnlocked[url]
         workTask = Task.detached(priority: .userInitiated) {
             let outcomes = try? await CompressionConcurrency.compressDocumentsCollecting(
-                inputURLs: [url], options: options,
+                inputURLs: [workingURL], options: options,
                 isCancelled: { flag.isCancelled || Task.isCancelled },
-                isCancelledFor: { _, u in cancelled.contains(u) },
+                isCancelledFor: { _, _ in cancelled.contains(url) },
                 onDocumentProgress: { _, _, fraction, label in
                     Task { @MainActor in
                         guard self.isCurrent(flag) else { return }
@@ -1048,7 +1151,9 @@ final class CompressionViewModel: ObservableObject {
             await MainActor.run {
                 defer { self.endRun(flag) }
                 self.bulkFractions[index] = 1
-                switch outcomes?.first {
+                switch outcomes?.first.map({ outcome in
+                    outcome.flatMap { r in Result { try Self.relocked(r, unlocked) } }
+                }) {
                 case .success(let result):
                     // Eingabereihenfolge der Erfolge beibehalten.
                     let order = Dictionary(uniqueKeysWithValues: self.bulkInputs.enumerated().map { ($1, $0) })
@@ -1076,14 +1181,20 @@ final class CompressionViewModel: ObservableObject {
     /// Mehrfach-Auswahl (Open-Panel). Eine Datei → Einzelpfad, mehrere →
     /// Bulk-Liste. Nur PDFs, duplikatbereinigt, sortiert für Determinismus.
     func chooseFiles() {
+        let urls = Self.pickPDFs()
+        if !urls.isEmpty { selectMany(urls) }
+    }
+
+    /// Öffnen-Dialog für PDFs; leer bei Abbruch. Getrennt vom Übernehmen,
+    /// damit die Verwerfen-Frage erst nach Wahl und Prüfung kommt (N14, B1).
+    static func pickPDFs(prompt: String? = nil) -> [URL] {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
         panel.allowedContentTypes = [.pdf]
-        if panel.runModal() == .OK {
-            selectMany(panel.urls)
-        }
+        if let prompt { panel.prompt = prompt }
+        return panel.runModal() == .OK ? panel.urls : []
     }
 
     /// Drop/Panel-Eingang für 1…n URLs. Leere und Nicht-PDFs werden
@@ -1130,19 +1241,8 @@ final class CompressionViewModel: ObservableObject {
 
     /// Weitere PDFs hinzufügen: aus einer Einzeldatei wird ein Stapel, ein
     /// bestehender Stapel wächst. Duplikate fallen in `selectMany` heraus.
-    func addFiles() {
-        guard !isWorking else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = [.pdf]
-        panel.prompt = String(localized: "Hinzufügen")
-        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
-        add(panel.urls)
-    }
-
-    /// Wie `addFiles`, ohne Panel (Drop auf eine geöffnete Datei).
+    /// Weitere PDFs zur geöffneten Datei oder Liste (Drop, „Weitere PDFs
+    /// hinzufügen“).
     func add(_ urls: [URL]) {
         let existing = bulkInputs.isEmpty ? (inputURL.map { [$0] } ?? []) : bulkInputs
         selectMany(existing + urls)
@@ -1215,6 +1315,8 @@ final class CompressionViewModel: ObservableObject {
         bulkVerdicts = [:]
         bulkSigned = []
         bulkEstimates = [:]
+        bulkRunOptions = nil
+        discardBulkUnlocked()
     }
 
     /// Verwirft die Erfolge samt Temps (gesicherte Ziele sind Kopien).
@@ -1258,8 +1360,13 @@ final class CompressionViewModel: ObservableObject {
         return saved
     }
 
+    /// Sichern-Fehler im Stapel, als System-Alert der Stapelansicht gezeigt.
+    /// N14 (B4): Liegt im ViewModel, damit ⌘S denselben Weg nimmt wie der
+    /// Knopf – vorher verwarf das Menü die Rückgabe, der Fehler verschwand.
+    @Published var bulkSaveError: String?
+
     /// „Alle sichern …“ mit Ordner-Dialog – Knopf im Stapel und ⌘S (F2).
-    /// Liefert die Fehlermeldung, falls nicht alles gesichert wurde.
+    /// Ein Fehler landet in `bulkSaveError` und wird zurückgegeben.
     @discardableResult
     func saveAllBulkWithPanel() -> String? {
         let panel = NSOpenPanel()
@@ -1273,14 +1380,15 @@ final class CompressionViewModel: ObservableObject {
             _ = try saveAllBulk(to: folder)
             return nil
         } catch {
-            return error.localizedDescription
+            bulkSaveError = error.localizedDescription
+            return bulkSaveError
         }
     }
 
     /// Sichert EIN Bulk-Ergebnis über ein Save-Panel – hier ist der Name
     /// frei wählbar (Vorschlag: Eingabename + Modus-Suffix).
     func saveBulkResult(for url: URL) {
-        guard let result = bulkResult(for: url) else { return }
+        guard bulkResult(for: url) != nil else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.nameFieldStringValue = Compressor.suggestedOutputName(for: url, mode: bulkMode)
@@ -1319,10 +1427,19 @@ final class CompressionViewModel: ObservableObject {
     }
 
     /// Öffnet das Ergebnis für den Vergleich (einmal je Ergebnis).
+    /// N14 (C6): abseits des Main Threads – ein großes Ergebnis zu öffnen
+    /// hielt sonst die Oberfläche an.
     func loadCompressedDocument() {
         guard let pending = pendingResult else { return }
         if compressedDocument?.documentURL == pending.outputURL { return }
-        compressedDocument = PDFDocument(url: pending.outputURL)
+        let url = pending.outputURL
+        Task {
+            let loaded = await Task.detached(priority: .userInitiated) {
+                SendableDocument(PDFDocument(url: url))
+            }.value
+            guard self.pendingResult?.outputURL == url else { return }
+            self.compressedDocument = loaded.value
+        }
     }
 
     /// Wechselt die angezeigte Seite – Vorschau und (nach dem Lauf)

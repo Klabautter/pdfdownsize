@@ -135,9 +135,9 @@ struct RootView: View {
             case .organize:
                 OrganizeView(vm: organizeVM, onOpenConvert: {
                     selectedTool = .convert
-                }, onCompress: { url in
+                }, onCompress: { url, password in
                     discardGuard.run(ifUnsaved: compressionVM.hasUnsavedResult) {
-                        compressionVM.select(url)
+                        compressionVM.select(url, password: password)
                         selectedTool = .compress
                     }
                 })
@@ -290,7 +290,7 @@ struct RootView: View {
             // Nur Bilder: Die PDF daraus entsteht in Konvertieren.
             if pdfs.isEmpty, !images.isEmpty { routeImages(images); return }
             guard !pdfs.isEmpty else { return }
-            discardGuard.run(ifUnsaved: compressionVM.hasUnsavedResult) {
+            discardGuard.runAfterProbe(pdfs, ifUnsaved: compressionVM.hasUnsavedResult) {
                 compressionVM.selectMany(pdfs)
             }
         case .organize:
@@ -300,7 +300,7 @@ struct RootView: View {
         case .ocr:
             if pdfs.isEmpty, !images.isEmpty { routeImages(images); return }
             guard !pdfs.isEmpty else { return }
-            discardGuard.run(ifUnsaved: ocrVM.hasUnsavedResult) {
+            discardGuard.runAfterProbe(pdfs, ifUnsaved: ocrVM.hasUnsavedResult) {
                 ocrVM.accept(pdfs)
             }
         }

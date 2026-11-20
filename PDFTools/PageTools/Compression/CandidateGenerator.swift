@@ -458,7 +458,7 @@ enum CandidateGenerator {
                          pageContext: [Int: PageAnalysis] = [:],
                          stageTimer: StageTimer? = nil,
                          allowsQuantizedPalette: Bool = false,
-                         isCancelled: (() -> Bool)? = nil) -> Generated {
+                         isCancelled: (@Sendable () -> Bool)? = nil) -> Generated {
         var session = Session(resource: resource, options: options,
                               pixels: pixels, store: store,
                               pageContext: pageContext,
@@ -548,7 +548,7 @@ enum CandidateGenerator {
         let stageTimer: StageTimer?
         /// Masterplan C4: vor jeder Leiterstufe geprüft. Ein abgebrochenes
         /// Set ist unvollständig – der Planner verwirft es und wirft.
-        var isCancelled: (() -> Bool)?
+        var isCancelled: (@Sendable () -> Bool)?
         var cancelled: Bool { isCancelled?() ?? false }
         /// Masterplan C3: Beginn der Arbeit an diesem Bild (Zeitbudget).
         let startedAt = ContinuousClock.now
@@ -1276,7 +1276,13 @@ enum CandidateGenerator {
                     // voller Größe, während Smart auf einen Bruchteil kam. Als
                     // letzter Rückfall tritt deshalb Smarts Ziel mit Smarts
                     // Qualitäten und Messung an; der Optimierer wählt.
-                    if !hasSafeCandidate, let smartTarget = safety.smartTarget,
+                    //
+                    // Masterplan N12: auch dann, wenn eine Sicherheitsstufe
+                    // besteht. Bestand dort nur q 0,90 auf 1,25 × Smarts Raster,
+                    // lieferte Klein 3,4 MB, Smart 0,9 MB (verrauschtes Foto,
+                    // seit A1 als farbig gezählt; 1.0.9: Klein 0,82 MB). Die
+                    // Stufen kosten nur in diesem seltenen Rückfallzweig.
+                    if let smartTarget = safety.smartTarget,
                        CompressionPlanner.canDecode(resource, target: smartTarget, pixels: pixels),
                        let smartImage = decodedRaster(for: smartTarget) {
                         var smartLike = ImageCompressionOptions.smart
@@ -1622,7 +1628,12 @@ enum CandidateGenerator {
                 // bestandenen Kandidaten endet die Leiter mit dem bisherigen
                 // Stand (oder KEEP) – vorher rechnete ein schon optimaler
                 // Buchscan eine volle Minute für ein Prozent.
-                if !sawPassingRung, ContinuousClock.now - startedAt > CandidateGenerator.ladderTimeBudget {
+                // N12: „ohne bestandenen Kandidaten“ gilt für das Bild, nicht
+                // nur für diese Leiter. Hatte eine Sicherheitsstufe schon
+                // bestanden, schnitt das Budget Smarts Rückfall ab – je nach
+                // Rechnerlast (Debug immer, Release knapp).
+                if !sawPassingRung, !hasSafeCandidate,
+                   ContinuousClock.now - startedAt > CandidateGenerator.ladderTimeBudget {
                     for skipped in [rungIndex] + pending.sorted() {
                         traceJPEG(target: ladder[skipped], result: nil, disposition: "time-budget-skipped")
                     }

@@ -84,7 +84,7 @@ enum CompressionPipeline {
     static func run(inputURL: URL,
                     outputURL: URL,
                     options: CompressionOptions,
-                    isCancelled: (() -> Bool)? = nil,
+                    isCancelled: (@Sendable () -> Bool)? = nil,
                     progress: ((Double) -> Void)? = nil,
                     stageTimer: StageTimer? = nil,
                     isolation: CompressionIsolation? = nil,
@@ -197,7 +197,7 @@ enum CompressionPipeline {
     /// wie in `run` (V2-6, §12.6).
     static func plan(inputURL: URL,
                      options: CompressionOptions,
-                     isCancelled: (() -> Bool)? = nil,
+                     isCancelled: (@Sendable () -> Bool)? = nil,
                      overrides: DecisionOverrides = DecisionOverrides(),
                      store: CandidateStore? = nil) throws -> CompressionPlanner.Result {
         return try autoreleasepool {

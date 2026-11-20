@@ -61,12 +61,16 @@ struct CompressionTrace: Codable, Sendable {
         /// Phase V2-2 – Klassifikation des Bildinhalts. Seit V2-11 in
         /// jedem Produktionslauf gefüllt (Candidate Engine, §8).
         var classification: Classification?
+        /// Begründung des Optimierers samt verworfener Kandidaten und ihrer
+        /// verletzten Grenzen (N12: „Warum wählt Klein 3,4 MB?“). Additiv;
+        /// `reason` bleibt die kurze Beschreibung der Aktion.
+        var decision: String? = nil
 
         enum CodingKeys: String, CodingKey {
             case objectID = "object_id"
             case pages, source, selected, reason, applied
             case estimatedSavedBytes = "estimated_saved_bytes"
-            case classification
+            case classification, decision
         }
     }
 
@@ -236,6 +240,8 @@ enum CompressionTraceWriter {
                                        classifications: [PDFObjectID: ResourceClassification] = [:])
         -> [CompressionTrace.Resource] {
         let rejected = Set(execution.rejectedByBridge)
+        let decisionReasons = Dictionary(plan.decisions.map { ($0.resourceID, $0.reason) },
+                                         uniquingKeysWith: { first, _ in first })
         return resources.map { resource in
             let action = plan.action(for: resource.objectID)
             let isApplied = action.map {
@@ -260,7 +266,8 @@ enum CompressionTraceWriter {
                 reason: reasonDescription(action),
                 applied: isApplied,
                 estimatedSavedBytes: estimatedSaved(action),
-                classification: classification)
+                classification: classification,
+                decision: decisionReasons[CandidateSet.resourceID(for: resource.objectID)])
         }
     }
 

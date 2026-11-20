@@ -168,7 +168,7 @@ struct Compressor {
     func compress(inputURL: URL,
                   options: CompressionOptions,
                   engine: CompressionEngine = CompressionEngineState.production,
-                  isCancelled: (() -> Bool)? = nil,
+                  isCancelled: (@Sendable () -> Bool)? = nil,
                   progress: ((Double, String) -> Void)? = nil,
                   stageTimer: StageTimer? = nil,
                   isolation: CompressionIsolation? = nil,
@@ -203,7 +203,7 @@ struct Compressor {
                   linearize: Bool = false,
                   goal: CompressionGoal? = nil,
                   engine: CompressionEngine = CompressionEngineState.production,
-                  isCancelled: (() -> Bool)? = nil,
+                  isCancelled: (@Sendable () -> Bool)? = nil,
                   progress: ((Double, String) -> Void)? = nil,
                   stageTimer: StageTimer? = nil,
                   isolation: CompressionIsolation? = nil) throws -> CompressionResult {
@@ -226,7 +226,7 @@ struct Compressor {
                           mode: CompressionMode,
                           resolvedOptions options: CompressionOptions,
                           engine: CompressionEngine,
-                          isCancelled: (() -> Bool)?,
+                          isCancelled: (@Sendable () -> Bool)?,
                           progress: ((Double, String) -> Void)?,
                           stageTimer: StageTimer? = nil,
                           isolation: CompressionIsolation? = nil,
@@ -308,7 +308,7 @@ struct Compressor {
     private func compressLibQPDF(
         inputURL: URL,
         options: CompressionOptions,
-        isCancelled: (() -> Bool)?,
+        isCancelled: (@Sendable () -> Bool)?,
         progress: ((Double, String) -> Void)?,
         stageTimer: StageTimer? = nil,
         isolation: CompressionIsolation? = nil,
@@ -341,6 +341,12 @@ struct Compressor {
                            qpdfPath: Self.findQPDF())
             return iso
         }
+
+        // Masterplan C5 (Laufzeit): Die Referenz der Validierung hängt nur an
+        // der Quelle. Ihr Snapshot läuft deshalb gleich jetzt im Hilfsprozess,
+        // parallel zur Kompression, statt erst danach (statab: rund 3,8 s).
+        let earlyReference = qaValidationHook == nil
+            ? EarlyReferenceSnapshot(inputURL) : nil
 
         progress?(0.05, "Analysiere Dokument …")
         let imageOutput = workDir.appendingPathComponent("images.pdf")
@@ -464,7 +470,8 @@ struct Compressor {
                 }
                 if referenceSnapshot == nil {
                     do {
-                        referenceSnapshot = try PDFSemanticSnapshot.capture(inputURL)
+                        referenceSnapshot = try earlyReference?.value()
+                            ?? PDFSemanticSnapshot.capture(inputURL)
                     } catch let timeout as PDFSemanticSnapshot.SnapshotError {
                         referenceUnreadable = timeout.localizedDescription
                         return validate(url)
@@ -479,7 +486,11 @@ struct Compressor {
             }
         }
 
+        // N14 (C4): Die Validierung (Snapshot, Render-Stichprobe) dauert bei
+        // großen Dateien Sekunden – vorher kein Abbruch davor oder danach.
+        if let isCancelled, isCancelled() { throw CancellationError() }
         var report = validate(structureOutput)
+        if let isCancelled, isCancelled() { throw CancellationError() }
 
         // Ein Re-Plan-Lauf (V2-5 §11.5 / V2-6 §12.6): Original öffnen, Plan
         // mit Overrides ausführen, Struktur-Pass, validieren. Alles, was der
@@ -554,7 +565,9 @@ struct Compressor {
                                             file: structureOutput,
                                             qpdfPath: Self.findQPDF())
             }
+            if let isCancelled, isCancelled() { throw CancellationError() }
             report = validate(structureOutput)
+            if let isCancelled, isCancelled() { throw CancellationError() }
         }
 
         // MARK: §11.5 – QA-Rollback ist Re-Planning
@@ -994,3 +1007,26 @@ private final class MonotonicProgress: @unchecked Sendable {
         forward(current, label)
     }
 }
+
+/// Masterplan C5: Snapshot der Quelle, gestartet vor der Kompression und bei
+/// der ersten Validierung abgeholt. Gleiche Fehler wie ein Aufruf an dieser
+/// Stelle (Zeitlimit → `SnapshotError`), nur früher begonnen.
+final class EarlyReferenceSnapshot: @unchecked Sendable {
+    private let done = DispatchSemaphore(value: 0)
+    private var result: Result<PDFSemanticSnapshot, Error>?   // gesetzt vor `done.signal()`
+
+    init(_ url: URL) {
+        DispatchQueue(label: "pdftools.reference-snapshot", qos: .userInitiated).async {
+            self.result = Result { try PDFSemanticSnapshot.capture(url) }
+            self.done.signal()
+        }
+    }
+
+    /// Wartet auf den Snapshot (einmal; danach sofort).
+    func value() throws -> PDFSemanticSnapshot {
+        done.wait()
+        done.signal()
+        return try result!.get()
+    }
+}
+

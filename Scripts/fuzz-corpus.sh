@@ -13,7 +13,11 @@
 #
 # Aufruf:
 #   Scripts/fuzz-corpus.sh --app <PDFdownsize.app> [--files 200] [--variants 50]
-#                          [--timeout 60] [--corpus DIR] [--work DIR] [--seed N]
+#                          [--timeout auto|SEKUNDEN] [--corpus DIR] [--work DIR] [--seed N]
+#
+# Zeitlimit (Masterplan N6): Vorgabe „auto“ staffelt nach Größe der Variante –
+# 60 s bis 5 MB, darüber 180 s. Mit festen 60 s lieferte eine 32-MB-Variante
+# von statab einen Scheinfund (54 s, erfolgreich).
 #
 # Läuft nie vom Schreibtisch aus: Arbeitsverzeichnis, Varianten und Ausgaben
 # liegen unter --work (Vorgabe $TMPDIR/pdfdownsize-fuzz), Funde zusätzlich
@@ -24,7 +28,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP=""
 FILES=200
 VARIANTS=50
-TIMEOUT=60
+TIMEOUT=auto
 SEED=1
 CORPUS="${PDFDOWNSIZE_KORPUS:-$HOME/Library/Developer/PDFdownsize-Korpus}/PDF_Tools-Testcorpus"
 WORK="${TMPDIR:-/tmp}/pdfdownsize-fuzz"
@@ -83,7 +87,12 @@ PY
 
 run_one() {   # $1 = Variante; Rückgabe: Zeile für das Protokoll
     local v="$1" out="$WORK/out/$(basename "$1").out.pdf" rc
-    perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" "$BIN" --bench "$v" --mode smart \
+    local limit="$TIMEOUT"
+    if [ "$limit" = auto ]; then
+        limit=60
+        [ "$(stat -f %z "$v")" -gt $((5 * 1024 * 1024)) ] && limit=180
+    fi
+    perl -e 'alarm shift; exec @ARGV' "$limit" "$BIN" --bench "$v" --mode smart \
         --report "$WORK/out/r.json" --out "$out" >/dev/null 2>&1 && rc=0 || rc=$?
     rm -f "$out" "$WORK/out/r.json"
     echo "$rc"

@@ -95,7 +95,8 @@ final class CompareCanvasView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) wird nicht verwendet") }
 
-    deinit {
+    // G6: Die Beobachter gehören dem Hauptthread wie die Ansicht.
+    isolated deinit {
         observers.forEach(NotificationCenter.default.removeObserver)
     }
 
@@ -200,15 +201,18 @@ final class CompareCanvasView: NSView {
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: .PDFViewScaleChanged, object: view,
                                             queue: .main) { [weak self] _ in
-            self?.mirror(from: view)
+            // `queue: .main` – der Block läuft auf dem Hauptthread (G6).
+            MainActor.assumeIsolated { self?.mirror(from: view) }
         })
         observers.append(center.addObserver(forName: .PDFViewPageChanged, object: view,
                                             queue: .main) { [weak self] _ in
-            guard let self, let page = view.currentPage,
-                  let index = view.document?.index(for: page) else { return }
-            self.mirror(from: view)
-            let report = self.onPageChange
-            DispatchQueue.main.async { report(index) }
+            MainActor.assumeIsolated {
+                guard let self, let page = view.currentPage,
+                      let index = view.document?.index(for: page) else { return }
+                self.mirror(from: view)
+                let report = self.onPageChange
+                DispatchQueue.main.async { report(index) }
+            }
         })
     }
 
@@ -223,7 +227,7 @@ final class CompareCanvasView: NSView {
         observers.append(NotificationCenter.default.addObserver(
             forName: NSView.boundsDidChangeNotification, object: clipView,
             queue: .main) { [weak self] _ in
-            self?.mirror(from: view)
+            MainActor.assumeIsolated { self?.mirror(from: view) }
         })
     }
 

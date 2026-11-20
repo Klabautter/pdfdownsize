@@ -131,54 +131,76 @@ size_t pdfcore_decode_limit(QPDFObjectHandle stream)
 #include <CommonCrypto/CommonDigest.h>  /* Phase 3b – SHA-256 (libSystem) */
 
 /// Sucht einen Namen im Name Tree (/Names → key) oder im Legacy-Dict (catalog/key).
+/// Löst ein benanntes Ziel auf: Namensbaum /Names /Dests, dann das alte
+/// /Dests-Wörterbuch. Liefert das Ziel-ARRAY oder ein echtes Null-Objekt.
+///
+/// Masterplan N11: Vorher lieferte „nicht gefunden“ ein leeres Handle, das in
+/// qpdf 12 nicht `isNull()` ist – die Suche brach nach dem ersten Kind ab,
+/// fragte /Dests nie, und Ziele der Form << /D [...] >> galten als tot. Der
+/// Nachlauf entfernte daraufhin vermeintlich tote Links (pdfLaTeX-Datei:
+/// 117 → 18 Links beim Drehen einer Seite). Außerdem rekursierte die Suche
+/// ohne Zyklusschutz; ein Kind, das auf sich selbst zeigt, brachte den
+/// Prozess zum Absturz.
 QPDFObjectHandle lookup_named_dest(QPDF& qpdf, std::string const& name)
 {
+    // Ein Wert im Namensbaum oder in /Dests ist das Array selbst oder ein
+    // Wörterbuch mit /D (ISO 32000-1, 12.3.2.3).
+    auto unwrap = [](QPDFObjectHandle v) -> QPDFObjectHandle {
+        if (v.isDictionary()) { v = v.getKey("/D"); }
+        return v.isArray() ? v : QPDFObjectHandle::newNull();
+    };
+    auto matches = [&](QPDFObjectHandle key) {
+        if (!key.isString()) { return false; }
+        std::string candidate = key.getStringValue();
+        if (!candidate.empty() && candidate.front() == '/') { candidate.erase(candidate.begin()); }
+        return candidate == name;
+    };
     QPDFObjectHandle catalog = qpdf.getRoot();
     QPDFObjectHandle namesDict = catalog.getKey("/Names");
-    if (!namesDict.isNull() && namesDict.isDictionary()) {
-        // Tiefensuche über Kids, Namensvergleich in /Names-Arrays (gerade Indizes).
-        std::function<QPDFObjectHandle(QPDFObjectHandle)> walk =
-            [&](QPDFObjectHandle node) -> QPDFObjectHandle {
-            if (node.isNull() || !node.isDictionary()) { return QPDFObjectHandle(); }
+    if (namesDict.isDictionary()) {
+        QPDFObjectHandle tree = namesDict.getKey("/Dests");
+        // Iterative Tiefensuche über ALLE Kinder, Besucht-Set gegen Zyklen.
+        // /Limits werden bewusst nicht genutzt – sie sind in der Praxis oft
+        // falsch, und ein übersehenes Ziel kostet einen Link.
+        std::vector<QPDFObjectHandle> stack;
+        std::set<QPDFObjGen> visited;
+        if (tree.isDictionary()) { stack.push_back(tree); }
+        while (!stack.empty()) {
+            QPDFObjectHandle node = stack.back();
+            stack.pop_back();
+            if (!node.isDictionary()) { continue; }
+            if (node.isIndirect() && !visited.insert(node.getObjGen()).second) { continue; }
             QPDFObjectHandle arr = node.getKey("/Names");
             if (arr.isArray()) {
-                auto v = arr.getArrayAsVector();
-                for (size_t i = 0; i + 1 < v.size(); i += 2) {
-                    if (!v[i].isString()) { continue; }
-                    std::string candidate = v[i].getStringValue();
-                    if (!candidate.empty() && candidate.front() == '/') {
-                        candidate.erase(candidate.begin());
+                int n = arr.getArrayNItems();
+                for (int i = 0; i + 1 < n; i += 2) {
+                    if (matches(arr.getArrayItem(i))) {
+                        QPDFObjectHandle v = unwrap(arr.getArrayItem(i + 1));
+                        if (!v.isNull()) { return v; }
                     }
-                    if (candidate == name) { return v[i + 1]; }
                 }
             }
             QPDFObjectHandle kids = node.getKey("/Kids");
             if (kids.isArray()) {
-                for (auto const& kid : kids.getArrayAsVector()) {
-                    QPDFObjectHandle found = walk(kid);
-                    if (!found.isNull()) { return found; }
+                // Rückwärts auflegen, damit die Kinder in Reihenfolge besucht werden.
+                for (int i = kids.getArrayNItems() - 1; i >= 0; --i) {
+                    stack.push_back(kids.getArrayItem(i));
                 }
             }
-            return QPDFObjectHandle();
-        };
-        QPDFObjectHandle tree = namesDict.getKey("/Dests");
-        if (!tree.isNull()) {
-            QPDFObjectHandle v = walk(tree);
-            if (!v.isNull()) { return v; }
         }
     }
-    // Legacy: /Dests-Wörterbuch; Schlüssel können mit oder ohne Slash vorliegen.
+    // Alt: /Dests-Wörterbuch; Schlüssel können mit oder ohne Slash vorliegen.
     QPDFObjectHandle dests = catalog.getKey("/Dests");
-    if (!dests.isNull() && dests.isDictionary()) {
-        if (dests.hasKey(name)) { return dests.getKey(name); }
-        std::string slashed = "/" + name;
-        if (dests.hasKey(slashed)) { return dests.getKey(slashed); }
+    if (dests.isDictionary()) {
+        for (std::string const& key : {"/" + name, name}) {
+            if (dests.hasKey(key)) {
+                QPDFObjectHandle v = unwrap(dests.getKey(key));
+                if (!v.isNull()) { return v; }
+            }
+        }
     }
-    return QPDFObjectHandle();
+    return QPDFObjectHandle::newNull();
 }
-
-
-
 
 struct pdfcore_document {
     QPDF qpdf;
@@ -188,8 +210,6 @@ struct pdfcore_document {
     std::map<QPDFObjGen, std::pair<int, int>> shrunkenMaskedImages;
     // Masterplan E5: die glyphenlose OCR-Schrift, einmal je Dokument.
     QPDFObjectHandle ocrFont = QPDFObjectHandle::newNull();
-    // Masterplan A4: das sRGB-Profil für umgerechnete ICC-Bilder, einmal je Dokument.
-    QPDFObjectHandle srgbProfile = QPDFObjectHandle::newNull();
 };
 
 static pdfcore_status map_exception(const std::exception& e)
@@ -326,6 +346,13 @@ static long long color_space_components(QPDFObjectHandle cs)
 ///
 /// Getrennt gehalten: `pdfcore_check` soll ihre Streamlängen weiterhin nicht
 /// prüfen – sonst würde ein bislang geduldetes Dokument als beschädigt gelten.
+/// Masterplan N5: [/ICCBased <Profil>] – Werte im Quellprofil.
+static bool is_icc_based(QPDFObjectHandle cs)
+{
+    return cs.isArray() && cs.getArrayNItems() > 1 && cs.getArrayItem(0).isName()
+        && cs.getArrayItem(0).getName() == "/ICCBased" && cs.getArrayItem(1).isStream();
+}
+
 static long long replacement_components(QPDFObjectHandle cs)
 {
     if (cs.isArray() && cs.getArrayNItems() > 1 && cs.getArrayItem(0).isName()) {
@@ -590,12 +617,17 @@ int pdfcore_decrypt_to(const char *path, const char *password, const char *out_p
         open_impl(path, password, &status), pdfcore_close);
     if (!doc) { return status; }
     std::string tmp = std::string(out_path) + ".pdfcore-tmp";
-    {
+    try {
         QPDFWriter writer(doc->qpdf);
         writer.setOutputFilename(tmp.c_str());
         writer.setPreserveEncryption(false);
         std::shared_lock<std::shared_mutex> level(flate_level_mutex());
         writer.write();
+    } catch (...) {
+        // N14 (B2): Schreiben gescheitert (etwa volle Platte) – keinen
+        // halben Klartext liegen lassen.
+        std::remove(tmp.c_str());
+        return PDFCORE_ERR_INTERNAL;
     }
     std::remove(out_path);
     if (std::rename(tmp.c_str(), out_path) != 0) {
@@ -799,26 +831,45 @@ std::string sanitize_list_field(std::string s)
 /// Serialisiert einen Feldwert deterministisch (String/Name/Zahl/Bool/Array).
 /// Masterplan D1: Tiefengrenze – ein Array, das sich selbst enthält, lief
 /// vorher bis zum Stapelüberlauf. Echte Feldwerte sind höchstens zwei tief.
-std::string field_value_string(QPDFObjectHandle v, int depth = 0)
+///
+/// N14 (D1): Zusätzlich ein Pfad-Set gegen Zyklen und eine Längengrenze –
+/// ein Array, das dasselbe Unterarray mehrfach enthält, wuchs mit der
+/// Tiefengrenze allein auf 2^16 Teilstücke.
+static constexpr size_t kFieldValueMaxLength = 64 * 1024;
+
+static void field_value_append(QPDFObjectHandle v, int depth, std::set<QPDFObjGen>& path,
+                               std::string& out)
 {
-    if (v.isNull() || depth > 16) { return ""; }
-    if (v.isString()) { return v.getUTF8Value(); }
+    if (v.isNull() || depth > 16 || out.size() > kFieldValueMaxLength) { return; }
+    if (v.isString()) { out += v.getUTF8Value(); return; }
     if (v.isName()) {
         std::string n = v.getName();
         if (!n.empty() && n.front() == '/') { n.erase(n.begin()); }
-        return n;
+        out += n;
+        return;
     }
-    if (v.isBool()) { return v.getBoolValue() ? "true" : "false"; }
-    if (v.isInteger() || v.isReal()) { return v.unparse(); }
+    if (v.isBool()) { out += v.getBoolValue() ? "true" : "false"; return; }
+    if (v.isInteger() || v.isReal()) { out += v.unparse(); return; }
     if (v.isArray()) {
-        std::string joined;
-        for (auto const& item : v.getArrayAsVector()) {
-            if (!joined.empty()) { joined += ","; }
-            joined += field_value_string(item, depth + 1);
+        QPDFObjGen og = v.getObjGen();
+        bool indirect = v.isIndirect();
+        if (indirect && !path.insert(og).second) { return; }
+        int n = v.getArrayNItems();
+        for (int i = 0; i < n && out.size() <= kFieldValueMaxLength; ++i) {
+            if (i > 0) { out += ","; }
+            field_value_append(v.getArrayItem(i), depth + 1, path, out);
         }
-        return joined;
+        if (indirect) { path.erase(og); }
     }
-    return "";
+}
+
+std::string field_value_string(QPDFObjectHandle v)
+{
+    std::string out;
+    std::set<QPDFObjGen> path;
+    field_value_append(v, 0, path, out);
+    if (out.size() > kFieldValueMaxLength) { out.resize(kFieldValueMaxLength); }
+    return out;
 }
 
 /// Zählt Einträge eines PDF-Names-Trees (/Names-Arrays: [name, val, name, val…]).
@@ -974,11 +1025,20 @@ std::string strip_slash(std::string s)
 /// Form, die sich (über Umwege) selbst enthält, wird nicht erneut betreten –
 /// vorher verzweigte so ein Zyklus bis zur Tiefe 16 exponentiell. Dieselbe
 /// Form an zwei Stellen bleibt zweimal gezählt wie bisher.
+/// N14 (D1): Eine Form, die an mehreren Stellen steht (A enthält B zweimal,
+/// B enthält C zweimal …), wurde je Pfad neu durchlaufen – bis Tiefe 16 also
+/// 2^16-mal. `memo` hält die Platzierungen einer schon durchlaufenen Form;
+/// wiederholte Vorkommen übernehmen sie, die Zählung bleibt wie bisher.
+/// `kMaxPlacements` begrenzt die Ausgabe einer präparierten Datei.
+static constexpr size_t kMaxPlacements = 100000;
+
 void walk_resources(QPDFObjectHandle res, int pageIdx, int depth,
                     std::vector<ImagePlacement>& out,
-                    std::set<QPDFObjGen>& ancestors)
+                    std::set<QPDFObjGen>& ancestors,
+                    std::map<QPDFObjGen, std::vector<ImagePlacement>>& memo)
 {
     if (res.isNull() || !res.isDictionary() || depth > 16) { return; }
+    if (out.size() >= kMaxPlacements) { return; }
     QPDFObjectHandle resDict = dict_of(res);
     QPDFObjectHandle xobjs = resDict.getKey("/XObject");
     if (xobjs.isNull() || !xobjs.isDictionary()) { return; }
@@ -1074,10 +1134,31 @@ void walk_resources(QPDFObjectHandle res, int pageIdx, int depth,
             // dictionary attempted on object of type stream"). Ohne dict_of
             // wurden Bilder in (verschachtelten) Formen nie gefunden.
             QPDFObjGen form = xo.getObjGen();
-            if (xo.isIndirect() && !ancestors.insert(form).second) { continue; }
-            walk_resources(dict_of(xo).getKey("/Resources"), pageIdx, depth + 1, out, ancestors);
-            if (xo.isIndirect()) { ancestors.erase(form); }
+            if (!xo.isIndirect()) {
+                walk_resources(dict_of(xo).getKey("/Resources"), pageIdx, depth + 1, out,
+                               ancestors, memo);
+                continue;
+            }
+            auto cached = memo.find(form);
+            if (cached != memo.end()) {
+                for (auto const& placement : cached->second) {
+                    if (out.size() >= kMaxPlacements) { break; }
+                    out.push_back(placement);
+                }
+                continue;
+            }
+            if (!ancestors.insert(form).second) { continue; }
+            std::vector<ImagePlacement> inner;
+            walk_resources(dict_of(xo).getKey("/Resources"), pageIdx, depth + 1, inner,
+                           ancestors, memo);
+            ancestors.erase(form);
+            for (auto const& placement : inner) {
+                if (out.size() >= kMaxPlacements) { break; }
+                out.push_back(placement);
+            }
+            memo.emplace(form, std::move(inner));
         }
+        if (out.size() >= kMaxPlacements) { return; }
     }
 }
 
@@ -1085,7 +1166,8 @@ void walk_resources(QPDFObjectHandle res, int pageIdx, int depth,
                     std::vector<ImagePlacement>& out)
 {
     std::set<QPDFObjGen> ancestors;
-    walk_resources(res, pageIdx, depth, out, ancestors);
+    std::map<QPDFObjGen, std::vector<ImagePlacement>> memo;
+    walk_resources(res, pageIdx, depth, out, ancestors, memo);
 }
 
 // ============================================================================
@@ -2337,7 +2419,7 @@ bool n1_name_is(QPDFObjectHandle obj, char const* name)
 
 /// Ziel eines Links, Lesezeichens oder einer /OpenAction: /Dest, sonst
 /// /A mit /S /GoTo → /D; benannte Ziele werden aufgelöst.
-QPDFObjectHandle n1_resolved_dest(QPDFObjectHandle holder, QPDFOutlineDocumentHelper& odh)
+QPDFObjectHandle n1_resolved_dest(QPDFObjectHandle holder, QPDF& qpdf)
 {
     QPDFObjectHandle dest = QPDFObjectHandle::newNull();
     if (holder.isArray()) {
@@ -2352,7 +2434,12 @@ QPDFObjectHandle n1_resolved_dest(QPDFObjectHandle holder, QPDFOutlineDocumentHe
             if (n1_name_is(action.getKey("/S"), "/GoTo")) { dest = action.getKey("/D"); }
         }
     }
-    if (dest.isName() || dest.isString()) { dest = odh.resolveNamedDest(dest); }
+    // Masterplan N11: eine einzige Auflösung benannter Ziele im Kern.
+    if (dest.isName() || dest.isString()) {
+        std::string name = dest.isName() ? dest.getName() : dest.getStringValue();
+        if (!name.empty() && name.front() == '/') { name.erase(name.begin()); }
+        dest = lookup_named_dest(qpdf, name);
+    }
     return dest;
 }
 
@@ -2436,9 +2523,8 @@ void n1_detach_removed_pages(QPDF& qpdf,
     std::set<QPDFObjGen> removed;
     for (auto const& page : removedPages) { removed.insert(page.getObjGen()); }
     QPDFObjectHandle root = qpdf.getRoot();
-    QPDFOutlineDocumentHelper odh(qpdf);
     auto targetsRemoved = [&](QPDFObjectHandle holder) {
-        return n1_is_removed(n1_dest_page(n1_resolved_dest(holder, odh)), removed);
+        return n1_is_removed(n1_dest_page(n1_resolved_dest(holder, qpdf)), removed);
     };
 
     // 1. Links der behaltenen Seiten, deren Ziel entfernt ist. Muss VOR dem
@@ -2567,6 +2653,53 @@ void n1_detach_removed_pages(QPDF& qpdf,
     }
     for (auto const& og : removedFields) { qpdf.replaceObject(og, QPDFObjectHandle::newNull()); }
 
+    // 5b. Artikel-Threads (N1-Rest): Beads auf entfernten Seiten fallen aus
+    //     dem Ring; ein Thread ohne Bead fällt ganz weg. Vorher blieben sie
+    //     als leere Hülle stehen (Rechtecke ohne Seite).
+    QPDFObjectHandle threads = root.getKey("/Threads");
+    if (threads.isArray()) {
+        std::vector<QPDFObjectHandle> keptThreads;
+        std::vector<QPDFObjGen> droppedBeads;
+        for (int t = 0; t < threads.getArrayNItems(); ++t) {
+            QPDFObjectHandle thread = threads.getArrayItem(t);
+            if (!thread.isDictionary()) { continue; }
+            std::vector<QPDFObjectHandle> ring;
+            std::set<QPDFObjGen> seen;
+            QPDFObjectHandle bead = thread.getKey("/F");
+            while (bead.isDictionary() && ring.size() < 100000) {
+                if (bead.isIndirect() && !seen.insert(bead.getObjGen()).second) { break; }
+                ring.push_back(bead);
+                bead = bead.getKey("/N");
+            }
+            std::vector<QPDFObjectHandle> keptBeads;
+            for (auto const& b : ring) {
+                QPDFObjectHandle page = b.getKey("/P");
+                if (page.isIndirect() && removed.count(page.getObjGen())) {
+                    if (b.isIndirect()) { droppedBeads.push_back(b.getObjGen()); }
+                } else {
+                    keptBeads.push_back(b);
+                }
+            }
+            if (keptBeads.empty()) { continue; }
+            if (keptBeads.size() != ring.size()) {
+                size_t n = keptBeads.size();
+                for (size_t i = 0; i < n; ++i) {
+                    keptBeads[i].replaceKey("/N", keptBeads[(i + 1) % n]);
+                    keptBeads[i].replaceKey("/V", keptBeads[(i + n - 1) % n]);
+                }
+                thread.replaceKey("/F", keptBeads.front());
+                keptBeads.front().replaceKey("/T", thread);
+            }
+            keptThreads.push_back(thread);
+        }
+        if (keptThreads.empty()) {
+            root.removeKey("/Threads");
+        } else if (static_cast<int>(keptThreads.size()) != threads.getArrayNItems()) {
+            root.replaceKey("/Threads", QPDFObjectHandle::newArray(keptThreads));
+        }
+        for (auto const& og : droppedBeads) { qpdf.replaceObject(og, QPDFObjectHandle::newNull()); }
+    }
+
     // 6. Die Garantie: entfernte Seitenobjekte leeren.
     for (auto const& og : removed) { qpdf.replaceObject(og, QPDFObjectHandle::newNull()); }
 }
@@ -2686,7 +2819,6 @@ int pdfcore_rewrite_single_source(const char *source_path, const char *password,
     // Einträge ohne auflösbares Ziel bleiben.
     std::set<QPDFObjGen> keptPages;
     for (auto& page : order) { keptPages.insert(page.getObjectHandle().getObjGen()); }
-    QPDFOutlineDocumentHelper odh(doc->qpdf);
     auto targetIsRemoved = [&](QPDFObjectHandle item) {
         QPDFObjectHandle dest = item.getKey("/Dest");
         if (dest.isNull()) {
@@ -2696,7 +2828,11 @@ int pdfcore_rewrite_single_source(const char *source_path, const char *password,
                 dest = action.getKey("/D");
             }
         }
-        if (dest.isName() || dest.isString()) { dest = odh.resolveNamedDest(dest); }
+        if (dest.isName() || dest.isString()) {
+            std::string name = dest.isName() ? dest.getName() : dest.getStringValue();
+            if (!name.empty() && name.front() == '/') { name.erase(name.begin()); }
+            dest = lookup_named_dest(doc->qpdf, name);
+        }
         if (dest.isDictionary() && dest.hasKey("/D")) { dest = dest.getKey("/D"); }
         QPDFObjectHandle target = (dest.isArray() && dest.getArrayNItems() > 0)
             ? dest.getArrayItem(0) : QPDFObjectHandle::newNull();
@@ -4234,14 +4370,15 @@ bool reduce_soft_mask(QPDFObjectHandle mask, int needW, int needH)
 /// Gemeinsamer Kern beider Ersetzungsvarianten. `filterName` ist der Filter
 /// des NEUEN Streams; die Bytes müssen bereits so kodiert sein.
 ///
-/// `preserveSourceColorSpace` (Phase 6C): übernimmt einen nicht-trivialen
-/// /ColorSpace (ICCBased & Co.) auch beim VERLUSTBEHAFTETEN Ersatz, wenn die
+/// `preserveSourceColorSpace` (Phase 6C, Masterplan N5): übernimmt einen
+/// nicht-trivialen /ColorSpace auch beim VERLUSTBEHAFTETEN Ersatz, wenn die
 /// Komponentenzahl passt. Der Flate-Ersatz tut das immer – dort sind die
 /// übergebenen Bytes die Werte des ursprünglichen Farbraums. Beim JPEG-
-/// Ersatz ist die Voraussetzung dieselbe, aber nur der CMYK-Pfad erfüllt
-/// sie: Der YCCK-Kodierer gibt die CMYK-Werte der Quelle unverändert zurück
-/// (abgesehen von der Quantisierung), während der RGB-Kodierer sRGB liefert,
-/// weil das Profil beim Dekodieren bereits angewendet wurde.
+/// Ersatz gilt dasselbe für CMYK (der YCCK-Kodierer gibt die CMYK-Werte der
+/// Quelle zurück) und seit N5 für ein dreikanaliges /ICCBased: Die Pixel
+/// werden nicht mehr nach sRGB umgerechnet, das Profil der Quelle beschreibt
+/// die kodierten Werte weiterhin richtig. Andere RGB-Arrays (CalRGB, Lab)
+/// bleiben beim JPEG-Ersatz /DeviceRGB wie bisher.
 int replace_image_stream(pdfcore_document_t *doc,
                          int obj_number, int generation,
                          const unsigned char *bytes, size_t len,
@@ -4279,15 +4416,11 @@ int replace_image_stream(pdfcore_document_t *doc,
     // Werte des ursprünglichen Farbraums, das Profil beschreibt sie weiterhin
     // richtig.
     //
-    // Beim JPEG-Ersatz gilt das NICHT: Der Kodierer liefert sRGB, weil das
-    // Profil beim Dekodieren bereits angewendet wurde. Ein weiterhin
-    // genanntes Profil würde dieselben Werte ein zweites Mal umdeuten.
+    // Beim JPEG-Ersatz gilt das für CMYK und (seit Masterplan N5) für ein
+    // dreikanaliges /ICCBased: Die Pixel bleiben Werte des Quellprofils.
     QPDFObjectHandle oldSpace = oldDict.getKey("/ColorSpace");
     bool keptOriginalSpace = false;
     bool lossless = std::string(filterName) == "/FlateDecode";
-    // Phase 6C: `preserveSourceColorSpace` erlaubt die Übernahme auch für
-    // den CMYK-JPEG-Ersatz – der Kommentar oben erklärt den Unterschied
-    // zwischen Flate, RGB-JPEG und CMYK-JPEG.
     if ((lossless || preserveSourceColorSpace)
         && !oldSpace.isNull() && !oldSpace.isName()) {
         // Eine aufgelöste Palette liegt in ihrem BASISfarbraum vor; /Indexed
@@ -4297,7 +4430,8 @@ int replace_image_stream(pdfcore_document_t *doc,
             && oldSpace.getArrayItem(0).getName() == "/Indexed") {
             oldSpace = oldSpace.getArrayItem(1);
         }
-        if (!oldSpace.isName()
+        bool lossyAllowed = components == 4 || is_icc_based(oldSpace);
+        if (!oldSpace.isName() && (lossless || lossyAllowed)
             && replacement_components(oldSpace) == components) {
             newDict.replaceKey("/ColorSpace", oldSpace);
             keptOriginalSpace = true;
@@ -4539,10 +4673,13 @@ int pdfcore_replace_image_object(pdfcore_document_t *doc,
     PDFCORE_GUARD_BEGIN
     if (!doc || !jpeg || jpeg_len == 0) { return PDFCORE_ERR_OPEN; }
     try {
+        // Masterplan N5: Ein dreikanaliges /ICCBased der Quelle bleibt stehen –
+        // die Pixel sind Werte dieses Profils (siehe replace_image_stream).
         return replace_image_stream(doc, obj_number, generation, jpeg, jpeg_len,
                                     new_width, new_height,
                                     grayscale ? 1 : 3, "/DCTDecode",
-                                    decode_applied != 0);
+                                    decode_applied != 0, false,
+                                    /*preserveSourceColorSpace=*/grayscale == 0);
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
@@ -4587,90 +4724,6 @@ int pdfcore_replace_image_object_cmyk(pdfcore_document_t *doc,
     } catch (...) {
         return PDFCORE_ERR_INTERNAL;
     }
-    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
-}
-
-// ============================================================================
-// Masterplan A4 – ICC-Profil beim Ersatz
-// ============================================================================
-
-namespace {
-
-/// Das ICCBased-Profil eines Bildfarbraums (auch als Basis von /Indexed),
-/// sonst null.
-QPDFObjectHandle image_icc_stream(QPDFObjectHandle image)
-{
-    QPDFObjectHandle cs = image.getDict().getKey("/ColorSpace");
-    if (cs.isArray() && cs.getArrayNItems() > 1 && cs.getArrayItem(0).isName()
-        && cs.getArrayItem(0).getName() == "/Indexed") {
-        cs = cs.getArrayItem(1);
-    }
-    if (cs.isArray() && cs.getArrayNItems() > 1 && cs.getArrayItem(0).isName()
-        && cs.getArrayItem(0).getName() == "/ICCBased" && cs.getArrayItem(1).isStream()) {
-        return cs.getArrayItem(1);
-    }
-    return QPDFObjectHandle::newNull();
-}
-
-} // namespace
-
-int pdfcore_get_image_icc_profile(pdfcore_document_t *doc, int obj, int gen,
-                                  unsigned char **out, size_t *out_len)
-{
-    PDFCORE_GUARD_BEGIN
-    if (!doc || !out || !out_len) { return PDFCORE_ERR_INTERNAL; }
-    *out = nullptr; *out_len = 0;
-    QPDFObjectHandle image = find_image_object(doc->qpdf, obj, gen);
-    if (!image.isStream()) { return PDFCORE_ERR_CHECK_FAILED; }
-    QPDFObjectHandle icc = image_icc_stream(image);
-    if (!icc.isStream()) { return PDFCORE_ERR_CHECK_FAILED; }
-    std::shared_ptr<Buffer> data = icc.getStreamData(qpdf_dl_generalized);
-    if (!data || data->getSize() == 0) { return PDFCORE_ERR_CHECK_FAILED; }
-    *out = static_cast<unsigned char*>(std::malloc(data->getSize()));
-    if (!*out) { return PDFCORE_ERR_INTERNAL; }
-    std::memcpy(*out, data->getBuffer(), data->getSize());
-    *out_len = data->getSize();
-    return PDFCORE_OK;
-    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
-}
-
-int pdfcore_tag_image_srgb(pdfcore_document_t *doc, int obj, int gen,
-                           const unsigned char *icc, size_t icc_len)
-{
-    PDFCORE_GUARD_BEGIN
-    if (!doc || !icc || icc_len == 0) { return PDFCORE_ERR_INTERNAL; }
-    QPDFObjectHandle image = find_image_object(doc->qpdf, obj, gen);
-    if (!image.isStream()) { return PDFCORE_ERR_CHECK_FAILED; }
-    if (!doc->srgbProfile.isIndirect()) {
-        QPDFObjectHandle profile = QPDFObjectHandle::newStream(
-            &doc->qpdf, std::string(reinterpret_cast<char const*>(icc), icc_len));
-        profile.getDict().replaceKey("/N", QPDFObjectHandle::newInteger(3));
-        profile.getDict().replaceKey("/Alternate", QPDFObjectHandle::newName("/DeviceRGB"));
-        doc->srgbProfile = profile;   // newStream ist bereits indirekt
-    }
-    QPDFObjectHandle space = QPDFObjectHandle::newArray();
-    space.appendItem(QPDFObjectHandle::newName("/ICCBased"));
-    space.appendItem(doc->srgbProfile);
-    QPDFObjectHandle dict = image.getDict();
-    QPDFObjectHandle cs = dict.getKey("/ColorSpace");
-    if (cs.isArray() && cs.getArrayNItems() == 4 && cs.getArrayItem(0).isName()
-        && cs.getArrayItem(0).getName() == "/Indexed") {
-        // Palette in sRGB: nur die Basis tauschen.
-        QPDFObjectHandle indexed = cs.shallowCopy();
-        indexed.setArrayItem(1, space);
-        dict.replaceKey("/ColorSpace", indexed);
-        return PDFCORE_OK;
-    }
-    if (cs.isName() && cs.getName() == "/DeviceRGB") {
-        dict.replaceKey("/ColorSpace", space);
-        return PDFCORE_OK;
-    }
-    if (image_icc_stream(image).isStream()) {
-        dict.replaceKey("/ColorSpace", space);
-        return PDFCORE_OK;
-    }
-    // Grau, CMYK oder anderes: nicht umgerechnet, nichts zu markieren.
-    return PDFCORE_ERR_CHECK_FAILED;
     PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
@@ -7354,6 +7407,69 @@ static bool pdfcore_skip_inline_image(std::string const& bytes, size_t& i)
     return false;
 }
 
+/// N14 (D2): Farbraum-Ressourcen, die der Kopf eines Inline-Bilds nennt
+/// (`BI /CS /Cs1 …` oder `/CS [/I /Cs1 255 <…>]`). Der Ressourcen-Scanner
+/// übersprang den Kopf samt Daten; ein benannter Farbraum galt dann als
+/// unbenutzt und wurde entfernt – das Inline-Bild verlor seine Farben.
+/// `i` steht hinter `BI` und bleibt unverändert. Gerätefarbräume und ihre
+/// Kurzformen sind keine Ressourcen und fehlen in der Liste.
+static std::vector<std::string> inline_image_colorspace_names(std::string const& bytes, size_t i)
+{
+    static const std::set<std::string> device = {
+        "DeviceGray", "DeviceRGB", "DeviceCMYK", "G", "RGB", "CMYK",
+        "Indexed", "I", "Pattern", "CalGray", "CalRGB", "Lab", "ICCBased",
+        "Separation", "DeviceN"};
+    std::vector<std::string> out;
+    size_t const n = bytes.size();
+    auto isDelim = [](unsigned char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == 0
+            || c == '/' || c == '[' || c == ']' || c == '<' || c == '>' || c == '('
+            || c == ')' || c == '{' || c == '}' || c == '%';
+    };
+    auto readName = [&](size_t& p) -> std::string {
+        size_t start = ++p;   // hinter '/'
+        while (p < n && !isDelim(static_cast<unsigned char>(bytes[p]))) { ++p; }
+        return pdf_name_decode(bytes.substr(start, p - start));
+    };
+    size_t p = i;
+    while (p < n) {
+        unsigned char c = static_cast<unsigned char>(bytes[p]);
+        // Ende des Kopfs: Operator ID.
+        if (c == 'I' && p + 1 < n && bytes[p + 1] == 'D'
+            && (p == 0 || isDelim(static_cast<unsigned char>(bytes[p - 1])))
+            && (p + 2 >= n || isDelim(static_cast<unsigned char>(bytes[p + 2])))) {
+            break;
+        }
+        if (c != '/') { ++p; continue; }
+        std::string key = readName(p);
+        if (key != "CS" && key != "ColorSpace") { continue; }
+        while (p < n && (bytes[p] == ' ' || bytes[p] == '\t' || bytes[p] == '\n'
+                         || bytes[p] == '\r' || bytes[p] == '\f')) { ++p; }
+        if (p < n && bytes[p] == '/') {
+            std::string name = readName(p);
+            if (!device.count(name)) { out.push_back(name); }
+        } else if (p < n && bytes[p] == '[') {
+            ++p;
+            while (p < n && bytes[p] != ']') {
+                if (bytes[p] == '/') {
+                    std::string name = readName(p);
+                    if (!device.count(name)) { out.push_back(name); }
+                } else if (bytes[p] == '(') {
+                    // Lookup als Literal-String: bis zur passenden Klammer.
+                    int d = 0;
+                    while (p < n) {
+                        if (bytes[p] == '\\') { p += 2; continue; }
+                        if (bytes[p] == '(') { ++d; }
+                        else if (bytes[p] == ')' && --d == 0) { ++p; break; }
+                        ++p;
+                    }
+                } else { ++p; }
+            }
+        }
+    }
+    return out;
+}
+
 // Vorwärtsdeklaration – Form-XObjects rekursieren.
 bool font5_walk_consumer(std::vector<QPDFObjectHandle> const& contents,
                          QPDFObjectHandle const& resources,
@@ -8342,7 +8458,14 @@ bool font6_walk_consumer(std::vector<QPDFObjectHandle> const& contents,
 /// Tokenisiert Content-Bytes: Strings sammeln, Tf-Kontext mit q/Q-Stack
 /// (Textzustand ist Grafikzustand), Textanzeige-Operatoren buchen die
 /// Strings auf den aktiven Font, Do löst Form-XObjects rekursiv auf.
-void font6_scan_tokens(std::string const& bytes,
+///
+/// N14 (D2): Inline-Bilder (`BI … ID <binär> EI`) werden übersprungen wie in
+/// den übrigen Scannern. Vorher las dieser Scanner die Binärdaten als
+/// Literal-Strings – ein offenes „(" verschluckte die Textoperatoren
+/// dahinter, deren Glyphen fehlten dann im Subset. Rückgabe false: ein
+/// Inline-Bild ließ sich nicht sicher überspringen; der Aufrufer behandelt
+/// den Verbraucher dann als unscanbar (Fonts bleiben vollständig).
+bool font6_scan_tokens(std::string const& bytes,
                        QPDFObjectHandle const& resources,
                        font6_consumer_usage& out, font6_usage& usage,
                        int depth, int page)
@@ -8454,6 +8577,12 @@ void font6_scan_tokens(std::string const& bytes,
                 ++i;
             }
             std::string op = bytes.substr(start, i - start);
+            if (op == "BI") {
+                clearPending();
+                if (!pdfcore_skip_inline_image(bytes, i)) { return false; }
+                lastName.clear();
+                continue;
+            }
             if (op == "Tj" || op == "TJ" || op == "'" || op == "\"") {
                 flush();
             } else if (op == "Tf") {
@@ -8498,6 +8627,7 @@ void font6_scan_tokens(std::string const& bytes,
         }
         ++i;
     }
+    return true;
 }
 
 /// Auflösen EINES Verbrauchers: Content scannen, Namen über die /Font-Map
@@ -8545,8 +8675,9 @@ bool font6_walk_consumer(std::vector<QPDFObjectHandle> const& contents,
             }
             bytes += part;
         }
-        if (!bytes.empty()) {
-            font6_scan_tokens(bytes, resources, local, usage, depth, page);
+        if (!bytes.empty()
+            && !font6_scan_tokens(bytes, resources, local, usage, depth, page)) {
+            scanned = false;
         }
     }
 
@@ -9696,6 +9827,9 @@ bool rgc_scan_tokens(std::string const& bytes,
             }
             std::string op = bytes.substr(start, i - start);
             if (op == "BI") {
+                for (auto const& name : inline_image_colorspace_names(bytes, i)) {
+                    rgc_mark(w, rgc_colorspace, mapKeys[rgc_colorspace], name);
+                }
                 if (!pdfcore_skip_inline_image(bytes, i)) { return false; }
                 lastNameIsName = false;
                 continue;
@@ -10818,6 +10952,11 @@ int pdfcore_replace_image_object_indexed(pdfcore_document_t *doc,
             && oldSpace.getArrayItem(0).getName() == "/Indexed") {
             sourceBase = oldSpace.getArrayItem(1);
         }
+        // Masterplan N5: War die Quelle direkt ein ICC-Bild, ist ihr Profil
+        // die Basis – die Palette trägt Werte dieses Profils.
+        if (!sourceBase.isArray() && is_icc_based(oldSpace)) {
+            sourceBase = oldSpace;
+        }
         if (sourceBase.isArray()
             && replacement_components(sourceBase) == palette_components) {
             indexed.appendItem(sourceBase);
@@ -11171,6 +11310,15 @@ std::string mrc_unique_name(QPDFObjectHandle const& xobjs,
     return std::string();
 }
 
+/// Masterplan A2 Stufe 2: Füllfarbe einer Maske – schwarz („0 g“) wie
+/// bisher oder die Farbe der Tinte („r g b rg“).
+static std::string mrc_mask_fill(pdfcore_mrc_layer_t const& layer)
+{
+    if (!layer.has_fill) { return "0 g"; }
+    return mrc_num(layer.fill[0]) + " " + mrc_num(layer.fill[1]) + " "
+        + mrc_num(layer.fill[2]) + " rg";
+}
+
 /// Erzeugt EINEN Layer-XObject-Stream (indirekt) gemäß kind/is_mask.
 QPDFObjectHandle mrc_make_layer(pdfcore_document_t* doc,
                                 pdfcore_mrc_layer_t const& layer)
@@ -11275,6 +11423,13 @@ int pdfcore_replace_page_image_draw_with_layers(
                 return PDFCORE_ERR_CHECK_FAILED;
             }
             if (layer.kind == 0 && layer.is_mask) { return PDFCORE_ERR_CHECK_FAILED; }
+            // A2 Stufe 2: Füllfarbe nur für Masken und nur im Bereich 0…1.
+            if (layer.has_fill) {
+                if (!layer.is_mask) { return PDFCORE_ERR_CHECK_FAILED; }
+                for (double v : layer.fill) {
+                    if (!(v >= 0.0 && v <= 1.0)) { return PDFCORE_ERR_CHECK_FAILED; }
+                }
+            }
             if ((layer.kind == 1 || layer.kind == 2) && !layer.is_mask) {
                 return PDFCORE_ERR_CHECK_FAILED;
             }
@@ -11385,7 +11540,7 @@ int pdfcore_replace_page_image_draw_with_layers(
                 && layer.rect[2] == 0 && layer.rect[3] == 0;
             if (fullFrame) {
                 // Vollbild-Layer teilen die cm-Transform des Rasters.
-                if (layer.is_mask) { replacement += "0 g\n"; }
+                if (layer.is_mask) { replacement += mrc_mask_fill(layer) + "\n"; }
                 replacement += names[i] + " Do\n";
             } else {
                 // Sub-Rect (Photo-Region): EIGENE q/Q-Klammer – ein cm würde
@@ -11397,7 +11552,7 @@ int pdfcore_replace_page_image_draw_with_layers(
                 double ty = (imgH - layer.rect[3]) / imgH;
                 replacement += "q " + mrc_num(sx) + " 0 0 " + mrc_num(sy) + " "
                     + mrc_num(tx) + " " + mrc_num(ty) + " cm";
-                if (layer.is_mask) { replacement += " 0 g"; }
+                if (layer.is_mask) { replacement += " " + mrc_mask_fill(layer); }
                 replacement += " " + names[i] + " Do Q\n";
             }
         }
@@ -11481,6 +11636,120 @@ int pdfcore_flate_compress(const unsigned char *data, size_t data_len, int level
 
 // MARK: - OCR-Textebene (2026-10-01)
 
+namespace {
+
+/// N14 (E5): Kleinstes gültiges TrueType-Programm für die glyphenlose
+/// OCR-Schrift – zwei leere Glyphen (.notdef und 1), alle 500/1000 em breit.
+/// Vorher war die Schrift nicht eingebettet; Betrachter müssen dann eine
+/// „GlyphLessFont“ suchen (Acrobat: „Schrift nicht gefunden“, PDF/A
+/// verlangt eingebettete Schriften). Die Textebene ist unsichtbar (3 Tr),
+/// gezeichnet wird nie; das Programm muss nur gültig sein.
+std::string glyphless_truetype()
+{
+    auto u16 = [](std::string& b, unsigned v) { b.push_back(char((v >> 8) & 0xFF)); b.push_back(char(v & 0xFF)); };
+    auto u32 = [](std::string& b, unsigned long v) {
+        for (int k = 3; k >= 0; --k) { b.push_back(char((v >> (8 * k)) & 0xFF)); }
+    };
+    auto checksum = [](std::string const& t) {
+        unsigned long sum = 0;
+        for (size_t k = 0; k < t.size(); k += 4) {
+            unsigned long w = 0;
+            for (size_t j = 0; j < 4; ++j) {
+                w = (w << 8) | (k + j < t.size() ? static_cast<unsigned char>(t[k + j]) : 0);
+            }
+            sum = (sum + w) & 0xFFFFFFFFul;
+        }
+        return sum;
+    };
+    std::map<std::string, std::string> t;
+    { std::string b;                       // head
+      u32(b, 0x00010000); u32(b, 0x00010000); u32(b, 0); u32(b, 0x5F0F3CF5);
+      u16(b, 0x000B); u16(b, 1000); u32(b, 0); u32(b, 0); u32(b, 0); u32(b, 0);
+      u16(b, 0); u16(b, 0xFF38 /* -200 */); u16(b, 500); u16(b, 800);
+      u16(b, 0); u16(b, 8); u16(b, 2); u16(b, 0); u16(b, 0);
+      t["head"] = b; }
+    { std::string b;                       // hhea
+      // CoreGraphics verlangt Ober- UND Unterlänge („Failed to determine
+      // ascent and descent“ – die ganze Textebene fiel sonst weg).
+      u32(b, 0x00010000); u16(b, 800); u16(b, 0xFF38 /* -200 */); u16(b, 0); u16(b, 500);
+      u16(b, 0); u16(b, 0); u16(b, 0); u16(b, 1); u16(b, 0); u16(b, 0);
+      for (int k = 0; k < 4; ++k) { u16(b, 0); }
+      u16(b, 0); u16(b, 2);
+      t["hhea"] = b; }
+    { std::string b;                       // maxp 1.0
+      u32(b, 0x00010000); u16(b, 2);
+      for (int k = 0; k < 4; ++k) { u16(b, 0); }
+      u16(b, 2); for (int k = 0; k < 8; ++k) { u16(b, 0); }
+      t["maxp"] = b; }
+    t["glyf"] = std::string(4, '\0');      // beide Glyphen leer (loca 0,0,0)
+    { std::string b; u16(b, 0); u16(b, 0); u16(b, 0); t["loca"] = b; }
+    { std::string b; u16(b, 500); u16(b, 0); u16(b, 500); u16(b, 0); t["hmtx"] = b; }
+    { std::string b;                       // cmap: (3,1) Format 4, nur 0xFFFF
+      u16(b, 0); u16(b, 1); u16(b, 3); u16(b, 1); u32(b, 12);
+      u16(b, 4); u16(b, 24); u16(b, 0); u16(b, 2); u16(b, 2); u16(b, 0); u16(b, 0);
+      u16(b, 0xFFFF); u16(b, 0); u16(b, 0xFFFF); u16(b, 1); u16(b, 0);
+      t["cmap"] = b; }
+    { std::string b;                       // name: 1, 2, 4, 6 (Windows, UTF-16BE)
+      std::vector<std::pair<unsigned, std::string>> names = {
+          {1, "GlyphLessFont"}, {2, "Regular"}, {4, "GlyphLessFont"}, {6, "GlyphLessFont"}};
+      std::string strings;
+      u16(b, 0); u16(b, static_cast<unsigned>(names.size()));
+      u16(b, static_cast<unsigned>(6 + 12 * names.size()));
+      for (auto const& n : names) {
+          std::string utf16;
+          for (char c : n.second) { utf16.push_back('\0'); utf16.push_back(c); }
+          u16(b, 3); u16(b, 1); u16(b, 0x0409); u16(b, n.first);
+          u16(b, static_cast<unsigned>(utf16.size())); u16(b, static_cast<unsigned>(strings.size()));
+          strings += utf16;
+      }
+      t["name"] = b + strings; }
+    { std::string b;                       // post 3.0
+      u32(b, 0x00030000); u32(b, 0); u16(b, 0); u16(b, 0); u32(b, 1);
+      for (int k = 0; k < 4; ++k) { u32(b, 0); }
+      t["post"] = b; }
+    { std::string b;                       // OS/2 Version 4 (96 Byte)
+      u16(b, 4); u16(b, 500); u16(b, 400); u16(b, 5); u16(b, 0);
+      for (int k = 0; k < 11; ++k) { u16(b, 0); }
+      b += std::string(10, '\0');          // PANOSE
+      b += std::string(16, '\0');          // ulUnicodeRange
+      b += "NONE";
+      u16(b, 0x0040); u16(b, 0xFFFF); u16(b, 0xFFFF);
+      u16(b, 800); u16(b, 0xFF38 /* -200 */); u16(b, 0); u16(b, 800); u16(b, 200);
+      u32(b, 1); u32(b, 0);
+      u16(b, 500); u16(b, 700); u16(b, 0); u16(b, 32); u16(b, 1);
+      t["OS/2"] = b; }
+
+    // Tabellenverzeichnis (sortiert nach Tag), 4-Byte-Ausrichtung.
+    unsigned const numTables = static_cast<unsigned>(t.size());
+    unsigned searchRange = 1, entrySelector = 0;
+    while (searchRange * 2 <= numTables) { searchRange *= 2; ++entrySelector; }
+    searchRange *= 16;
+    std::string font;
+    u32(font, 0x00010000); u16(font, numTables); u16(font, searchRange);
+    u16(font, entrySelector); u16(font, numTables * 16 - searchRange);
+    unsigned long offset = 12 + 16ul * numTables;
+    std::string body;
+    size_t headOffset = 0;
+    for (auto const& entry : t) {            // std::map: Tags aufsteigend (ASCII)
+        std::string data = entry.second;
+        font += entry.first;
+        u32(font, checksum(data)); u32(font, offset); u32(font, data.size());
+        if (entry.first == "head") { headOffset = offset; }
+        while (data.size() % 4) { data.push_back('\0'); }
+        body += data;
+        offset += data.size();
+    }
+    font += body;
+    unsigned long adjust = (0xB1B0AFBAul - checksum(font)) & 0xFFFFFFFFul;
+    for (int k = 0; k < 4; ++k) {
+        font[headOffset + 8 + k] = char((adjust >> (8 * (3 - k))) & 0xFF);
+    }
+    return font;
+}
+
+} // namespace
+
+
 int pdfcore_append_ocr_layer(pdfcore_document_t *doc, int page_index,
                              const char *content, size_t content_len)
 {
@@ -11533,12 +11802,23 @@ int pdfcore_append_ocr_layer(pdfcore_document_t *doc, int page_index,
 
             QPDFObjectHandle descriptor = QPDFObjectHandle::parse(
                 "<< /Type /FontDescriptor /FontName /GlyphLessFont /Flags 5"
-                " /FontBBox [0 0 500 1000] /ItalicAngle 0 /Ascent 1000 /Descent 0"
-                " /CapHeight 1000 /StemV 80 >>");
+                " /FontBBox [0 -200 500 800] /ItalicAngle 0 /Ascent 800 /Descent -200"
+                " /CapHeight 700 /StemV 80 >>");
+            // N14 (E5): eingebettetes Programm; jede CID zeigt auf Glyphe 1.
+            std::string const program = glyphless_truetype();
+            QPDFObjectHandle fontFile = QPDFObjectHandle::newStream(&q, program);
+            fontFile.getDict().replaceKey("/Length1", QPDFObjectHandle::newInteger(
+                static_cast<long long>(program.size())));
+            descriptor.replaceKey("/FontFile2", fontFile);
+            std::string gidMap;
+            gidMap.reserve(65536 * 2);
+            for (int cid = 0; cid < 65536; ++cid) { gidMap.push_back('\0'); gidMap.push_back('\1'); }
+            QPDFObjectHandle cidToGid = QPDFObjectHandle::newStream(&q, gidMap);
             QPDFObjectHandle cidFont = QPDFObjectHandle::parse(
                 "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /GlyphLessFont"
                 " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>"
-                " /DW 500 /CIDToGIDMap /Identity >>");
+                " /DW 500 >>");
+            cidFont.replaceKey("/CIDToGIDMap", cidToGid);
             cidFont.replaceKey("/FontDescriptor", q.makeIndirectObject(descriptor));
             QPDFObjectHandle type0 = QPDFObjectHandle::parse(
                 "<< /Type /Font /Subtype /Type0 /BaseFont /GlyphLessFont /Encoding /Identity-H >>");

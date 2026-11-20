@@ -11,7 +11,16 @@ enum PDFCoreError: Error, Equatable {
     case internalError
 }
 
-final class PDFCoreDocument {
+/// `@unchecked Sendable` (G6): Jede Instanz serialisiert ihre Aufrufe über
+/// `gate` (siehe unten); geteilt wird sie bewusst zwischen Arbeits-Threads.
+final class PDFCoreDocument: @unchecked Sendable {
+    /// Text aus einem C-Puffer bis zum ersten NUL (Swift 6: `String(cString:)`
+    /// für Arrays ist veraltet). UTF-8; ungültige Folgen werden ersetzt.
+    static func string(fromNullTerminated buffer: [CChar]) -> String {
+        let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
     /// Phase 8 – Serialisierung je QPDF-INSTANZ statt je Prozess.
     ///
     /// libqpdf ist gegen gleichzeitige Nutzung EINER QPDF-Instanz aus
@@ -80,11 +89,11 @@ final class PDFCoreDocument {
         var buffer = [CChar](repeating: 0, count: 64)
         let needed = Int(pdfcore_version(&buffer, buffer.count))
         if needed >= 0 && needed < buffer.count {
-            return String(cString: buffer)
+            return Self.string(fromNullTerminated: buffer)
         }
         var large = [CChar](repeating: 0, count: max(needed + 1, 1))
         _ = pdfcore_version(&large, large.count)
-        return String(cString: large)
+        return Self.string(fromNullTerminated: large)
     }
 
     // MARK: - Epic Phase 7 – semantische Inspection
@@ -171,7 +180,7 @@ final class PDFCoreDocument {
                                                  &buf, buf.count)
                 guard needed >= 0 else { continue }
             }
-            out.append(String(cString: buf))
+            out.append(Self.string(fromNullTerminated: buf))
         }
         return out
     }
@@ -233,7 +242,7 @@ final class PDFCoreDocument {
             let needed = pdfcore_string_list_get(handle,
                                                  PDFCORE_LIST_PAGE_LABELS,
                                                  Int32(i), &buf, buf.count)
-            if needed >= 0 { out.append(String(cString: buf)) }
+            if needed >= 0 { out.append(Self.string(fromNullTerminated: buf)) }
         }
         return out
     }
@@ -1163,38 +1172,6 @@ extension PDFCoreDocument {
     /// - `decoded: true`  → von libqpdf aufgelöste Bytes (Flate/LZW/RunLength
     ///   inkl. Predictor). Kann libqpdf nicht ALLE Filter auflösen, wird
     ///   `nil` geliefert – niemals Ersatzdaten.
-    /// Masterplan A4: Das ICCBased-Profil eines Bildes (auch als Basis von
-    /// /Indexed), nil ohne Profil.
-    func imageICCProfile(objectID: PDFObjectID) -> Data? {
-        gate.lock(); defer { gate.unlock() }
-        var ptr: UnsafeMutablePointer<UInt8>?
-        var len: Int = 0
-        let rc = pdfcore_get_image_icc_profile(
-            handle, Int32(objectID.objectNumber), Int32(objectID.generation), &ptr, &len)
-        guard rc == PDFCORE_OK.rawValue, let base = ptr, len > 0 else {
-            if let base = ptr { free(base) }
-            return nil
-        }
-        defer { free(base) }
-        return Data(bytes: base, count: len)
-    }
-
-    /// Masterplan A4: Ersetztes Bild als sRGB markieren (Pixel wurden aus
-    /// dem PDF-Profil nach sRGB umgerechnet).
-    func tagImageSRGB(objectID: PDFObjectID) throws {
-        gate.lock(); defer { gate.unlock() }
-        guard let icc = Self.srgbICC else { throw PDFCoreError.internalError }
-        let rc = icc.withUnsafeBytes { raw in
-            pdfcore_tag_image_srgb(handle, Int32(objectID.objectNumber), Int32(objectID.generation),
-                                   raw.baseAddress!.assumingMemoryBound(to: UInt8.self), raw.count)
-        }
-        guard rc == PDFCORE_OK.rawValue else {
-            throw rc == PDFCORE_ERR_CHECK_FAILED.rawValue ? PDFCoreError.checkFailed : PDFCoreError.internalError
-        }
-    }
-
-    private static let srgbICC: Data? = CGColorSpace(name: CGColorSpace.sRGB)?.copyICCData() as Data?
-
     func imageStreamData(objectID: PDFObjectID, decoded: Bool) -> Data? {
         imageStreamData(objectID: objectID, level: decoded ? 1 : 0)
     }
@@ -1523,6 +1500,9 @@ extension PDFCoreDocument {
         /// Sub-Rect im BILDPIXELRAUM mit oben-links-Ursprung; nil = Vollbild.
         /// Die y-Spiegelung in den PDF-Bildraum nimmt die Bridge vor.
         var rect: CGRect?
+        /// Masterplan A2 Stufe 2: Füllfarbe einer Maske (DeviceRGB 0…1);
+        /// nil = schwarz.
+        var fill: (red: Double, green: Double, blue: Double)? = nil
 
         var isMask: Bool {
             if case .jpeg = kind { return false }
@@ -1589,6 +1569,10 @@ extension PDFCoreDocument {
                 c.kind = 2
                 c.components = 1
                 c.is_mask = 1
+            }
+            if let fill = layer.fill {
+                c.has_fill = 1
+                c.fill = (fill.red, fill.green, fill.blue)
             }
             c.len = layouts[index].dataLen
             c.globals_len = layouts[index].globalsLen

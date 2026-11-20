@@ -70,4 +70,43 @@ import PDFKit
         // Neun weitere Seiten: Textebene je ~0,5 KB, keine neue Schrift je Seite.
         #expect(size(ten) - size(one) < 9 * 2_500, "Zuwachs \(size(ten) - size(one)) Byte für 9 Seiten")
     }
+
+    /// N14 (E5): Ein Zeichen außerhalb der BMP wird EIN Code (U+FFFD) statt
+    /// zweier einzelner Ersatzhälften; alles andere bleibt Code = Zeichen.
+    @Test func zeichenAusserhalbDerBMPSindGueltigKodiert() {
+        let text = "a\u{1F600}𠀀b"
+        #expect(OCREngine.codes(text) == [0x61, 0xFFFD, 0xFFFD, 0x62])
+        #expect(OCREngine.pdfString(text) == "<0061FFFDFFFD0062>")
+        #expect(!OCREngine.codes("Grüße 日本").contains { (0xD800...0xDFFF).contains($0) })
+    }
+
+    /// N14 (E5): Die OCR-Schrift ist eingebettet (FontFile2), das Programm
+    /// ist ein gültiges TrueType (CoreGraphics lädt es), und die Datei wächst
+    /// dadurch nur wenig.
+    @Test func schriftprogrammIstEingebettetUndGueltig() throws {
+        let out = try Self.layered(pages: 1)
+        defer { try? FileManager.default.removeItem(at: out) }
+        // Objektnummern aus der Originaldatei (qdf nummeriert um).
+        let json = try SingleSourceAssemblyE2ETests.qpdf(["--json=1", "--json-key=objects", out.path])
+        let match = try #require(json.firstMatch(of: /"\/FontFile2": "(\d+) 0 R"/), "Schrift nicht eingebettet")
+        let dump = FileManager.default.temporaryDirectory.appendingPathComponent("e5-font-\(UUID().uuidString).ttf")
+        defer { try? FileManager.default.removeItem(at: dump) }
+        let process = Process()
+        process.executableURL = Compressor.bundledQPDFURL()
+        process.arguments = ["--show-object=\(match.1)", "--filtered-stream-data", out.path]
+        FileManager.default.createFile(atPath: dump.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: dump)
+        process.standardOutput = handle
+        try process.run()
+        process.waitUntilExit()
+        try handle.close()
+        let data = try Data(contentsOf: dump)
+        #expect(data.count > 100)
+        let provider = try #require(CGDataProvider(data: data as CFData))
+        let font = try #require(CGFont(provider), "Eingebettetes Programm ist kein gültiges TrueType")
+        #expect(font.numberOfGlyphs == 2)
+        #expect(font.unitsPerEm == 1000)
+        let size = (try FileManager.default.attributesOfItem(atPath: out.path)[.size] as? Int) ?? 0
+        #expect(size < 30_000, "Datei \(size) Byte – Schrift oder CIDToGIDMap unkomprimiert?")
+    }
 }

@@ -269,7 +269,8 @@ import PDFKit
         let source = SourceDocument(url: input, pageCount: 15)
         let out = FileManager.default.temporaryDirectory.appendingPathComponent("n1-latex-\(UUID().uuidString).pdf")
         defer { try? FileManager.default.removeItem(at: out) }
-        try await PageAssemblyService.assemble(pages: [PageItem(source: source, pageIndex: 0)], to: out) { _ in }
+        let report = try await PageAssemblyService.assemble(pages: [PageItem(source: source, pageIndex: 0)], to: out) { _ in }
+        #expect(!report.rebuiltSingleSource)
         let size = (try FileManager.default.attributesOfItem(atPath: out.path)[.size] as? Int) ?? 0
         // Der qpdf-Neuaufbau derselben Seite hat 95.185 Byte.
         #expect(size < 125_000, "Ausgabe \(size) Byte – gelöschte Seiten stecken noch in der Datei")
@@ -312,7 +313,9 @@ import PDFKit
         // Der Dienst fällt auf den Neuaufbau zurück.
         let out = FileManager.default.temporaryDirectory.appendingPathComponent("n1-geist-out-\(UUID().uuidString).pdf")
         defer { try? FileManager.default.removeItem(at: out) }
-        try await PageAssemblyService.assemble(pages: [PageItem(source: source, pageIndex: 0)], to: out) { _ in }
+        let report = try await PageAssemblyService.assemble(pages: [PageItem(source: source, pageIndex: 0)], to: out) { _ in }
+        // N1-Rest: Der Rückfall wird gemeldet, damit die Oberfläche es sagt.
+        #expect(report.rebuiltSingleSource)
         let text = try Self.qdfText(of: out)
         #expect(Self.pageObjectCount(in: text) == 1)
         #expect(!text.contains("GEHEIM-GEIST") && !text.contains("SICHTBAR-2"))
@@ -396,5 +399,130 @@ import PDFKit
         let text = try Self.qdfText(of: out)
         #expect(Self.pageObjectCount(in: text) == 3)
         #expect(text.components(separatedBy: "/MediaBox").count - 1 >= 1)
+    }
+
+    // MARK: Masterplan N11 – interne Links mit benannten Zielen
+
+    /// Vier Seiten; Seite 1 trägt drei interne Links über benannte Ziele:
+    /// (1) /Dest als Zeichenkette im Namensbaum, im ZWEITEN Kind und als
+    /// `<< /D [...] >>`; (2) dasselbe über eine GoTo-Aktion; (3) /Dest als Name
+    /// im alten /Dests-Wörterbuch. Das erste Kind des Namensbaums ist ein
+    /// Zyklus (zeigt auf sich selbst) – die Suche darf daran weder hängen
+    /// noch abstürzen.
+    static func namedDestDocument() throws -> URL {
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        var ids: [Int] = []
+        let first = b.reserveNumber()
+        ids.append(first)
+        for _ in 1...3 { ids.append(b.addPage(parent: pages)) }
+        let cycle = b.reserveNumber()
+        b.fill(cycle, "<</Kids[\(cycle) 0 R]>>")
+        let kidA = b.addObject("<</Names[(aaa)[\(ids[1]) 0 R/Fit]]/Limits[(aaa)(aaa)]>>")
+        let kidB = b.addObject("<</Names[(zielB)<</D[\(ids[2]) 0 R/Fit]>>]/Limits[(zielB)(zielB)]>>")
+        let tree = b.addObject("<</Kids[\(cycle) 0 R \(kidA) 0 R \(kidB) 0 R]>>")
+        let rect = "/Rect[72 600 200 620]/Border[0 0 0]"
+        let link1 = b.addObject("<</Type/Annot/Subtype/Link\(rect)/Dest(zielB)>>")
+        let link2 = b.addObject("<</Type/Annot/Subtype/Link\(rect)/A<</S/GoTo/D(zielB)>>>>")
+        let link3 = b.addObject("<</Type/Annot/Subtype/Link\(rect)/Dest/alt>>")
+        b.fillPage(first, parent: pages,
+                   extra: "/Annots[\(link1) 0 R \(link2) 0 R \(link3) 0 R]")
+        b.fill(pages, "<</Type/Pages/Kids[\(ids.map { "\($0) 0 R" }.joined(separator: " "))]/Count 4>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R"
+            + "/Names<</Dests \(tree) 0 R>>/Dests<</alt[\(ids[3]) 0 R/Fit]>>>>")
+        return try b.write(rootObject: root, prefix: "n11-namedest")
+    }
+
+    static func linkCount(_ url: URL, page: Int) -> Int {
+        PDFDocument(url: url)?.page(at: page)?.annotations
+            .filter { $0.type == "Link" }.count ?? -1
+    }
+
+    /// Masterplan N11: Seite drehen, alles behalten – kein Link darf als
+    /// „tot“ entfernt werden.
+    @Test func benannteZieleUeberlebenDasDrehen() async throws {
+        let input = try Self.namedDestDocument()
+        defer { try? FileManager.default.removeItem(at: input) }
+        #expect(Self.linkCount(input, page: 0) == 3)
+        let source = SourceDocument(url: input, pageCount: 4)
+        var items = (0..<4).map { PageItem(source: source, pageIndex: $0) }
+        items[1].rotation = 90
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("n11-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: out) }
+        try await PageAssemblyService.assemble(pages: items, to: out) { _ in }
+        #expect(Self.linkCount(out, page: 0) == 3, "Links nach dem Drehen: \(Self.linkCount(out, page: 0))")
+        // Ziele zeigen weiter auf dieselben Seiten wie in der Quelle. (PDFKit
+        // löst das alte /Dests-Wörterbuch nicht auf – deshalb der Vergleich
+        // mit der Quelle statt fester Seitenzahlen; die Zahl der Links oben
+        // prüft, dass auch dieser Link bleibt.)
+        func targets(_ url: URL) throws -> [Int] {
+            let doc = try #require(PDFDocument(url: url))
+            let links = doc.page(at: 0)?.annotations.filter { $0.type == "Link" } ?? []
+            return links.compactMap { a -> Int? in
+                guard let page = a.destination?.page ?? (a.action as? PDFActionGoTo)?.destination.page
+                else { return nil }
+                return doc.index(for: page)
+            }.sorted()
+        }
+        let before = try targets(input)
+        #expect(before.contains(2), "PDFKit löst den Namensbaum nicht auf – Test misst nichts")
+        #expect(try targets(out) == before)
+    }
+
+    /// Echte pdfLaTeX-Datei mit hyperref: Seite 1 drehen, alle Seiten
+    /// behalten – Zahl der Links je Seite unverändert.
+    @Test(.needsLocalFiles(latexFile)) func latexLinksUeberlebenDasDrehen() async throws {
+        let input = LocalTestData.repoRoot.appendingPathComponent(Self.latexFile)
+        let source = SourceDocument(url: input, pageCount: 15)
+        var items = (0..<15).map { PageItem(source: source, pageIndex: $0) }
+        items[0].rotation = 90
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("n11-latex-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: out) }
+        try await PageAssemblyService.assemble(pages: items, to: out) { _ in }
+        let before = (0..<15).map { Self.linkCount(input, page: $0) }
+        let after = (0..<15).map { Self.linkCount(out, page: $0) }
+        #expect(before.reduce(0, +) > 0, "Vorlage ohne Links – Test misst nichts")
+        #expect(after == before)
+    }
+
+    // MARK: N1-Rest – Artikel-Threads
+
+    /// Drei Seiten; Thread A läuft über alle drei, Thread B nur über Seite 3.
+    /// Nur Seite 1 behalten: Thread A bleibt mit einem Bead, Thread B und die
+    /// Beads der entfernten Seiten verschwinden (vorher leere Hüllen).
+    @Test func artikelThreadsEntfernterSeitenVerschwinden() async throws {
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let p = (0..<3).map { _ in b.reserveNumber() }
+        let threadA = b.reserveNumber(), threadB = b.reserveNumber()
+        let beads = (0..<3).map { _ in b.reserveNumber() }
+        let beadB = b.reserveNumber()
+        for i in 0..<3 {
+            b.fill(beads[i], "<</T \(threadA) 0 R/N \(beads[(i + 1) % 3]) 0 R/V \(beads[(i + 2) % 3]) 0 R"
+                   + "/P \(p[i]) 0 R/R[\(i + 1)11 \(i + 1)11 \(i + 1)222 \(i + 1)222]>>")
+        }
+        b.fill(beadB, "<</T \(threadB) 0 R/N \(beadB) 0 R/V \(beadB) 0 R/P \(p[2]) 0 R/R[9 9 99 99]>>")
+        b.fill(threadA, "<</F \(beads[0]) 0 R/I<</Title(THREAD-A)>>>>")
+        b.fill(threadB, "<</F \(beadB) 0 R/I<</Title(NUR-SEITE-3)>>>>")
+        for i in 0..<3 {
+            let bList = i == 2 ? "[\(beads[i]) 0 R \(beadB) 0 R]" : "[\(beads[i]) 0 R]"
+            b.fillPage(p[i], parent: pages, extra: "/B\(bList)")
+        }
+        b.fill(pages, "<</Type/Pages/Kids[\(p.map { "\($0) 0 R" }.joined(separator: " "))]/Count 3>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R/Threads[\(threadA) 0 R \(threadB) 0 R]>>")
+        let input = try b.write(rootObject: root, prefix: "n1-threads")
+        defer { try? FileManager.default.removeItem(at: input) }
+
+        let source = SourceDocument(url: input, pageCount: 3)
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("n1-threads-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: out) }
+        let report = try await PageAssemblyService.assemble(pages: [PageItem(source: source, pageIndex: 0)], to: out) { _ in }
+        #expect(!report.rebuiltSingleSource, "Umbau im Original erwartet – Test misst sonst den Neuaufbau")
+        let text = try Self.qdfText(of: out)
+        #expect(text.contains("THREAD-A"))
+        #expect(!text.contains("NUR-SEITE-3"), "Thread nur auf einer entfernten Seite blieb stehen")
+        #expect(text.contains("1222"))
+        #expect(!text.contains("2222") && !text.contains("3222"), "Beads entfernter Seiten blieben stehen")
+        #expect(Self.pageObjectCount(in: text) == 1)
     }
 }

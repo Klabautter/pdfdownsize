@@ -11,8 +11,10 @@ QuitConfirmationTests
 # Kompression über das ViewModel, Stapel, Schätzung
 CompressionUITests
 EstimatePublicationTests
-# Organisieren
-HardeningTests
+# Organisieren (HardeningTests.swift enthält zwei Suiten; der Dateiname
+# selbst fuhr null Tests – Masterplan N8)
+PDFValidatorTests
+AssemblyCompatibilityTests
 AssemblyCancellationTests
 # OCR
 OCRTests

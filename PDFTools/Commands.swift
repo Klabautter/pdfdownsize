@@ -122,8 +122,11 @@ extension PDFToolsApp {
                 default:
                     guard let compressionVM else { break }
                     if let discardGuard {
-                        discardGuard.run(ifUnsaved: compressionVM.hasUnsavedResult) {
-                            compressionVM.chooseFiles()
+                        // N14 (B1): erst wählen und prüfen, dann fragen.
+                        let urls = CompressionViewModel.pickPDFs()
+                        guard !urls.isEmpty else { break }
+                        discardGuard.runAfterProbe(urls, ifUnsaved: compressionVM.hasUnsavedResult) {
+                            compressionVM.selectMany(urls)
                         }
                     } else {
                         compressionVM.chooseFiles()

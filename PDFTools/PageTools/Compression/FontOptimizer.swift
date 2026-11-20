@@ -77,7 +77,7 @@ enum FontOptimizer {
     /// – die Produktion bleibt byteidentisch.
     static func provision(document: PDFCoreDocument,
                           options: CompressionOptions,
-                          isCancelled: (() -> Bool)? = nil) throws -> [Provision] {
+                          isCancelled: (@Sendable () -> Bool)? = nil) throws -> [Provision] {
         guard options.featureFlags.candidateEngine,
               options.featureFlags.selectiveFontSubset,
               options.fontPolicy != .off else { return [] }

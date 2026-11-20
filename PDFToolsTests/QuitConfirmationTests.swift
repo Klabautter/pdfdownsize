@@ -58,4 +58,60 @@ struct QuitConfirmationTests {
         guardian.run(ifUnsaved: false) { ran = true }
         #expect(ran)
     }
+
+    /// Masterplan N7: ⌘Q mit ungesichertem Ergebnis, dann eine PDF per Finder
+    /// öffnen – die Beenden-Antwort ging verloren, die App hing in
+    /// `terminateLater`. Erwartung: genau einmal „nicht beenden“.
+    @Test func offeneBeendenFrageWirdBeimNeuenOeffnenBeantwortet() {
+        let guardian = DiscardGuard()
+        var replies: [Bool] = []
+        guardian.confirmQuit(PendingWork(unsavedResult: true)) { replies.append($0) }
+        var ran = false
+        guardian.run(ifUnsaved: true) { ran = true }
+        #expect(replies == [false])
+        #expect(guardian.confirmLabel == String(localized: "Verwerfen"))
+        guardian.confirm()
+        #expect(ran)
+        #expect(replies == [false], "die alte Antwort darf nicht ein zweites Mal kommen")
+    }
+
+    /// Zweites ⌘Q, während die erste Frage noch steht: die erste wird abgelehnt,
+    /// die zweite gilt.
+    @Test func zweiteBeendenFrageErsetztDieErste() {
+        let guardian = DiscardGuard()
+        var first: [Bool] = [], second: [Bool] = []
+        guardian.confirmQuit(PendingWork(running: true)) { first.append($0) }
+        guardian.confirmQuit(PendingWork(running: true)) { second.append($0) }
+        #expect(first == [false])
+        guardian.confirm()
+        #expect(second == [true])
+        #expect(first == [false])
+    }
+
+    /// N14 (B1): Erst prüfen, dann fragen. Eine unlesbare Datei kostet das
+    /// ungesicherte Ergebnis nicht; eine lesbare (auch gesperrte) fragt wie
+    /// bisher.
+    @Test func unlesbareDateiFragtNichtUndVerwirftNichts() async {
+        let guardian = DiscardGuard()
+        let url = URL(fileURLWithPath: "/nicht/da.pdf")
+        var ran = false
+        guardian.runAfterProbe([url], ifUnsaved: true, probe: { _ in .unreadable }) { ran = true }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while guardian.refusal == nil, ContinuousClock.now < deadline { await Task.yield() }
+        #expect(guardian.refusal != nil)
+        #expect(guardian.pending == nil, "Verwerfen-Frage trotz unlesbarer Datei")
+        #expect(!ran)
+
+        guardian.refusal = nil
+        guardian.runAfterProbe([url], ifUnsaved: true, probe: { _ in .locked }) { ran = true }
+        while guardian.pending == nil, ContinuousClock.now < deadline + .seconds(5) { await Task.yield() }
+        #expect(guardian.pending != nil, "Gesperrte Datei muss wie bisher fragen")
+        guardian.confirm()
+        #expect(ran)
+
+        // Ohne ungesichertes Ergebnis: sofort, ohne Prüfung.
+        var direct = false
+        guardian.runAfterProbe([url], ifUnsaved: false, probe: { _ in .unreadable }) { direct = true }
+        #expect(direct)
+    }
 }

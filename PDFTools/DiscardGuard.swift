@@ -26,19 +26,58 @@ final class DiscardGuard: ObservableObject {
 
     func run(ifUnsaved unsaved: Bool, _ action: @escaping () -> Void) {
         if unsaved {
+            // Masterplan N7: Eine offene Beenden-Frage wird sonst überschrieben,
+            // und `reply(toApplicationShouldTerminate:)` kommt nie.
+            answerOpenQuestion()
             reason = .unsavedResult
-            onCancel = nil
             pending = action
         } else {
             action()
         }
     }
 
+    /// N14 (B1): Hinweis, wenn eine neue Datei sich nicht öffnen lässt und
+    /// das ungesicherte Ergebnis deshalb bleibt.
+    @Published var refusal: String?
+
+    /// N14 (B1): Erst prüfen, dann fragen. Liegt ein ungesichertes Ergebnis
+    /// vor, werden die neuen Dateien zuerst geprüft (abseits des Main
+    /// Threads). Lässt sich keine öffnen, bleibt das Ergebnis, und es gibt
+    /// einen Hinweis statt der Verwerfen-Frage. Vorher verwarf man ein
+    /// Ergebnis für eine Datei, die sich danach als unlesbar herausstellte.
+    /// Passwortgeschützte Dateien zählen als öffenbar (Entsperren).
+    func runAfterProbe(_ urls: [URL], ifUnsaved unsaved: Bool,
+                       probe: @escaping @Sendable (URL) -> DocumentProbe.Verdict = { DocumentProbe.inspect($0) },
+                       _ action: @escaping () -> Void) {
+        guard unsaved, !urls.isEmpty else { action(); return }
+        Task {
+            let verdicts = await Task.detached(priority: .userInitiated) { urls.map(probe) }.value
+            if verdicts.contains(where: { $0.isOK || $0 == .locked }) {
+                run(ifUnsaved: true, action)
+            } else if verdicts.count == 1, let only = verdicts.first {
+                refusal = String(localized: "\(only.title) Das nicht gesicherte Ergebnis bleibt erhalten.")
+            } else {
+                refusal = String(localized: "Keine der Dateien lässt sich öffnen. Das nicht gesicherte Ergebnis bleibt erhalten.")
+            }
+        }
+    }
+
     /// Rückfrage vor dem Beenden/Schließen. Die Antwort geht an `reply`.
     func confirmQuit(_ work: PendingWork, reply: @escaping (Bool) -> Void) {
+        answerOpenQuestion()
         reason = .quit(running: work.running, unsaved: work.unsavedResult)
         onCancel = { reply(false) }
         pending = { reply(true) }
+    }
+
+    /// Beantwortet eine noch offene Beenden-Frage mit „nicht beenden“, bevor
+    /// eine neue Rückfrage sie ersetzt. Eine offene Verwerfen-Frage entfällt
+    /// ohne Aktion – das ist dasselbe wie „Abbrechen“.
+    private func answerOpenQuestion() {
+        let cancelled = onCancel
+        onCancel = nil
+        pending = nil
+        cancelled?()
     }
 
     func confirm() {
@@ -107,6 +146,13 @@ private struct DiscardConfirmation: ViewModifier {
             Button("Abbrechen", role: .cancel) { discardGuard.cancel() }
         } message: {
             Text(discardGuard.message)
+        }
+        .alert("Datei nicht geöffnet", isPresented: Binding(
+            get: { discardGuard.refusal != nil },
+            set: { if !$0 { discardGuard.refusal = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(discardGuard.refusal ?? "")
         }
     }
 }

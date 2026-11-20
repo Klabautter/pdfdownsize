@@ -17,15 +17,26 @@ enum PageAssemblyService {
 
     /// Bequemer Einstieg für Aufrufer, die bereits `PageItem`s halten –
     /// ein dünner Wrapper über den neutralen Assembly-Plan.
+    /// Was beim Zusammenstellen geschah (N1-Rest): `rebuiltSingleSource` =
+    /// eine einzige Quelle, aber der Umbau im Quelldokument gelang nicht, und
+    /// es wurde neu aufgebaut. Dann fehlen Tags, Anhänge, Ebenen usw. der
+    /// Quelle – das muss die Oberfläche sagen.
+    struct Report: Sendable {
+        var rebuiltSingleSource = false
+    }
+
+    @discardableResult
     @concurrent nonisolated static func assemble(pages: [PageItem], to outputURL: URL,
-                                     progress: @escaping (Double) -> Void) async throws {
+                                     progress: @escaping @Sendable (Double) -> Void) async throws -> Report {
         try await assemble(plan: pages.assemblyPlan, to: outputURL,
                            progress: progress)
     }
 
     /// Führt einen neutralen PageAssemblyPlan aus.
+    @discardableResult
     @concurrent nonisolated static func assemble(plan: PageAssemblyPlan, to outputURL: URL,
-                                     progress: @escaping (Double) -> Void) async throws {
+                                     progress: @escaping @Sendable (Double) -> Void) async throws -> Report {
+        var report = Report()
         // Befund B11 (Review 2026-10-09) – Abbruch greift ZWISCHEN den
         // Seiten und während des Schreibens, nicht erst nach der fertigen
         // Datei. Der Task-Zustand wird an die Bridge durchgereicht; ein
@@ -97,6 +108,7 @@ enum PageAssemblyService {
                                                        onPage: onPage, shouldContinue: { !Task.isCancelled })
                 rebuiltInPlace = true
             } catch PDFCoreAssemblerError.needsRebuild {
+                report.rebuiltSingleSource = true
                 try PDFCoreAssembler.write(plan: plan, to: outputURL, removeDanglingLinks: true,
                                            onPage: onPage, shouldContinue: { !Task.isCancelled })
             }
@@ -155,6 +167,7 @@ enum PageAssemblyService {
         } catch {
             // Metadata/Labels sind optional – Assembly selbst bleibt gültig.
         }
+        return report
     }
 
 

@@ -81,6 +81,22 @@
         }
       }
     },
+    "%@ Das nicht gesicherte Ergebnis bleibt erhalten.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ Das nicht gesicherte Ergebnis bleibt erhalten."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ Your unsaved result is kept."
+          }
+        }
+      }
+    },
     "%@ Wörter": {
       "localizations": {
         "de": {
@@ -1841,18 +1857,18 @@
         }
       }
     },
-    "Bilddaten für Objekt %@ konnten nicht erzeugt werden.": {
+    "Bilddaten für Objekt %lld konnten nicht erzeugt werden.": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bilddaten für Objekt %@ konnten nicht erzeugt werden."
+            "value": "Bilddaten für Objekt %lld konnten nicht erzeugt werden."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Image data for object %@ could not be created."
+            "value": "Image data for object %lld could not be created."
           }
         }
       }
@@ -2209,6 +2225,22 @@
         }
       }
     },
+    "Datei nicht geöffnet": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Datei nicht geöffnet"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "File not opened"
+          }
+        }
+      }
+    },
     "Dateien auch hierher ziehen": {
       "localizations": {
         "de": {
@@ -2418,6 +2450,22 @@
         }
       }
     },
+    "Die entsperrte Arbeitskopie ließ sich nicht schreiben. Ist genug Speicherplatz frei?": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die entsperrte Arbeitskopie ließ sich nicht schreiben. Ist genug Speicherplatz frei?"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The unlocked working copy could not be written. Is there enough free disk space?"
+          }
+        }
+      }
+    },
     "Die komprimierte Datei konnte nicht geschrieben werden.": {
       "localizations": {
         "de": {
@@ -2574,6 +2622,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "This PDF is password-protected."
+          }
+        }
+      }
+    },
+    "Diese PDF ließ sich nicht im Original umbauen und wurde neu aufgebaut. Dabei nicht übernommen: %@.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese PDF ließ sich nicht im Original umbauen und wurde neu aufgebaut. Dabei nicht übernommen: %@."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This PDF could not be edited in place and was rebuilt. Not carried over: %@."
           }
         }
       }
@@ -2926,6 +2990,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Unlock"
+          }
+        }
+      }
+    },
+    "Entsperren fehlgeschlagen": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entsperren fehlgeschlagen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock Failed"
+          }
+        }
+      }
+    },
+    "Entsperren …": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entsperren …"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock …"
           }
         }
       }
@@ -3634,6 +3730,22 @@
         }
       }
     },
+    "Keine Schätzung möglich – Komprimieren geht trotzdem.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keine Schätzung möglich – Komprimieren geht trotzdem."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No estimate available – you can still compress."
+          }
+        }
+      }
+    },
     "Keine Seite wurde neu erkannt – die PDF ist bereits durchsuchbar, es gibt nichts zu sichern.": {
       "localizations": {
         "de": {
@@ -3678,6 +3790,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "No matches"
+          }
+        }
+      }
+    },
+    "Keine der Dateien lässt sich öffnen. Das nicht gesicherte Ergebnis bleibt erhalten.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keine der Dateien lässt sich öffnen. Das nicht gesicherte Ergebnis bleibt erhalten."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "None of the files can be opened. Your unsaved result is kept."
           }
         }
       }
@@ -4114,6 +4242,22 @@
         }
       }
     },
+    "Mit diesen Einstellungen komprimieren": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mit diesen Einstellungen komprimieren"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compress with these settings"
+          }
+        }
+      }
+    },
     "Modern": {
       "localizations": {
         "de": {
@@ -4514,18 +4658,18 @@
         }
       }
     },
-    "Objekt %@ ist nicht sicher ersetzbar.": {
+    "Objekt %lld ist nicht sicher ersetzbar.": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Objekt %@ ist nicht sicher ersetzbar."
+            "value": "Objekt %lld ist nicht sicher ersetzbar."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Object %@ cannot be replaced safely."
+            "value": "Object %lld cannot be replaced safely."
           }
         }
       }
@@ -5134,6 +5278,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Password"
+          }
+        }
+      }
+    },
+    "Passwort eingeben": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Passwort eingeben"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter Password"
           }
         }
       }

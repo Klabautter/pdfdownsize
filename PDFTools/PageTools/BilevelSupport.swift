@@ -53,6 +53,19 @@ struct BilevelBuffer: Equatable, Sendable {
         self.data = normalized
     }
 
+    /// Bitweises ODER zweier gleich großer Puffer (A2 Stufe 2: Maske für das
+    /// Auffüllen des Hintergrunds). Andere Maße: `self` unverändert.
+    func union(_ other: BilevelBuffer) -> BilevelBuffer {
+        guard width == other.width, height == other.height else { return self }
+        var merged = data
+        other.data.withUnsafeBytes { src in
+            merged.withUnsafeMutableBytes { dst in
+                for i in 0..<min(src.count, dst.count) { dst[i] |= src[i] }
+            }
+        }
+        return BilevelBuffer(width: width, height: height, data: merged) ?? self
+    }
+
     /// Bytegenauer Vergleich auf exakter Länge. Überschüssige Bytes
     /// (Stream-Padding) fließen nicht ein.
     func bitIdentical(to other: BilevelBuffer) -> Bool {

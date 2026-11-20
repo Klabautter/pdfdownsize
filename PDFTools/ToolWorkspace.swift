@@ -5,7 +5,8 @@ import UniformTypeIdentifiers
 /// Rollt den Pultinhalt zu einem `.id(...)`-Ziel – für Teile, die
 /// aufklappen, während das Pult schon scrollt („Eigene" + Optionen).
 private struct PanelScrollProxyKey: EnvironmentKey {
-    static let defaultValue: ScrollViewProxy? = nil
+    // Immer nil – kein geteilter Zustand (G6).
+    nonisolated(unsafe) static let defaultValue: ScrollViewProxy? = nil
 }
 
 extension EnvironmentValues {
@@ -432,8 +433,13 @@ struct DocumentPreview: View {
     private func loadDocument() async {
         ownSelected = 0   // eine gebundene Seite behält ihren Stand (z. B. Quelle → Ergebnis)
         thumbs = [:]
-        document = PDFDocument(url: url)
+        // N14 (C6): Öffnen abseits des Main Threads.
         let target = url
+        let loaded = await Task.detached(priority: .userInitiated) {
+            SendableDocument(PDFDocument(url: target))
+        }.value
+        guard url == target, !Task.isCancelled else { return }
+        document = loaded.value
         let samples = CompressionViewModel.samplePageCount
         thumbs = await Task.detached(priority: .utility) { () -> [Int: NSImage] in
             guard let doc = PDFDocument(url: target) else { return [:] }

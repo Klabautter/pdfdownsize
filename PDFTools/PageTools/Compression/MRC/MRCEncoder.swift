@@ -109,14 +109,34 @@ enum MRCEncoder {
         let rect: CGRect
     }
 
+    /// A2 Stufe 2: eine kodierte Farbmaske mit Füllfarbe (DeviceRGB 0…1).
+    struct ColorMaskEncoding {
+        let mask: MaskEncoding
+        let fill: (red: Double, green: Double, blue: Double)
+    }
+
     struct EncodedLayers {
         let background: (data: Data, width: Int, height: Int, components: Int)
         let photos: [PhotoLayer]
         let mask: MaskEncoding
+        var colorMasks: [ColorMaskEncoding] = []
         var totalBytes: Int {
             mask.totalBytes + background.data.count
                 + photos.reduce(0) { $0 + $1.data.count }
+                + colorMasks.reduce(0) { $0 + $1.mask.totalBytes }
         }
+    }
+
+    /// Kodiert die Farbmasken einer Segmentierung (einmal je Seite, wie die
+    /// schwarze Maske). nil, wenn eine davon nicht bitgenau kodierbar ist –
+    /// dann gibt es keinen MRC-Kandidaten.
+    static func encodeColorMasks(_ masks: [MRCSegmenter.ColorMask]) -> [ColorMaskEncoding]? {
+        var out: [ColorMaskEncoding] = []
+        for colorMask in masks {
+            guard let encoded = encodeMask(colorMask.mask) else { return nil }
+            out.append(ColorMaskEncoding(mask: encoded, fill: colorMask.fill))
+        }
+        return out
     }
 
     /// Kodiert die Layer EINER Stufe. Deterministisch: dieselben Eingaben
@@ -128,6 +148,7 @@ enum MRCEncoder {
     /// das Original gewählt (Never Upscale).
     static func encodeLayers(segmentation: MRCSegmenter.Segmentation,
                              mask: MaskEncoding,
+                             colorMasks: [ColorMaskEncoding] = [],
                              rung: Rung,
                              sourceDPI: Double) -> EncodedLayers? {
         guard sourceDPI > 0 else { return nil }
@@ -172,7 +193,8 @@ enum MRCEncoder {
         return EncodedLayers(
             background: (bgData, bgWidth, bgHeight, gray ? 1 : 3),
             photos: photos,
-            mask: mask)
+            mask: mask,
+            colorMasks: colorMasks)
     }
 
     // MARK: Bundle-Container (§13.8: Gesamtbytes aller Layer)
@@ -192,10 +214,14 @@ enum MRCEncoder {
             var rect: CGRect?    // Bildpixelraum, oben-links
             var globals: Data
             var data: Data
+            /// A2 Stufe 2 (Version 2): Füllfarbe einer Maske, DeviceRGB 0…1;
+            /// nil = schwarz wie in Version 1.
+            var fill: (red: Double, green: Double, blue: Double)? = nil
         }
 
         static let magic: [UInt8] = [0x4D, 0x52, 0x43, 0x42]  // "MRCB"
-        static let version: UInt8 = 1
+        /// Version 2 trägt je Eintrag eine Füllfarbe; Version 1 bleibt lesbar.
+        static let version: UInt8 = 2
 
         static func encode(_ entries: [Entry]) -> Data {
             var out = Data(capacity: 64)
@@ -224,6 +250,10 @@ enum MRCEncoder {
                 appendF64(rect.map { Double($0.minY) } ?? 0)
                 appendF64(rect.map { Double($0.maxX) } ?? 0)
                 appendF64(rect.map { Double($0.maxY) } ?? 0)
+                out.append(entry.fill == nil ? 0 : 1)
+                appendF64(entry.fill?.red ?? 0)
+                appendF64(entry.fill?.green ?? 0)
+                appendF64(entry.fill?.blue ?? 0)
                 out.append(entry.globals)
                 out.append(entry.data)
             }
@@ -234,7 +264,8 @@ enum MRCEncoder {
             let bytes = [UInt8](data)
             guard bytes.count >= 6,
                   Array(bytes[0..<4]) == magic,
-                  bytes[4] == version else { return nil }
+                  bytes[4] == 1 || bytes[4] == version else { return nil }
+            let format = bytes[4]
             let layerCount = Int(bytes[5])
             var offset = 6
             // Kleinst_ENDIAN-Konsistenz zum Encoder: u32/u64 little-endian.
@@ -277,6 +308,17 @@ enum MRCEncoder {
                     rect = CGRect(x: x0, y: y0,
                                   width: max(0, x1 - x0), height: max(0, y1 - y0))
                 }
+                var fill: (red: Double, green: Double, blue: Double)?
+                if format >= 2 {
+                    guard offset + 1 + 24 <= bytes.count else { return nil }
+                    let hasFill = bytes[offset] == 1
+                    offset += 1
+                    guard let r = readF64(), let g = readF64(), let b = readF64() else { return nil }
+                    if hasFill {
+                        guard (0...1).contains(r), (0...1).contains(g), (0...1).contains(b) else { return nil }
+                        fill = (r, g, b)
+                    }
+                }
                 guard globalsLen <= bytes.count - offset,
                       dataLen <= bytes.count - offset - Int(globalsLen)
                 else { return nil }
@@ -289,7 +331,7 @@ enum MRCEncoder {
                                      components: components,
                                      width: Int(width), height: Int(height),
                                      rect: rect, globals: globals,
-                                     data: payload))
+                                     data: payload, fill: fill))
             }
             return entries
         }

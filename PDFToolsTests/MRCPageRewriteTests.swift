@@ -133,4 +133,39 @@ import CoreGraphics
             return false
         }, "MRC-Output darf nicht erneut MRC-Kandidat werden")
     }
+
+    /// Masterplan A2 Stufe 2: Eine blaue Linie auf einer Scan-Seite wird als
+    /// eigene Maske in ihrer Farbe gezeichnet („r g b rg“), nicht schwarz.
+    @Test func farbigeTinteWirdAlsFarbmaskeGezeichnet() throws {
+        let image = try MRCSegmentationTests.pageWithBlueInk()
+        let rgb = try #require(ImageResampler.rawBitmap(image, components: 3))
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let raster = b.addStream(dictionary: "/Type/XObject/Subtype/Image/Width \(image.width)"
+            + "/Height \(image.height)/BitsPerComponent 8/ColorSpace/DeviceRGB/Filter/FlateDecode",
+            data: try #require(ImageProcessor.flate(rgb)))
+        let resources = b.addObject("<</XObject<</Im0 \(raster) 0 R>>>>")
+        let content = b.addStream(dictionary: "", content: "q 612 0 0 816 0 0 cm /Im0 Do Q")
+        let page = b.addObject("<</Type/Page/Parent \(pages) 0 R/MediaBox[0 0 612 816]"
+            + "/Resources \(resources) 0 R/Contents \(content) 0 R>>")
+        b.fill(pages, "<</Type/Pages/Kids[\(page) 0 R]/Count 1>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R>>")
+        let input = try b.write(rootObject: root, prefix: "a2-stufe2")
+        defer { try? FileManager.default.removeItem(at: input) }
+        let output = Self.tempURL("a2-stufe2")
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        let outcome = try CompressionPipeline.run(inputURL: input, outputURL: output,
+                                                  options: Self.mrcOptions())
+        let mrc = outcome.plan.actions.compactMap { action -> MRCCandidateDescriptor? in
+            if case .mrc(_, let descriptor, _, _) = action { return descriptor }
+            return nil
+        }.first
+        let descriptor = try #require(mrc, "Erwartete MRC-Aktion im Plan")
+        #expect(descriptor.colorMaskCount == 1)
+        let text = String(decoding: try PDFCoreDocument(path: output.path).pageContentBytes(pageIndex: 0),
+                          as: UTF8.self)
+        #expect(text.contains(" rg"), "Farbmaske wird nicht farbig gemalt: \(text)")
+        #expect(text.contains("0 g"), "Schwarze Maske fehlt")
+    }
 }

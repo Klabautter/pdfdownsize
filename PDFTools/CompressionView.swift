@@ -36,8 +36,11 @@ struct CompressionView: View {
                     // übernimmt „PDFs auswählen …" in der Mitte diese Rolle.
                     if viewModel.inputURL != nil || !viewModel.bulkInputs.isEmpty {
                         Button {
-                            discardGuard.run(ifUnsaved: viewModel.hasUnsavedResult) {
-                                viewModel.addFiles()
+                            // N14 (B1): erst wählen und prüfen, dann fragen.
+                            let urls = CompressionViewModel.pickPDFs(prompt: String(localized: "Hinzufügen"))
+                            guard !urls.isEmpty else { return }
+                            discardGuard.runAfterProbe(urls, ifUnsaved: viewModel.hasUnsavedResult) {
+                                viewModel.add(urls)
                             }
                         } label: {
                             Label("Weitere PDFs hinzufügen", systemImage: "plus")
@@ -99,7 +102,7 @@ struct CompressionView: View {
             return true
         }
         // Auf eine geöffnete Datei oder Liste abgelegt: hinzufügen statt ersetzen.
-        discardGuard.run(ifUnsaved: viewModel.hasUnsavedResult) {
+        discardGuard.runAfterProbe(pdfs, ifUnsaved: viewModel.hasUnsavedResult) {
             if viewModel.inputURL != nil || !viewModel.bulkInputs.isEmpty {
                 viewModel.add(pdfs)
             } else if pdfs.count == 1, let url = pdfs.first {
@@ -393,8 +396,13 @@ private struct ControlPanel: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
-            } else {
+            } else if viewModel.estimateRefreshing {
                 SizeReadout(original: original, content: .estimating)
+            } else {
+                // N14 (B1): Die Schätzung ist fertig, aber ohne Ergebnis (etwa
+                // weil das Bildinventar scheiterte) – vorher blieb hier
+                // „Wird geschätzt …“ stehen.
+                SizeReadout(original: original, content: .unavailable)
             }
         }
     }
@@ -536,6 +544,8 @@ private struct ControlPanel: View {
 struct SizeReadout: View {
     enum Content: Equatable {
         case estimating
+        /// Keine Schätzung möglich – Komprimieren geht trotzdem (N14, B1).
+        case unavailable
         case estimate(point: Int64)
         case result(Int64)
         case alreadyOptimal
@@ -580,6 +590,13 @@ struct SizeReadout: View {
                 Text("—").font(Theme.figure).foregroundStyle(.tertiary)
                 Text("Wird geschätzt …").font(.callout).foregroundStyle(.secondary)
             }
+        case .unavailable:
+            VStack(alignment: .leading, spacing: 2) {
+                Text("—").font(Theme.figure).foregroundStyle(.tertiary)
+                Text("Keine Schätzung möglich – Komprimieren geht trotzdem.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         case .estimate(let point):
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(Self.estimateFigure(point: point, original: original)) kleiner")
@@ -618,7 +635,7 @@ struct SizeReadout: View {
             ZStack(alignment: .leading) {
                 Capsule().fill(.quaternary)
                 switch content {
-                case .estimating:
+                case .estimating, .unavailable:
                     EmptyView()
                 case .estimate(let point):
                     Capsule().fill(Color.accentColor)
@@ -952,9 +969,16 @@ private struct BulkComparisonStage: View {
         }
         .background(Theme.canvas)
         .task(id: input) {
-            let result = viewModel.bulkResult(for: input)
-            original = PDFDocument(url: input)
-            compressed = result.flatMap { PDFDocument(url: $0.outputURL) }
+            // N14 (C6): beide Dokumente abseits des Main Threads öffnen.
+            let output = viewModel.bulkResult(for: input)?.outputURL
+            let source = input
+            let loaded = await Task.detached(priority: .userInitiated) {
+                (SendableDocument(PDFDocument(url: source)),
+                 SendableDocument(output.flatMap { PDFDocument(url: $0) }))
+            }.value
+            guard !Task.isCancelled else { return }
+            original = loaded.0.value
+            compressed = loaded.1.value
             page = 0
         }
     }
@@ -967,10 +991,14 @@ private struct BulkStage: View {
     var onCompare: (URL) -> Void = { _ in }
     @State private var selection: Set<URL> = []
     @State private var showsCustom = true
+    // N14 (B2): Entsperren einer gesperrten Stapeldatei.
+    @State private var unlockTarget: URL?
+    @State private var unlockPassword = ""
+    @State private var unlockError: String?
 
-    /// Sichern-Fehler als System-Alert (Befunde M7/S6) – Aktionsfehler
-    /// gehören nicht in eine Fußzeile.
-    @State private var saveError: String?
+    // Sichern-Fehler als System-Alert (Befunde M7/S6) – Aktionsfehler
+    // gehören nicht in eine Fußzeile. Seit N14 (B4) im ViewModel
+    // (`bulkSaveError`), damit ⌘S ihn ebenfalls zeigt.
 
     private var rows: [BulkRow] {
         viewModel.bulkInputs.enumerated().map { BulkRow(index: $0.offset, url: $0.element) }
@@ -988,9 +1016,22 @@ private struct BulkStage: View {
             // B4: „Eigene“ im Stapel – dieselbe Einstellfläche wie im Einzelweg.
             if viewModel.mode == .custom, !viewModel.isWorking {
                 DisclosureGroup("Einstellungen für „Eigene“", isExpanded: $showsCustom) {
-                    CustomSettingsPanel(viewModel: viewModel)
-                        .frame(maxWidth: 520, alignment: .leading)
-                        .padding(.top, 8)
+                    VStack(alignment: .leading, spacing: 10) {
+                        CustomSettingsPanel(viewModel: viewModel)
+                            .frame(maxWidth: 520, alignment: .leading)
+                        // N14 (B4): Start erst auf Wunsch – auch nach
+                        // geänderten Einstellungen. Neu starten verwirft
+                        // ungesicherte Ergebnisse, deshalb über DiscardGuard.
+                        if viewModel.bulkNeedsCustomStart {
+                            Button("Mit diesen Einstellungen komprimieren") {
+                                discardGuard.run(ifUnsaved: viewModel.hasUnsavedResult) {
+                                    viewModel.startBulkWithCurrentSettings()
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                    }
+                    .padding(.top, 8)
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 10)
@@ -1049,11 +1090,35 @@ private struct BulkStage: View {
                 .padding(.vertical, 14)
         }
         .dropTargetOverlay(isTargeted)
-        .alert("Sichern fehlgeschlagen", isPresented: Binding(
-            get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
+        .alert("Passwort eingeben", isPresented: Binding(
+            get: { unlockTarget != nil }, set: { if !$0 { unlockTarget = nil } })) {
+            SecureField("Passwort", text: $unlockPassword)
+            Button("Entsperren") {
+                guard let url = unlockTarget else { return }
+                let password = unlockPassword
+                unlockPassword = ""
+                Task {
+                    if let error = await viewModel.unlockBulkFile(url, password: password) {
+                        unlockError = error
+                    }
+                }
+            }
+            Button("Abbrechen", role: .cancel) { unlockPassword = "" }
+        } message: {
+            Text(unlockTarget?.lastPathComponent ?? "")
+        }
+        .alert("Entsperren fehlgeschlagen", isPresented: Binding(
+            get: { unlockError != nil }, set: { if !$0 { unlockError = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(saveError ?? "")
+            Text(unlockError ?? "")
+        }
+        .alert("Sichern fehlgeschlagen", isPresented: Binding(
+            get: { viewModel.bulkSaveError != nil },
+            set: { if !$0 { viewModel.bulkSaveError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(viewModel.bulkSaveError ?? "")
         }
     }
 
@@ -1107,10 +1172,20 @@ private struct BulkStage: View {
                 .monospacedDigit()
         } else if let verdict = viewModel.bulkVerdicts[url], !verdict.isOK {
             // Vorprüfung (B1): Grund sofort, nicht „…“ – die Datei läuft nicht mit.
-            Label(verdict.shortLabel,
-                  systemImage: verdict == .locked ? "lock" : "exclamationmark.triangle")
-                .foregroundStyle(.secondary)
-                .help(verdict.title + " " + verdict.detail)
+            HStack(spacing: 8) {
+                Label(verdict.shortLabel,
+                      systemImage: verdict == .locked ? "lock" : "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+                    .help(verdict.title + " " + verdict.detail)
+                // N14 (B2): Wie im Einzelweg entsperren statt nur ablehnen.
+                if verdict == .locked, !viewModel.isWorking {
+                    Button("Entsperren …") {
+                        unlockPassword = ""
+                        unlockTarget = url
+                    }
+                    .buttonStyle(.link)
+                }
+            }
         } else if viewModel.bulkCancelledURLs.contains(url) {
             Text("Abgebrochen").foregroundStyle(.secondary)
         } else if let message = viewModel.bulkErrors[url] {
@@ -1234,13 +1309,13 @@ private struct BulkStage: View {
         viewModel.saveBulkResult(for: url)
         if !viewModel.isBulkResultSaved(for: url), let error = viewModel.errorMessage {
             viewModel.errorMessage = nil
-            saveError = error
+            viewModel.bulkSaveError = error
         }
     }
 
     private func chooseFolderAndSave() {
         // Teilerfolge stehen in bulkSavedURLs; der Fehler nennt den Rest.
-        if let error = viewModel.saveAllBulkWithPanel() { saveError = error }
+        viewModel.saveAllBulkWithPanel()
     }
 }
 
@@ -1278,7 +1353,7 @@ private struct ModeSegments: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    final class Coordinator: NSObject {
+    @MainActor final class Coordinator: NSObject {
         var parent: ModeSegments
         init(_ parent: ModeSegments) { self.parent = parent }
 

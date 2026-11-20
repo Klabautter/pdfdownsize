@@ -78,7 +78,7 @@ enum PageImageExporter {
     @concurrent nonisolated static func export(pages: [PageItem],
                                    options: Options,
                                    to folder: URL,
-                                   progress: @escaping (Double) -> Void) async throws -> [URL] {
+                                   progress: @escaping @Sendable (Double) -> Void) async throws -> [URL] {
         guard !pages.isEmpty else { return [] }
 
         let fm = FileManager.default
@@ -143,6 +143,10 @@ enum PageImageExporter {
                                                                  rotation: page.rotation)
                 let pixels = pixelSize(pageBounds: CGRect(origin: .zero, size: rotatedSize),
                                        dpi: options.dpi)
+                // N14 (D6): Deckel VOR dem Rastern – vorher rasterte
+                // `thumbnail` die Posterseite erst voll und `encode` lehnte
+                // danach ab.
+                try checkPixelCap(pixels)
                 let nsImage = page.thumbnail(of: pixels, for: .cropBox)
 
                 let data = try encode(nsImage,
@@ -193,12 +197,16 @@ enum PageImageExporter {
     /// mehr Speicher, als ein Mac für eine Seite hergeben sollte.
     nonisolated static let maximumExportPixels = 100_000_000
 
-    private nonisolated static func encode(_ image: NSImage,
-                                           pixels: CGSize,
-                                           options: Options) throws -> Data {
+    nonisolated static func checkPixelCap(_ pixels: CGSize) throws {
         guard pixels.width * pixels.height <= CGFloat(maximumExportPixels) else {
             throw MergeError.pageTooLarge(Int((pixels.width * pixels.height / 1_000_000).rounded()))
         }
+    }
+
+    private nonisolated static func encode(_ image: NSImage,
+                                           pixels: CGSize,
+                                           options: Options) throws -> Data {
+        try checkPixelCap(pixels)
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
             pixelsWide: Int(max(1, pixels.width)),

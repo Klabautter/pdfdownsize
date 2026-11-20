@@ -51,7 +51,7 @@ struct OCRView: View {
                 onForeignFiles(images)
                 return true
             }
-            discardGuard.run(ifUnsaved: vm.hasUnsavedResult) { vm.accept(urls) }
+            discardGuard.runAfterProbe(urls, ifUnsaved: vm.hasUnsavedResult) { vm.accept(urls) }
             return true
         } isTargeted: { targeted in
             isTargeted = targeted
@@ -87,7 +87,7 @@ struct OCRView: View {
                       allowedContentTypes: [.pdf],
                       allowsMultipleSelection: false) { result in
             if case .success(let urls) = result {
-                discardGuard.run(ifUnsaved: vm.hasUnsavedResult) { vm.accept(urls) }
+                discardGuard.runAfterProbe(urls, ifUnsaved: vm.hasUnsavedResult) { vm.accept(urls) }
             }
         }
     }
@@ -503,7 +503,7 @@ struct OCRTextColumn: NSViewRepresentable {
             self.parent = parent
         }
 
-        deinit {
+        isolated deinit {
             if let observer { NotificationCenter.default.removeObserver(observer) }
         }
 

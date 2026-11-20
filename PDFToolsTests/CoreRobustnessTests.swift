@@ -316,10 +316,120 @@ import Compression
         let source = SourceDocument(url: url, pageCount: 1)
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("d6-export-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: folder) }
+        let start = ContinuousClock.now
         await #expect(throws: MergeError.self) {
             _ = try await PageImageExporter.export(pages: [PageItem(source: source, pageIndex: 0)],
                                                    options: .init(format: .png, dpi: 300),
                                                    to: folder, progress: { _ in })
         }
+        // N14 (D6): Abgelehnt wird vor dem Rastern (625 MP), nicht danach.
+        #expect(ContinuousClock.now - start < .seconds(2))
+    }
+
+    // MARK: N14 – Reste aus D1 und D2
+
+    /// D1: Formen, die die nächste Form dreimal enthalten, 14 Ebenen tief
+    /// (unter der Tiefengrenze 16). Ohne Merkliste lief die Bildsuche 3^14
+    /// Pfade ab; mit ihr endet sie sofort und findet das Bild.
+    @Test(.timeLimit(.minutes(1))) func verschachtelteFormenLaufenNichtExponentiell() throws {
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let image = b.addStream(dictionary: "/Type/XObject/Subtype/Image/Width 1/Height 1"
+                                + "/BitsPerComponent 8/ColorSpace/DeviceGray", data: Data([0]))
+        var inner = b.addStream(dictionary: "/Type/XObject/Subtype/Form/BBox[0 0 10 10]"
+                                + "/Resources<</XObject<</Im \(image) 0 R>>>>",
+                                content: "/Im Do")
+        for _ in 0..<14 {
+            inner = b.addStream(dictionary: "/Type/XObject/Subtype/Form/BBox[0 0 10 10]"
+                                + "/Resources<</XObject<</A \(inner) 0 R/B \(inner) 0 R/C \(inner) 0 R>>>>",
+                                content: "/A Do /B Do /C Do")
+        }
+        let content = b.addStream(dictionary: "", content: "/F Do")
+        let page = b.addPage(parent: pages, resources: "<</XObject<</F \(inner) 0 R>>>>", contents: content)
+        b.fill(pages, "<</Type/Pages/Kids[\(page) 0 R]/Count 1>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R>>")
+        let url = try CoreRobustnessTests.write(b, root: root, "n14-d1-forms")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let start = ContinuousClock.now
+        let images = try PDFCoreDocument(path: url.path).imageResources()
+        let elapsed = ContinuousClock.now - start
+        #expect(images.count == 1)
+        #expect(elapsed < .seconds(3), "Bildsuche dauerte \(elapsed)")
+    }
+
+    /// D1: Feldwert, dessen Array dasselbe Unterarray dreimal enthält, 20
+    /// Ebenen tief – die Feldliste endet sofort statt 3^16 Teilstücke zu bauen.
+    @Test(.timeLimit(.minutes(1))) func verschachtelterFeldwertLaeuftNichtExponentiell() throws {
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        var value = b.addObject("[(x)]")
+        for _ in 0..<20 { value = b.addObject("[\(value) 0 R \(value) 0 R \(value) 0 R]") }
+        let field = b.addObject("<</FT/Ch/T(Liste)/V \(value) 0 R>>")
+        let page = b.addPage(parent: pages)
+        b.fill(pages, "<</Type/Pages/Kids[\(page) 0 R]/Count 1>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R/AcroForm<</Fields[\(field) 0 R]>>>>")
+        let url = try CoreRobustnessTests.write(b, root: root, "n14-d1-field")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let rows = try PDFCoreDocument(path: url.path).stringList(.formFields)
+        #expect(rows.count == 1)
+        #expect(rows.first.map { $0.utf8.count < 70_000 } ?? false)
+    }
+
+    /// D2: Ein Inline-Bild nennt einen benannten Farbraum (`/CS /Cs1`). Die
+    /// Bereinigung übersprang den Kopf und entfernte /Cs1 – das Bild verlor
+    /// seine Farben. Ein wirklich unbenutzter Eintrag geht weiter.
+    @Test func farbraumEinesInlineBildsBleibt() throws {
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let content = b.addStream(dictionary: "",
+                                  content: "q 100 0 0 100 0 0 cm BI /W 1 /H 1 /BPC 8 /CS /Cs1 ID \u{1}\u{2}\u{3} EI Q")
+        let cal = "[/CalRGB<</WhitePoint[0.9505 1 1.089]>>]"
+        let page = b.addPage(parent: pages,
+                             resources: "<</ColorSpace<</Cs1 \(cal)/Unused \(cal)>>>>",
+                             contents: content)
+        b.fill(pages, "<</Type/Pages/Kids[\(page) 0 R]/Count 1>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R>>")
+        let url = try CoreRobustnessTests.write(b, root: root, "n14-d2-inline-cs")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let doc = try PDFCoreDocument(path: url.path)
+        _ = try doc.removeUnusedResources()
+        let out = PDFFixtures.fixtureURL(prefix: "n14-d2-inline-cs-out")
+        defer { try? FileManager.default.removeItem(at: out) }
+        try doc.save(to: out)
+        let text = try CoreRobustnessTests.qdf(out)
+        #expect(!text.contains("/Unused"), "Bereinigung lief nicht – Test prüft nichts")
+        #expect(text.contains("/Cs1"), "Farbraum des Inline-Bilds wurde entfernt")
+    }
+
+    /// D2: Der Glyphen-Scanner des Schrift-Subsettings kannte `BI … EI` nicht.
+    /// Lässt sich ein Inline-Bild nicht sicher überspringen, darf die Schrift
+    /// nicht subsettet werden – dahinter stehender Text wäre ungelesen.
+    @Test func schriftHinterUnlesbaremInlineBildBleibtGanz() throws {
+        guard let fontData = PDFFixtures.systemTrueTypeFontBytes else { return }
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let fontFile = b.addStream(dictionary: "/Length1 \(fontData.count)", data: fontData)
+        let descriptor = b.addObject("<</Type/FontDescriptor/FontName/ABCDEF+FixtureFont/Flags 32"
+            + "/FontBBox[0 0 1000 1000]/ItalicAngle 0/Ascent 800/Descent -200/CapHeight 700"
+            + "/StemV 80/FontFile2 \(fontFile) 0 R>>")
+        let widths = Array(repeating: "700", count: 26).joined(separator: " ")
+        let font = b.addObject("<</Type/Font/Subtype/TrueType/BaseFont/ABCDEF+FixtureFont"
+            + "/FirstChar 65/LastChar 90/Widths[\(widths)]/Encoding/WinAnsiEncoding"
+            + "/FontDescriptor \(descriptor) 0 R>>")
+        // Wie `ungelesenerRestSchuetztRessourcen`: kein plausibles EI, danach Text.
+        var bytes = Data("BT /F1 12 Tf 10 10 Td (A) Tj ET q BI /W 2 /H 2 /BPC 8 /CS /G ID ".utf8)
+        bytes.append(Data([0x28, 0x80, 0xC0, 0xFF]))   // „(“ in den Binärdaten
+        bytes.append(Data(" EI Q %".utf8))
+        bytes.append(Data([0xC4]))
+        bytes.append(Data("rger\nBT /F1 12 Tf 50 50 Td (Z) Tj ET".utf8))
+        let content = b.addStream(dictionary: "", data: bytes)
+        let page = b.addPage(parent: pages, resources: "<</Font<</F1 \(font) 0 R>>>>", contents: content)
+        b.fill(pages, "<</Type/Pages/Kids[\(page) 0 R]/Count 1>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R>>")
+        let url = try b.write(rootObject: root, prefix: "n14-d2-font-inline")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let candidates = try PDFCoreDocument(path: url.path).fontSubsetCandidates()
+        let entry = try #require(candidates.first { $0.objectID.objectNumber == font })
+        #expect(entry.reason == .unscannableContent, "Schrift wäre trotz ungelesenem Rest subsettet worden: \(entry.reason)")
     }
 }

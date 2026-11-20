@@ -160,7 +160,7 @@ final class OCRViewModel: ObservableObject {
     }
 
     /// Angezeigte Treffer höchstens – große Dokumente fluten sonst die Liste.
-    static let maximumSearchHits = 200
+    nonisolated static let maximumSearchHits = 200
 
     /// Treffer (höchstens `maximumSearchHits`) und Gesamtzahl – einmal je
     /// Suchbegriff/Ergebnis berechnet, nicht bei jeder Darstellung.
@@ -415,8 +415,8 @@ final class OCRViewModel: ObservableObject {
                     self.pageCount = pages
                     self.stage = .ready
                     self.startSurvey(source: url, reading: unlocked.workingCopy)
-                case .failure:
-                    self.passwordError = String(localized: "Das Passwort stimmt nicht.")
+                case .failure(let error):
+                    self.passwordError = UnlockedDocument.failureMessage(for: error)
                 }
             }
         }
@@ -482,7 +482,10 @@ final class OCRViewModel: ObservableObject {
                 if isWorking { stage = .ready }
             }
             do {
-                let total = PDFDocument(url: url)?.pageCount ?? 0
+                // N14 (C6): Seitenzahl abseits des Main Threads.
+                let total = await Task.detached(priority: .userInitiated) {
+                    PDFDocument(url: url)?.pageCount ?? 0
+                }.value
                 let output = try await OCREngine.run(
                     sourceURL: url, languages: languages,
                     preparing: { active in
@@ -584,7 +587,7 @@ final class OCRViewModel: ObservableObject {
     }
 
     func saveOutcome() {
-        guard canSaveSearchablePDF, let temp = outputURL else { return }
+        guard canSaveSearchablePDF, outputURL != nil else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         let base = (pdfURL?.deletingPathExtension().lastPathComponent).map { $0 + "_" + String(localized: "durchsuchbar", comment: "Dateisuffix") }

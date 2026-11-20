@@ -31,7 +31,8 @@ enum CompressionConcurrency {
     }
 
     private static let limitLock = NSLock()
-    private static var overrideLimit: Int?
+    /// Hinter `limitLock` (G6: deshalb `nonisolated(unsafe)`).
+    nonisolated(unsafe) private static var overrideLimit: Int?
 
     /// Aktives Limit gleichzeitig komprimierter Dokumente (≥ 1).
     static var maxConcurrentDocuments: Int {
@@ -93,8 +94,8 @@ enum CompressionConcurrency {
     static func compressDocuments(inputURLs: [URL],
                                   mode: CompressionMode = .smart,
                                   limit: Int? = nil,
-                                  isCancelled: (() -> Bool)? = nil,
-                                  onDocumentProgress: ((Int, URL, Double, String) -> Void)? = nil) async throws -> [CompressionResult] {
+                                  isCancelled: (@Sendable () -> Bool)? = nil,
+                                  onDocumentProgress: (@Sendable (Int, URL, Double, String) -> Void)? = nil) async throws -> [CompressionResult] {
         var results = [CompressionResult?](repeating: nil, count: inputURLs.count)
         var iterator = inputURLs.enumerated().makeIterator()
         let maxInFlight = max(1, limit ?? maxConcurrentDocuments)
@@ -143,9 +144,9 @@ enum CompressionConcurrency {
     static func compressDocumentsCollecting(inputURLs: [URL],
                                             options: CompressionOptions,
                                             limit: Int? = nil,
-                                            isCancelled: (() -> Bool)? = nil,
-                                            isCancelledFor: ((Int, URL) -> Bool)? = nil,
-                                            onDocumentProgress: ((Int, URL, Double, String) -> Void)? = nil) async throws -> [Result<CompressionResult, Error>] {
+                                            isCancelled: (@Sendable () -> Bool)? = nil,
+                                            isCancelledFor: (@Sendable (Int, URL) -> Bool)? = nil,
+                                            onDocumentProgress: (@Sendable (Int, URL, Double, String) -> Void)? = nil) async throws -> [Result<CompressionResult, Error>] {
         var results = [Result<CompressionResult, Error>?](repeating: nil, count: inputURLs.count)
         var iterator = inputURLs.enumerated().makeIterator()
         let maxInFlight = max(1, limit ?? maxConcurrentDocuments)
@@ -181,11 +182,11 @@ enum CompressionConcurrency {
     /// je Datei (Fehler, Einzelabbruch) als `Result` – nur so laufen die
     /// übrigen Dokumente weiter.
     private static func collectOne(_ url: URL, index: Int, options: CompressionOptions,
-                                   isCancelled: (() -> Bool)?,
-                                   isCancelledFor: ((Int, URL) -> Bool)?,
-                                   onProgress: ((Int, URL, Double, String) -> Void)?) -> Result<CompressionResult, Error> {
+                                   isCancelled: (@Sendable () -> Bool)?,
+                                   isCancelledFor: (@Sendable (Int, URL) -> Bool)?,
+                                   onProgress: (@Sendable (Int, URL, Double, String) -> Void)?) -> Result<CompressionResult, Error> {
         do {
-            let combined: () -> Bool = {
+            let combined: @Sendable () -> Bool = {
                 (isCancelled?() ?? false) || (isCancelledFor?(index, url) ?? false) || Task.isCancelled
             }
             return try .success(autoreleasepool {
@@ -201,8 +202,8 @@ enum CompressionConcurrency {
     }
 
     private static func compressOne(_ url: URL, index: Int, mode: CompressionMode,
-                                    isCancelled: (() -> Bool)?,
-                                    onProgress: ((Int, URL, Double, String) -> Void)?) throws -> CompressionResult {
+                                    isCancelled: (@Sendable () -> Bool)?,
+                                    onProgress: (@Sendable (Int, URL, Double, String) -> Void)?) throws -> CompressionResult {
         try autoreleasepool {
             try Compressor().compress(inputURL: url, mode: mode,
                                       isCancelled: isCancelled,

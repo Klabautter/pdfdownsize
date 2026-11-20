@@ -142,17 +142,6 @@ int pdfcore_named_destination_count(pdfcore_document_t *doc);
 /// Embedded-Files-Einträge im Names-Baum. -1=Fehler.
 int pdfcore_attachment_count(pdfcore_document_t *doc);
 
-/// Masterplan A4: Bytes des ICCBased-Profils eines Bildes (auch als Basis
-/// von /Indexed). Puffer mit free() freigeben. CHECK_FAILED = kein Profil.
-int pdfcore_get_image_icc_profile(pdfcore_document_t *doc, int obj, int gen,
-                                  unsigned char **out, size_t *out_len);
-
-/// Masterplan A4: Markiert ein ersetztes Bild, dessen Pixel nach sRGB
-/// umgerechnet wurden, als [/ICCBased <sRGB>] (bei /Indexed: die Basis).
-/// Das Profil liegt einmal je Dokument. CHECK_FAILED = kein RGB-Bild.
-int pdfcore_tag_image_srgb(pdfcore_document_t *doc, int obj, int gen,
-                           const unsigned char *icc, size_t icc_len);
-
 /// Masterplan E4: PDF/A-Teil laut XMP (pdfaid:part), 0 = keine Behauptung.
 int pdfcore_pdfa_part(pdfcore_document_t *doc);
 
@@ -1179,6 +1168,8 @@ typedef struct pdfcore_mrc_layer {
     const unsigned char *globals;
     size_t globals_len;
     double rect[4];   /* x0, y0, x1, y1 – Bildpixelraum, oben-links */
+    int has_fill;     /* A2 Stufe 2: 1 = Maske in `fill` malen, 0 = schwarz */
+    double fill[3];   /* DeviceRGB 0…1, nur für is_mask */
 } pdfcore_mrc_layer_t;
 
 int pdfcore_replace_page_image_draw_with_layers(

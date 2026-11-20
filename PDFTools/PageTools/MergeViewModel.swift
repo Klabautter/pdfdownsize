@@ -71,6 +71,31 @@ final class MergeViewModel: ObservableObject {
         let outputBytes: Int64
         let combinedInputBytes: Int64
         let kind: OutcomeKind
+        /// Masterplan N10: Stammen alle Seiten aus EINER entsperrten Quelle,
+        /// geht das Ergebnis mit deren Passwort zurück – beim Sichern und bei
+        /// der Übergabe an Komprimieren. Hängt am Ergebnis, nicht am Projekt:
+        /// Eine Auswahl aus der geschützten Quelle eines Mehr-Quellen-
+        /// Projekts blieb vorher Klartext.
+        var encryption: UnlockedDocument? = nil
+        /// N1-Rest: Hinweis, wenn eine einzelne Quelle neu aufgebaut werden
+        /// musste und dabei Katalogeinträge (Tags, Anhänge …) wegfielen.
+        var rebuildNotice: String? = nil
+    }
+
+    /// Der Verschlüsselungs-Kontext für Seiten (N10): eine einzige,
+    /// entsperrte Quelle, sonst keiner. Bei mehreren Quellen nennt der
+    /// Hinweis vor „PDF erstellen“ den Verlust (E2).
+    func encryption(for pages: [PageItem]) -> UnlockedDocument? {
+        let sources = Set(pages.map(\.sourceURL))
+        guard sources.count == 1, let only = sources.first else { return nil }
+        return unlockedSources[only]
+    }
+
+    /// Übergabe an ein anderes Werkzeug: die Datei und, wenn sie geschützt
+    /// ist, das Passwort zum Entsperren (nur im Speicher).
+    struct Handoff {
+        let url: URL
+        let password: String?
     }
 
     /// Ergebnis von Zusammenführen/Extrahieren. Früher zwei Optionals
@@ -271,8 +296,8 @@ final class MergeViewModel: ObservableObject {
                         p.documents.append(source)
                         p.pages.append(contentsOf: (0..<pages).map { PageItem(source: source, pageIndex: $0) })
                     }
-                case .failure:
-                    self.passwordError = String(localized: "Das Passwort stimmt nicht.")
+                case .failure(let error):
+                    self.passwordError = UnlockedDocument.failureMessage(for: error)
                 }
             }
         }
@@ -565,15 +590,16 @@ final class MergeViewModel: ObservableObject {
         errorMessage = nil
 
         let inputBytes = combinedInputBytes ?? project.totalSourceBytes
+        let encryption = encryption(for: pages)
         let runID = UUID()
         activeRunID = runID
 
         workTask = Task { @MainActor in
             defer { activity = .idle }
             do {
-                let tempURL = FileManager.default.temporaryDirectory
-                    .appendingPathComponent(UUID().uuidString)
-                    .appendingPathExtension("pdf")
+                // N10: Im Sitzungsordner, nicht im Temp-Stamm – er verschwindet
+                // beim Beenden samt Klartext einer entsperrten Quelle.
+                let tempURL = SessionScratch.makeURL(prefix: "organize-")
 
                 // Befund B11: Abbrechen greift in der Bridge zwischen den
                 // Seiten und während des Schreibens – `assemble` wirft dann
@@ -582,7 +608,7 @@ final class MergeViewModel: ObservableObject {
                 // dem Arbeits-Thread (dort gilt der Task dieses Laufs) und
                 // noch einmal auf dem Main Actor über die Laufkennung, damit
                 // eine verspätete Meldung keinen beendeten Lauf übermalt.
-                try await PageAssemblyService.assemble(pages: pages, to: tempURL) { fraction in
+                let assembly = try await PageAssemblyService.assemble(pages: pages, to: tempURL) { fraction in
                     guard !Task.isCancelled else { return }
                     Task { @MainActor in
                         guard self.isProcessing, self.activeRunID == runID else { return }
@@ -592,8 +618,12 @@ final class MergeViewModel: ObservableObject {
                 }
                 try Task.checkCancellation()
 
-                guard let outDoc = PDFDocument(url: tempURL),
-                      outDoc.pageCount == pages.count else {
+                // N14 (C6): Seitenzahl abseits des Main Threads prüfen.
+                let written = tempURL
+                let outPages = await Task.detached(priority: .userInitiated) {
+                    PDFDocument(url: written)?.pageCount
+                }.value
+                guard outPages == pages.count else {
                     try? FileManager.default.removeItem(at: tempURL)
                     throw MergeError.validationFailed
                 }
@@ -611,12 +641,22 @@ final class MergeViewModel: ObservableObject {
                     throw MergeError.validationFailed
                 }
 
+                var rebuildNotice: String?
+                if assembly.rebuiltSingleSource, let source = pages.first?.sourceURL {
+                    let shownName = encryption?.original.lastPathComponent
+                    let losses = await Task.detached(priority: .userInitiated) {
+                        MergeLossSummary.rebuildLosses(for: source, displayName: shownName)
+                    }.value
+                    rebuildNotice = MergeLossSummary.rebuildSentence(for: losses)
+                }
                 progress = 1
                 outcomeState = .unsaved(MergeOutcome(url: tempURL,
                                                      pageCount: pages.count,
                                                      outputBytes: Self.fileSize(tempURL),
                                                      combinedInputBytes: inputBytes,
-                                                     kind: kind))
+                                                     kind: kind,
+                                                     encryption: encryption,
+                                                     rebuildNotice: rebuildNotice))
             } catch is CancellationError {
                 errorMessage = nil
             } catch {
@@ -675,8 +715,7 @@ final class MergeViewModel: ObservableObject {
                 // Temp-Workspace schreiben, validieren, und NUR bei PASS in
                 // den Zielordner verschieben. Vorher landete jeder Teil
                 // ungeprüft direkt beim Nutzer.
-                let staging = fm.temporaryDirectory
-                    .appendingPathComponent("split-\(UUID().uuidString).pdf")
+                let staging = SessionScratch.makeURL(prefix: "split-")
                 defer { try? fm.removeItem(at: staging) }
 
                 // Befund B11: Abbruch greift innerhalb eines Teils; der
@@ -698,7 +737,19 @@ final class MergeViewModel: ObservableObject {
                     throw MergeError.validationFailed
                 }
 
-                try fm.moveItem(at: staging, to: dest)
+                // Masterplan N10: Ein Teil aus einer entsperrten Quelle geht
+                // mit ihrem Passwort hinaus – vorher Klartext ohne Hinweis.
+                var payload = staging
+                if let encryption = encryption(for: chunk) {
+                    payload = SessionScratch.makeURL(prefix: "split-locked-")
+                    try encryption.reencrypt(staging, to: payload)
+                }
+                do {
+                    try fm.moveItem(at: payload, to: dest)
+                } catch {
+                    if payload != staging { try? fm.removeItem(at: payload) }
+                    throw error
+                }
                 written.append(dest)
             }
             progress = 1
@@ -742,15 +793,23 @@ final class MergeViewModel: ObservableObject {
     /// ordner, damit „Zurück zu den Seiten" das Original-Ergebnis löschen
     /// darf, ohne dem Empfänger die Datei wegzuziehen. Dateiname nach dem
     /// Vorgang, damit der Empfänger einen sprechenden Namen zeigt.
-    func handOffOutcome(_ outcome: MergeOutcome) -> URL? {
+    ///
+    /// Masterplan N10: Ein Ergebnis aus einer entsperrten Quelle geht
+    /// verschlüsselt hinüber, das Passwort daneben – Komprimieren entsperrt
+    /// damit selbst und sichert wieder geschützt. Vorher bekam es den Klartext.
+    func handOffOutcome(_ outcome: MergeOutcome) -> Handoff? {
         let base = (suggestedFileName(for: outcome) as NSString).deletingPathExtension
         let dest = SessionScratch.directory
             .appendingPathComponent("handoff-\(UUID().uuidString)", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
             let file = dest.appendingPathComponent(base).appendingPathExtension("pdf")
+            if let encryption = outcome.encryption {
+                try encryption.reencrypt(outcome.url, to: file)
+                return Handoff(url: file, password: encryption.password)
+            }
             try FileManager.default.copyItem(at: outcome.url, to: file)
-            return file
+            return Handoff(url: file, password: nil)
         } catch {
             errorMessage = error.localizedDescription
             return nil
@@ -768,7 +827,7 @@ final class MergeViewModel: ObservableObject {
 
         let url = current.url
         let kind = current.kind
-        let engine = Task.detached(priority: .userInitiated) {
+        let engine = Task.detached(priority: .userInitiated) { [weak self] in
             try Compressor().compress(
                 inputURL: url,
                 mode: .smart,
@@ -810,7 +869,9 @@ final class MergeViewModel: ObservableObject {
                                                      pageCount: current.pageCount,
                                                      outputBytes: result.outputBytes,
                                                      combinedInputBytes: current.combinedInputBytes,
-                                                     kind: kind))
+                                                     kind: kind,
+                                                     encryption: current.encryption,
+                                                     rebuildNotice: current.rebuildNotice))
             } catch is CancellationError {
                 errorMessage = nil
             } catch {
@@ -872,14 +933,12 @@ final class MergeViewModel: ObservableObject {
         // über das Original einer entsperrten Quelle.
         try SourceOverwrite.check(dest, sources: project.documents.map(\.url)
                                   + unlockedSources.values.map(\.original))
-        // B2: Stammt alles aus EINER entsperrten Quelle, geht das Ergebnis
-        // mit ihrem Passwort zurück. Bei mehreren Quellen nennt der Hinweis
-        // vor „PDF erstellen" den Verlust (E2).
+        // B2/N10: Stammt das Ergebnis aus EINER entsperrten Quelle, geht es
+        // mit ihrem Passwort zurück (Kontext am Ergebnis, nicht am Projekt).
         var payload = outcome.url
-        let sources = Set(project.pages.map(\.sourceURL))
-        if sources.count == 1, let only = sources.first, let unlocked = unlockedSources[only] {
+        if let encryption = outcome.encryption {
             payload = SessionScratch.makeURL(prefix: "locked-")
-            try unlocked.reencrypt(outcome.url, to: payload)
+            try encryption.reencrypt(outcome.url, to: payload)
         }
         if FileManager.default.fileExists(atPath: dest.path) {
             _ = try FileManager.default.replaceItemAt(dest, withItemAt: payload)

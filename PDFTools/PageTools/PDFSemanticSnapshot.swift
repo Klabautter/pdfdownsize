@@ -325,7 +325,7 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
     }
 
     /// Eine Seite erfassen (Text, Annotationen, Boxen).
-    private static func collectPage(_ doc: PDFDocument, index i: Int, into part: inout PagePart,
+    static func collectPage(_ doc: PDFDocument, index i: Int, into part: inout PagePart,
                                     onPage: PageProgress? = nil) {
             onPage?(true, i)
             defer { onPage?(false, i) }

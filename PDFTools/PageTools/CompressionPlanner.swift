@@ -14,7 +14,8 @@ import ImageIO
 /// in die bestehenden ImageCompressionActions übersetzt. Der frühere
 /// Einzelbild-Entscheidungscode (decide + planJPEG-Leiter) ist nach der
 /// V2-Zertifizierung entfernt (§25).
-protocol ImagePixelSource {
+/// Sendable (G6): Planner, MRC und Executor rufen sie aus parallelen Jobs.
+protocol ImagePixelSource: Sendable {
     /// Dekodierte Pixel eines Bildobjekts. `nil` heißt: nicht dekodierbar –
     /// dann bleibt das Bild unangetastet, es wird KEIN Ersatz erfunden.
     func decodedImage(for resource: PDFImageResource) -> CGImage?
@@ -166,7 +167,7 @@ enum CompressionPlanner {
                      documentID: String,
                      documentBytes: Int,
                      pixels: ImagePixelSource,
-                     isCancelled: (() -> Bool)? = nil,
+                     isCancelled: (@Sendable () -> Bool)? = nil,
                      stageTimer: StageTimer? = nil,
                      overrides: DecisionOverrides = DecisionOverrides(),
                      store: CandidateStore? = nil,
@@ -209,7 +210,7 @@ enum CompressionPlanner {
                                           documentID: String,
                                           documentBytes: Int,
                                           pixels: ImagePixelSource,
-                                          isCancelled: (() -> Bool)?,
+                                          isCancelled: (@Sendable () -> Bool)?,
                                           stageTimer: StageTimer?,
                                           overrides: DecisionOverrides,
                                           store externalStore: CandidateStore? = nil,
@@ -600,7 +601,7 @@ enum CompressionPlanner {
                                                  store: CandidateStore,
                                                  mrcByResource: [String: [PreparedMRCCandidate]],
                                                  pageContext: [Int: PageAnalysis],
-                                                 isCancelled: (() -> Bool)?,
+                                                 isCancelled: (@Sendable () -> Bool)?,
                                                  stageTimer: StageTimer?,
                                                  allowsQuantizedPalette: Bool = false,
                                                  workProgress: WorkProgressLedger? = nil,
@@ -615,8 +616,8 @@ enum CompressionPlanner {
         let imageOptions = options.image
         let classifierPolicy = options.classifierPolicy
 
-        func generate(_ resource: PDFImageResource,
-                      mrcCandidates: [PreparedMRCCandidate])
+        @Sendable func generate(_ resource: PDFImageResource,
+                                mrcCandidates: [PreparedMRCCandidate])
             -> CandidateGenerator.Generated {
             CandidateGenerator.generate(resource: resource,
                                         options: imageOptions,
@@ -637,6 +638,10 @@ enum CompressionPlanner {
         // bisher; die 8 Ergebnisse werden nicht neu gerechnet.
         var precomputed: [Int: CandidateGenerator.Generated] = [:]
         var keepOnly: [Int: KeepReason] = [:]
+        // N14 (C3): Papier-Kennzeichen der Stichprobe für die übrigen
+        // Gruppenmitglieder. Ohne es fiel für sie die MRC-Regel (H1) anders
+        // aus als für die acht geprüften Seiten derselben Gruppe.
+        var groupDocumentScan: [Int: Bool] = [:]
         let groups = Dictionary(grouping: resources.indices) { index -> String in
             let r = resources[index]
             return "\(r.width)x\(r.height)/\(r.bitsPerComponent)/\(r.filters)/\(r.colorSpace)"
@@ -661,15 +666,19 @@ enum CompressionPlanner {
             let projected = Double(sampledOriginal - sampledBest)
                 * Double(members.count) / Double(picks.count)
             guard denominator > 0, projected / Double(denominator) < Self.sampleMinimumGain else { continue }
+            let scan = picks.contains { precomputed[$0]?.documentScan == true }
             for member in members where precomputed[member] == nil {
                 keepOnly[member] = .sampledNoGain(sampled: picks.count, groupSize: members.count)
+                groupDocumentScan[member] = scan
             }
         }
         func entry(_ index: Int) -> CandidateGenerator.Generated? {
             if let done = precomputed[index] { return done }
             if let reason = keepOnly[index] {
-                return CandidateGenerator.keepOnly(resource: resources[index], options: imageOptions,
-                                                   pixels: pixels, store: store, reason: reason)
+                var kept = CandidateGenerator.keepOnly(resource: resources[index], options: imageOptions,
+                                                       pixels: pixels, store: store, reason: reason)
+                kept.documentScan = groupDocumentScan[index] ?? false
+                return kept
             }
             return nil
         }
@@ -700,8 +709,9 @@ enum CompressionPlanner {
         let slots = DispatchSemaphore(value: PixelWorkScheduler.maximumActiveJobs)
         let group = DispatchGroup()
         let lock = NSLock()
-        var caught: Error?
-        var results = [(resource: PDFImageResource,
+        // Hinter `lock` (G6: deshalb `nonisolated(unsafe)`, wie ParallelWork).
+        nonisolated(unsafe) var caught: Error?
+        nonisolated(unsafe) var results = [(resource: PDFImageResource,
                         generated: CandidateGenerator.Generated)?](
             repeating: nil, count: resources.count)
 
@@ -1224,7 +1234,9 @@ enum ImageResampler {
         init(components: Int) { self.components = components }
     }
 
-    private static let flatBitmapKey = UnsafeRawPointer(
+    // Nur Identität (Schlüssel für objc_setAssociatedObject), nie gelesen
+    // oder beschrieben – deshalb `nonisolated(unsafe)` (G6).
+    nonisolated(unsafe) private static let flatBitmapKey = UnsafeRawPointer(
         UnsafeMutablePointer<UInt8>.allocate(capacity: 1))
 
     /// Ist `image` ein von `drawResize` erzeugtes Bitmap dieser Komponentenzahl?
@@ -1328,11 +1340,11 @@ enum ImageResampler {
     /// harter Grenze: Die Maße stammen aus dem JPEG-Kopf, bevor ein Pixel
     /// dekodiert ist. So zählt nicht, was das Bilddictionary behauptet.
     /// Ebene 0 liefert dieselben Pixel wie `decodeJPEG(_:)`.
-    /// `pdfProfile` (Masterplan A4): das /ICCBased-Profil aus dem PDF. Es
-    /// gilt vor einem im JPEG eingebetteten Profil (das PDF-Wörterbuch
-    /// bestimmt den Farbraum); die Pixel werden damit nach sRGB umgerechnet.
+    /// `keepSourceValues` (Masterplan N5): Das PDF nennt ein eigenes Profil
+    /// (/ICCBased). Es gilt vor einem im JPEG eingebetteten; die Werte werden
+    /// unverändert übernommen, nicht umgerechnet.
     static func decodeJPEG(_ data: Data, level: Int, maximumPixels: Int,
-                           pdfProfile: CGColorSpace? = nil) -> CGImage? {
+                           keepSourceValues: Bool = false) -> CGImage? {
         let scaling: [CFString: Any] = level > 0
             ? [kCGImageSourceSubsampleFactor: 1 << level] : [:]
         guard let src = CGImageSourceCreateWithData(data as CFData, nil),
@@ -1342,27 +1354,27 @@ enum ImageResampler {
         let options = scaling.merging([kCGImageSourceShouldCacheImmediately: true]) { $1 }
         guard let decoded = CGImageSourceCreateImageAtIndex(src, 0, options as CFDictionary)
         else { return nil }
-        return converted(decoded, from: pdfProfile)
+        return sourceValues(decoded, keep: keepSourceValues)
     }
 
-    static func decodeJPEG(_ data: Data, pdfProfile: CGColorSpace? = nil) -> CGImage? {
+    static func decodeJPEG(_ data: Data, keepSourceValues: Bool = false) -> CGImage? {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil),
               CGImageSourceGetCount(src) > 0 else { return nil }
         guard let decoded = CGImageSourceCreateImageAtIndex(src, 0, [
             kCGImageSourceShouldCacheImmediately: true
         ] as CFDictionary) else { return nil }
-        return converted(decoded, from: pdfProfile)
+        return sourceValues(decoded, keep: keepSourceValues)
     }
 
-    /// Masterplan A4: Deutet RGB-Pixel im PDF-Profil und rechnet sie nach
-    /// sRGB um. Ohne Profil (oder bei Nicht-RGB) wie bisher `materialized`.
-    static func converted(_ image: CGImage, from pdfProfile: CGColorSpace?) -> CGImage {
-        guard let pdfProfile, pdfProfile.model == .rgb, image.colorSpace?.model == .rgb,
-              let tagged = image.copy(colorSpace: pdfProfile),
-              let srgb = resize(tagged, to: PixelSize(width: image.width, height: image.height),
-                                components: 3)
-        else { return materialized(image) }
-        return srgb
+    /// Masterplan N5: Mit `keep` werden RGB-Werte als Gerätewerte gelesen –
+    /// ein im JPEG eingebettetes Profil rechnet sie dann nicht um. Ohne wie
+    /// bisher `materialized`.
+    static func sourceValues(_ image: CGImage, keep: Bool) -> CGImage {
+        if keep, image.colorSpace?.model == .rgb,
+           let raw = image.copy(colorSpace: CGColorSpaceCreateDeviceRGB()) {
+            return materialized(raw)
+        }
+        return materialized(image)
     }
 
     /// Die CMYK-Abtastwerte als ihr Gegenteil (255 − Wert). Die Polarität

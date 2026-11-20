@@ -3,14 +3,14 @@ import PDFKit
 import UniformTypeIdentifiers
 
 struct CellFramesKey: PreferenceKey {
-    static var defaultValue: [UUID: CGRect] = [:]
+    static let defaultValue: [UUID: CGRect] = [:]
     static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { _, new in new })
     }
 }
 
 struct ScrollOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
@@ -22,7 +22,8 @@ struct OrganizeView: View {
     /// Ergebnis-PDF ans Komprimieren übergeben (RootView verdrahtet den
     /// Werkzeugwechsel). Ersetzt „Mit Smart komprimieren": Dort wählt man
     /// die Stufe selbst (Sichtabnahme 2026-10-12).
-    var onCompress: ((URL) -> Void)? = nil
+    /// Datei und – bei geschütztem Ergebnis – Passwort (Masterplan N10).
+    var onCompress: ((URL, String?) -> Void)? = nil
 
     @State private var mergeLosses: [MergeLossSummary.Loss] = []
     @State private var lastAnchorID: UUID?
@@ -782,9 +783,20 @@ struct OrganizeView: View {
                     // einer Quelle, Seitenbeschriftungen nur bei einer Quelle; die
                     // Bridge kopiert keine Dateianhänge, XMP-Metadaten, Tag-Struktur
                     // oder Ebenen). Ehrlich sagen statt still verlieren.
-                    Text("Übernommen: Seiten, Anmerkungen, Links und Formularfelder. Nicht übernommen: Dateianhänge, XMP-Metadaten, Tag-Struktur und Ebenen. Lesezeichen nur die erste Ebene und Seitenbeschriftungen nur, wenn alle Seiten aus einer Datei stammen.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    // Seit E1 gilt das nur für mehrere Quellen – eine einzelne
+                    // wird im Original umgebaut und behält ihren Katalog.
+                    if vm.project.documents.count > 1 {
+                        Text("Übernommen: Seiten, Anmerkungen, Links und Formularfelder. Nicht übernommen: Dateianhänge, XMP-Metadaten, Tag-Struktur und Ebenen. Lesezeichen nur die erste Ebene und Seitenbeschriftungen nur, wenn alle Seiten aus einer Datei stammen.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                // N1-Rest: Eine einzelne Quelle musste neu aufgebaut werden.
+                if let notice = o.rebuildNotice {
+                    Label(notice, systemImage: "exclamationmark.triangle")
+                        .font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -810,7 +822,7 @@ struct OrganizeView: View {
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
                         Button {
-                            if let handoff = vm.handOffOutcome(o) { onCompress?(handoff) }
+                            if let handoff = vm.handOffOutcome(o) { onCompress?(handoff.url, handoff.password) }
                         } label: {
                             Text("Komprimieren …").frame(maxWidth: .infinity)
                         }
@@ -1036,7 +1048,7 @@ private struct ArrowKeyCatcher: NSViewRepresentable {
             }
         }
 
-        deinit {
+        isolated deinit {
             if let monitor { NSEvent.removeMonitor(monitor) }
         }
 

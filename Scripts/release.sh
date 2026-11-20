@@ -102,7 +102,8 @@ command -v gh >/dev/null || { echo "gh fehlt: brew install gh, dann gh auth logi
 # Kein Release ohne grünes Gate (Masterplan G1). Das Gate schreibt die
 # Abnahme mit Commit-Hash; der Build bettet sie ein, release-check prüft sie.
 echo "→ Gate …"
-"$ROOT/Scripts/gate.sh" || { echo "Gate rot – kein Release." >&2; exit 1; }
+# N14 (G3): Ein Release prüft auch die sechs UI-Abläufe.
+"$ROOT/Scripts/gate.sh" --ui || { echo "Gate rot – kein Release." >&2; exit 1; }
 
 # Developer ID, nie das Entwicklungszertifikat (das trägt eine Mailadresse).
 SIGN_ID="$(security find-identity -v -p codesigning \
@@ -173,8 +174,7 @@ xcodebuild build -project PDFTools.xcodeproj -scheme PDFTools \
 BUILD_STATUS="${PIPESTATUS[0]}"
 set -e
 [ "$BUILD_STATUS" -eq 0 ] || { echo "Build fehlgeschlagen (Status $BUILD_STATUS)" >&2; exit 1; }
-# Die Abnahme steckt jetzt im Bundle; die versionierte Vorgabe zurück.
-git checkout -- Scripts/release-acceptance.plist
+# Die Abnahme liegt seit N8 in tmp/ – die versionierte Vorgabe bleibt unberührt.
 
 APP="$DERIVED/Build/Products/Release/PDFdownsize.app"
 [ -d "$APP" ] || { echo "Build fehlgeschlagen: $APP fehlt" >&2; exit 1; }
@@ -187,7 +187,8 @@ ENTITLEMENTS="$(mktemp /tmp/pdfdownsize-entitlements.XXXXXX)"
 trap 'rm -f "$ENTITLEMENTS"' EXIT
 codesign -d --entitlements - --xml "$APP" > "$ENTITLEMENTS" 2>/dev/null
 SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
-sign "$APP/Contents/Helpers/qpdf"
+# Masterplan G5: Der Helfer erbt die Sandbox der App (app-sandbox + inherit).
+sign --entitlements "$ROOT/PDFTools/Helper.entitlements" "$APP/Contents/Helpers/qpdf"
 sign "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
 sign --preserve-metadata=entitlements "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
 sign "$SPARKLE/Versions/B/Autoupdate"

@@ -27,34 +27,3 @@ enum MemoryTracker {
     }
 }
 
-/// RAII-Wrapper: misst Peak-RSS während eines Codeblocks.
-final class ScopedMemoryMeasurement {
-    private let startFootprint: Int64
-    private(set) var peakDelta: Int64 = 0
-    private var samples: [Int64] = []
-    private var monitorTask: Task<Void, Never>?
-
-    init(label: String) {
-        startFootprint = MemoryTracker.currentFootprint()
-        samples.append(0)
-
-        // Hintergrund-Monitoring alle 50ms für Peak-Erkennung:
-        monitorTask = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                let current = MemoryTracker.currentFootprint()
-                let delta = current - self.startFootprint
-                await MainActor.run {
-                    if delta > self.peakDelta { self.peakDelta = delta }
-                }
-                try? await Task.sleep(nanoseconds: 50_000_000)
-            }
-        }
-    }
-
-    deinit {
-        monitorTask?.cancel()
-    }
-
-    var peakRSS: Int64 { startFootprint + peakDelta }
-}

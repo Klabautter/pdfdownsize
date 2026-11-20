@@ -36,6 +36,26 @@ enum MergeLossSummary {
             unique.append(url)
         }
         guard unique.count > 1 else { return [] }
+        return detect(unique, unlocked: unlocked)
+    }
+
+    /// N1-Rest: Eine einzige Quelle, die neu aufgebaut werden musste (der
+    /// Kern meldete `needsRebuild`). Die Verschlüsselung zählt nicht – ein
+    /// Ergebnis aus einer entsperrten Quelle wird beim Sichern wieder
+    /// verschlüsselt (N10).
+    nonisolated static func rebuildLosses(for url: URL, displayName: String? = nil) -> [Loss] {
+        let unlocked = displayName.map { [url: $0] } ?? [:]
+        return detect([url], unlocked: unlocked).filter { $0.feature != .encryption }
+    }
+
+    /// Ein Satz für das Ergebnis nach einem Neuaufbau einer einzelnen Quelle.
+    static func rebuildSentence(for losses: [Loss]) -> String? {
+        guard !losses.isEmpty else { return nil }
+        let list = losses.map(\.feature.label).joined(separator: ", ")
+        return String(localized: "Diese PDF ließ sich nicht im Original umbauen und wurde neu aufgebaut. Dabei nicht übernommen: \(list).")
+    }
+
+    private nonisolated static func detect(_ unique: [URL], unlocked: [URL: String]) -> [Loss] {
         var files: [Feature: [String]] = [:]
         for url in unique where !url.path.hasPrefix(ImageImporter.sessionDirectory.path) {
             let name = unlocked[url] ?? url.lastPathComponent

@@ -290,7 +290,7 @@ enum MRCPageRewriter {
                           options: CompressionOptions,
                           pageAnalyses: [PageAnalysis],
                           onlyPages: Set<Int>? = nil,
-                          isCancelled: (() -> Bool)? = nil,
+                          isCancelled: (@Sendable () -> Bool)? = nil,
                           workProgress: WorkProgressLedger? = nil) throws -> [MRCProvision] {
         guard options.featureFlags.mrc, options.featureFlags.candidateEngine else {
             return []
@@ -363,8 +363,9 @@ enum MRCPageRewriter {
         let scheduler = PixelWorkScheduler(budgetBytes: PixelWorkScheduler.resolvedBudget())
         let group = DispatchGroup()
         let lock = NSLock()
-        var results = [MRCProvision?](repeating: nil, count: jobs.count)
-        var caught: Error?
+        // Hinter `lock` (G6: deshalb `nonisolated(unsafe)`, wie ParallelWork).
+        nonisolated(unsafe) var results = [MRCProvision?](repeating: nil, count: jobs.count)
+        nonisolated(unsafe) var caught: Error?
         for (index, job) in jobs.enumerated() {
             if let isCancelled, isCancelled() { throw CancellationError() }
             slots.wait()
@@ -491,7 +492,7 @@ enum MRCPageRewriter {
                                        rungs: [MRCEncoder.Rung],
                                        options: CompressionOptions,
                                        preset: QualityGatePreset,
-                                       isCancelled: (() -> Bool)?) throws -> MRCProvision? {
+                                       isCancelled: (@Sendable () -> Bool)?) throws -> MRCProvision? {
         guard let raster = pixels.decodedImage(for: resource) else { return nil }
         guard let segmentation = MRCSegmenter.segment(raster) else { return nil }
         // Zu viele Regionen scheitern sicher an der Rekonstruktion – erst
@@ -499,7 +500,9 @@ enum MRCPageRewriter {
         guard fitsLayerLimit(photoRegionCount: segmentation.photoRegions.count) else {
             return nil
         }
-        guard let mask = MRCEncoder.encodeMask(segmentation.mask) else { return nil }
+        guard let mask = MRCEncoder.encodeMask(segmentation.mask),
+              let colorMasks = MRCEncoder.encodeColorMasks(segmentation.colorMasks)
+        else { return nil }
 
         let rasterSize = PixelSize(width: raster.width, height: raster.height)
         let originalBytes = resource.encodedByteCount
@@ -508,10 +511,11 @@ enum MRCPageRewriter {
         // Der Name im Seiten-Namespace OHNE führenden Slash (die Bridge
         // ergänzt ihn beim Suchen selbst).
         guard let placement = resource.placements.first else { return nil }
-        var resourceName = placement.resourceName
-        if resourceName.hasPrefix("/") {
-            resourceName.removeFirst()
+        var trimmedName = placement.resourceName
+        if trimmedName.hasPrefix("/") {
+            trimmedName.removeFirst()
         }
+        let resourceName = trimmedName   // unveränderlich für die parallelen Stufen (G6)
         guard !resourceName.isEmpty else { return nil }
 
         // Die Stufen sind voneinander unabhängig (eigene Ebenen, eigenes
@@ -523,8 +527,8 @@ enum MRCPageRewriter {
             let rung = rungs[index]
             let rungStart = ContinuousClock.now
             guard let layers = MRCEncoder.encodeLayers(
-                segmentation: segmentation, mask: mask, rung: rung,
-                sourceDPI: sourceDPI) else { return nil }
+                segmentation: segmentation, mask: mask, colorMasks: colorMasks,
+                rung: rung, sourceDPI: sourceDPI) else { return nil }
             guard layers.totalBytes < originalBytes else { return nil }
 
             let descriptor = buildDescriptor(
@@ -619,6 +623,9 @@ enum MRCPageRewriter {
         descriptor.photoWidths = layers.photos.map(\.width)
         descriptor.photoHeights = layers.photos.map(\.height)
         descriptor.photoComponents = layers.photos.map(\.components)
+        if !layers.colorMasks.isEmpty {
+            descriptor.colorMaskFills = layers.colorMasks.flatMap { [$0.fill.red, $0.fill.green, $0.fill.blue] }
+        }
         return descriptor
     }
 
@@ -640,6 +647,15 @@ enum MRCPageRewriter {
                 width: photo.width, height: photo.height,
                 rect: photo.rect, globals: Data(), data: photo.data))
         }
+        // A2 Stufe 2: Farbmasken vor der schwarzen Maske.
+        for colorMask in layers.colorMasks {
+            entries.append(MRCEncoder.Bundle.Entry(
+                kind: colorMask.mask.codec == .jbig2 ? 1 : 2,
+                isMask: true, components: 1,
+                width: descriptor.maskWidth, height: descriptor.maskHeight,
+                rect: nil, globals: colorMask.mask.globals,
+                data: colorMask.mask.data, fill: colorMask.fill))
+        }
         entries.append(MRCEncoder.Bundle.Entry(
             kind: layers.mask.codec == .jbig2 ? 1 : 2,
             isMask: true, components: 1,
@@ -654,7 +670,7 @@ enum MRCPageRewriter {
     static func layers(from descriptor: MRCCandidateDescriptor,
                        bundle: Data) throws -> [PDFCoreDocument.MRCLayer] {
         guard let entries = MRCEncoder.Bundle.decode(bundle),
-              entries.count == descriptor.photoRegionCount + 2 else {
+              entries.count == descriptor.photoRegionCount + descriptor.colorMaskCount + 2 else {
             throw PDFCoreError.checkFailed
         }
 
@@ -688,8 +704,27 @@ enum MRCPageRewriter {
                 rect: CGRect(x: rectX, y: rectY, width: rectW, height: rectH)))
         }
 
+        // A2 Stufe 2: Farbmasken in ihrer Füllfarbe.
+        let fills = descriptor.colorMaskFills ?? []
+        for index in 0..<descriptor.colorMaskCount {
+            let entry = entries[1 + descriptor.photoRegionCount + index]
+            let fill = (fills[index * 3], fills[index * 3 + 1], fills[index * 3 + 2])
+            guard entry.isMask, entry.kind == 1 || entry.kind == 2,
+                  entry.width == descriptor.maskWidth, entry.height == descriptor.maskHeight,
+                  let stored = entry.fill,
+                  stored.red == fill.0, stored.green == fill.1, stored.blue == fill.2 else {
+                throw PDFCoreError.checkFailed
+            }
+            layers.append(PDFCoreDocument.MRCLayer(
+                kind: entry.kind == 1
+                    ? .jbig2Mask(globals: entry.globals.isEmpty ? nil : entry.globals)
+                    : .ccittG4Mask,
+                width: entry.width, height: entry.height,
+                data: entry.data, rect: nil, fill: stored))
+        }
+
         let mask = entries[entries.count - 1]
-        guard mask.isMask,
+        guard mask.isMask, mask.fill == nil,
               mask.width == descriptor.maskWidth,
               mask.height == descriptor.maskHeight else {
             throw PDFCoreError.checkFailed
@@ -797,6 +832,10 @@ enum MRCPageRewriter {
         }
         let mask = MRCEncoder.maskEncoding(codec: descriptor.maskCodec,
                                            data: maskData, globals: globals)
+        // A2 Stufe 2: dieselben Farbmasken wie in der Planung – stimmt ihre
+        // Zahl nicht mit dem Deskriptor überein, ist das kein lieferbarer Plan.
+        guard let colorMasks = MRCEncoder.encodeColorMasks(segmentation.colorMasks),
+              colorMasks.count == descriptor.colorMaskCount else { return nil }
         let rung = MRCEncoder.Rung(
             name: "regen",
             backgroundDPI: descriptor.backgroundDPI,
@@ -804,8 +843,8 @@ enum MRCPageRewriter {
             photoDPI: descriptor.photoDPI,
             photoQuality: descriptor.photoQuality)
         guard let layers = MRCEncoder.encodeLayers(
-            segmentation: segmentation, mask: mask, rung: rung,
-            sourceDPI: descriptor.maskDPI) else { return nil }
+            segmentation: segmentation, mask: mask, colorMasks: colorMasks,
+            rung: rung, sourceDPI: descriptor.maskDPI) else { return nil }
         return bundleData(descriptor: descriptor, layers: layers)
     }
 }

@@ -28,7 +28,8 @@ enum ProbeMode {
     /// Deshalb legt er sich vor jeder anderen Arbeit selbst fest: kein
     /// Dock-Symbol, keine Fenster, nicht aktivierbar.
     private static func stayOutOfTheDock() {
-        NSApplication.shared.setActivationPolicy(.prohibited)
+        // Läuft aus `main()` auf dem Hauptthread (G6).
+        MainActor.assumeIsolated { _ = NSApplication.shared.setActivationPolicy(.prohibited) }
     }
 
     /// Der Aufrufer hält das Schreibende unserer Standardeingabe. Endet er

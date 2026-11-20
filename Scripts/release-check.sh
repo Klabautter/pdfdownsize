@@ -47,12 +47,25 @@ for f in LICENSE-qpdf.txt NOTICE-qpdf.md \
     check "Lizenz gebündelt: $f" test -s "$APP/Contents/Resources/ReleaseEvidence/$f"
 done
 
+# Masterplan G5: Ausgeliefert wird nur der Sandbox-Build – App und
+# qpdf-Helfer (dieser mit inherit). Der Messbuild des Gates ist absichtlich
+# ohne Sandbox (`--bench` liest Pfade außerhalb des Containers).
+if [ "${PDFDOWNSIZE_GATE_LAEUFT:-0}" != 1 ]; then
+    check "App in der Sandbox"   sh -c "codesign -d --entitlements - --xml '$APP' 2>/dev/null | grep -q 'com.apple.security.app-sandbox'"
+    check "Helfer erbt Sandbox"  sh -c "codesign -d --entitlements - --xml '$QPDF' 2>/dev/null | grep -q 'com.apple.security.inherit'"
+fi
+
 # Die historische Core-Zertifizierung ersetzt nicht die aktuelle App-Abnahme.
 # Prüfe das mitgebaute Gate, damit ein später geänderter Arbeitsbaum keine
 # bereits gebaute App nachträglich freigeben kann. Fehlendes Gate blockiert.
 GATE="$APP/Contents/Resources/ReleaseEvidence/release-acceptance.plist"
 echo
 echo "Release-Gate (Scripts/gate.sh):"
+if [ "${PDFDOWNSIZE_GATE_LAEUFT:-0}" = 1 ]; then
+    # Aufruf aus gate.sh selbst (Masterplan N8): Die Abnahme entsteht erst
+    # nach diesem Check; geprüft wird sie beim Release.
+    echo "  – übersprungen: Aufruf aus dem laufenden Gate"
+else
 ACCEPTED="$(/usr/bin/plutil -extract accepted raw -o - "$GATE" 2>/dev/null || true)"
 GATE_COMMIT="$(/usr/bin/plutil -extract commit raw -o - "$GATE" 2>/dev/null || true)"
 HEAD_COMMIT="$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD 2>/dev/null || true)"
@@ -64,6 +77,7 @@ else
     [ -n "$GATE_COMMIT" ] && [ "$GATE_COMMIT" != "$HEAD_COMMIT" ] \
         && echo "    Gate lief für ${GATE_COMMIT:0:12}, HEAD ist ${HEAD_COMMIT:0:12}"
     fail=1
+fi
 fi
 
 # --- Masterplan Finding 7: Release-Gate der Compression-Engine ---------------

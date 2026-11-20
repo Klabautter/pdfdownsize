@@ -99,27 +99,86 @@ import pdfcore
             """)
     }
 
+    /// Masterplan N8: Jeder Eintrag der Gate-Liste muss eine Suite sein.
+    /// `HardeningTests` war ein Dateiname; `-only-testing` fuhr dafür null
+    /// Tests, und das Gate meldete trotzdem grün.
+    @Test func gateListeNenntNurSuiten() throws {
+        let root = Self.testDirectory().deletingLastPathComponent()
+        let list = try String(contentsOf: root.appendingPathComponent("Scripts/release-gate-suites.txt"),
+                              encoding: .utf8)
+        let names = list.split(separator: "\n").compactMap { line -> String? in
+            let name = line.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
+                .trimmingCharacters(in: .whitespaces)
+            return name.isEmpty ? nil : name
+        }
+        #expect(!names.isEmpty)
+        var declared = Set<String>()
+        let pattern = try NSRegularExpression(pattern: #"(?:struct|class|final class|enum)\s+([A-Za-z0-9_]+)"#)
+        for file in Self.swiftFiles() {
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            let range = NSRange(text.startIndex..., in: text)
+            for match in pattern.matches(in: text, range: range) {
+                if let r = Range(match.range(at: 1), in: text) { declared.insert(String(text[r])) }
+            }
+        }
+        let missing = names.filter { !declared.contains($0) }
+        #expect(missing.isEmpty, "Keine Suite dieses Namens: \(missing.joined(separator: ", "))")
+    }
+
     /// Masterplan D4: Keine C++-Ausnahme verlässt die C-Grenze. Jede im
     /// Header deklarierte Funktion beginnt mit PDFCORE_GUARD_BEGIN – eine neue
     /// Funktion ohne Hülle fällt hier auf, nicht erst als Absturz.
     @Test func jederExportIstEingehuellt() throws {
         let src = Self.testDirectory().deletingLastPathComponent()
             .appendingPathComponent("Vendor/pdfcore/src")
-        var header = try String(contentsOf: src.appendingPathComponent("pdfcore.h"), encoding: .utf8)
+        let header = try String(contentsOf: src.appendingPathComponent("pdfcore.h"), encoding: .utf8)
         let source = try String(contentsOf: src.appendingPathComponent("pdfcore.cc"), encoding: .utf8)
-        // Kommentare entfernen, dann deklarierte Namen sammeln.
-        header = header.replacingOccurrences(of: #"/\*[\s\S]*?\*/|//[^\n]*"#, with: "", options: .regularExpression)
+        let result = Self.unguardedExports(header: header, source: source)
+        #expect(result.declared > 50, "Header-Analyse fand nur \(result.declared) Funktionen")
+        #expect(result.unguarded.isEmpty, "Ohne PDFCORE_GUARD: \(result.unguarded)")
+    }
+
+    /// N14 (D4): Das alte Muster `name\([\s\S]*?\)\s*\{\s*PDFCORE_GUARD_BEGIN`
+    /// lief über das Ende der Definition hinaus bis zur nächsten eingehüllten
+    /// Funktion – eine fehlende Hülle fiel nie auf. Jetzt: die Definition
+    /// (Parameterliste ohne `;`, `{`, `}`, danach `{`) muss DIREKT mit der
+    /// Hülle beginnen; fehlt die Definition, zählt das ebenfalls.
+    static func unguardedExports(header rawHeader: String, source: String)
+        -> (declared: Int, unguarded: [String]) {
+        let header = rawHeader.replacingOccurrences(of: #"/\*[\s\S]*?\*/|//[^\n]*"#, with: "",
+                                                    options: .regularExpression)
         let declared = Set(header.matches(of: /\b(pdfcore_[a-z0-9_]+)\(/).map { String($0.1) })
         var unguarded: [String] = []
         for name in declared.sorted() {
-            // Definition: Name, Parameterliste, dann „{“ und die Hülle.
-            let pattern = "\\b" + name + "\\([\\s\\S]*?\\)\\s*\\{\\s*PDFCORE_GUARD_BEGIN"
-            if source.range(of: pattern, options: .regularExpression) == nil {
+            // Definitionen beginnen am Zeilenanfang mit dem Rückgabetyp;
+            // eingerückte Aufrufe (`if (pdfcore_x(a)) {`) zählen nicht.
+            let definition = "(?m)^[A-Za-z_][^(\\n;=]*\\b" + name + "\\([^;{}]*\\)\\s*\\{"
+            guard let range = source.range(of: definition, options: .regularExpression) else {
                 unguarded.append(name)
+                continue
             }
+            let rest = source[range.upperBound...].drop { $0.isWhitespace }
+            if !rest.hasPrefix("PDFCORE_GUARD_BEGIN") { unguarded.append(name) }
         }
-        #expect(declared.count > 50, "Header-Analyse fand nur \(declared.count) Funktionen")
-        #expect(unguarded.isEmpty, "Ohne PDFCORE_GUARD: \(unguarded)")
+        return (declared.count, unguarded)
+    }
+
+    /// Die Prüfung selbst erkennt eine fehlende Hülle (vorher nicht).
+    @Test func huellenPruefungErkenntFehlendeHuelle() {
+        let header = "int pdfcore_a(int x);\nint pdfcore_b(int y);\n"
+        let source = """
+            int pdfcore_a(int x)
+            {
+                return x;
+            }
+            int pdfcore_b(int y)
+            {
+                PDFCORE_GUARD_BEGIN
+                return y;
+                PDFCORE_GUARD_END(0)
+            }
+            """
+        #expect(Self.unguardedExports(header: header, source: source).unguarded == ["pdfcore_a"])
     }
 
     /// Ein fester Dokumentpfad im Korpus ist eine Sonde, kein Test: Auf

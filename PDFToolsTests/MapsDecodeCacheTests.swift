@@ -27,7 +27,7 @@ import CoreGraphics
     /// Zählende Pixelquelle – der Dekodier-Zähler des Tests. Thread-sicher,
     /// weil die Candidate-Erzeugung unter dem Pixel-Budget-Scheduler parallel
     /// laufen kann.
-    private final class CountingPixelSource: ImagePixelSource {
+    private final class CountingPixelSource: ImagePixelSource, @unchecked Sendable {
         let image: CGImage
         private let lock = NSLock()
         private(set) var decodeCalls = 0
@@ -56,7 +56,7 @@ import CoreGraphics
     /// der Test nagelt die Cache-Ebenenschlüssel und die Dekodier-Zählung
     /// fest (je Ebene EIN Dekodierlauf), nicht die Pixelherleitung der
     /// Reduktion (die gehört zur Quelle selbst und bleibt dort getestet).
-    private final class JPXReduceCountingSource: ImagePixelSource {
+    private final class JPXReduceCountingSource: ImagePixelSource, @unchecked Sendable {
         let fullImage: CGImage
         private let lock = NSLock()
         private(set) var decodeCalls = 0
@@ -457,8 +457,12 @@ import CoreGraphics
         let config = PixelDecodeCache.Config.resolved(env:
             ["PDFTOOLS_DECODE_CACHE_BUDGET": "33554432"])
         #expect(config.budgetBytes == 32 * 1_048_576)
+        // Masterplan C5 (3954a63) hat die Vorgabe bewusst geändert: ein
+        // Viertel des Pixel-Budgets statt fest 192 MB (N12). Auf 8 GB sind das
+        // 128 MB; ohne Umgebung folgt der Wert dem Rechner.
         #expect(PixelDecodeCache.Config.resolved(env: [:]).budgetBytes
-                == 192 * 1024 * 1024)
+                == PixelWorkScheduler.resolvedBudget() / 4)
+        #expect(PixelWorkScheduler.defaultBudget(physicalMemory: 8 << 30) / 4 == 128 * 1_048_576)
     }
 
     // MARK: - 4) Ressourcen-Grenze

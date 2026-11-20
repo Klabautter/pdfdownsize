@@ -149,7 +149,8 @@ final class PDFdownsizeFlowsUITests: XCTestCase {
     // MARK: - 3. Stapel mit 6 Dateien, 2 kaputt → Alle sichern (B4)
     //
     // Fehler: (1) der Stapel bricht an der kaputten Datei ab; (2) „Alle
-    // sichern“ legt nicht vier Dateien an.
+    // sichern“ legt nicht vier Dateien an; (3) N14/B4-Abnahme: Eine vorher
+    // einzeln gesicherte Datei wird nicht noch einmal als „_2“ geschrieben.
     func testStapelMitKaputtenDateienSichertDieGuten() throws {
         var files = try (1...4).map { try scanPDF("gut-\($0).pdf") }
         let broken = workDir.appendingPathComponent("kaputt.pdf")
@@ -168,6 +169,17 @@ final class PDFdownsizeFlowsUITests: XCTestCase {
         let saveAll = app.buttons["Alle sichern …"]
         XCTAssertTrue(saveAll.waitForExistence(timeout: 300), "Stapel nicht fertig")
         snapshot(app, "3-fertig")
+
+        // Eine Datei einzeln sichern (Zeilenknopf), in denselben Ordner.
+        let single = app.buttons.matching(NSPredicate(format: "label == 'Sichern …'")).firstMatch
+        XCTAssertTrue(single.waitForExistence(timeout: 10), "kein Zeilen-Sichern")
+        single.click()
+        saveThroughPanel(app, in: out)
+        XCTAssertTrue(waitFor(20) {
+            ((try? FileManager.default.contentsOfDirectory(atPath: out.path)) ?? []).count == 1
+        }, "Einzel-Sichern legte keine Datei an")
+        snapshot(app, "3-einzeln-gesichert")
+
         saveAll.click()
         let panel = app.dialogs.firstMatch.exists ? app.dialogs.firstMatch : app.sheets.firstMatch
         XCTAssertTrue(panel.waitForExistence(timeout: 10))
@@ -183,12 +195,14 @@ final class PDFdownsizeFlowsUITests: XCTestCase {
         } while Date() < deadline
         snapshot(app, "3-gesichert")
         XCTAssertEqual(saved.count, 4, "\(saved)")
+        XCTAssertFalse(saved.contains { $0.contains("_2") }, "Schon Gesichertes doppelt geschrieben: \(saved)")
     }
 
     // MARK: - 4. Organisieren: zwei Quellen, Seite löschen, drehen, Undo, PDF erstellen
     //
     // Fehler: (1) Löschen/Drehen wirkt nicht; (2) ⌘Z nimmt mehr oder weniger
-    // zurück; (3) „PDF erstellen“ liefert kein Ergebnis.
+    // zurück; (3) „PDF erstellen“ liefert kein Ergebnis; (4) N14/G3: das
+    // gesicherte Ergebnis hat nicht die Seiten und Drehung der Ansicht.
     func testOrganisierenBearbeitenUndErstellen() throws {
         let a = try textPDF("a.pdf", pages: 2)
         let b = try textPDF("b.pdf", pages: 2)
@@ -211,10 +225,37 @@ final class PDFdownsizeFlowsUITests: XCTestCase {
         XCTAssertTrue(waitFor { tiles.count == 4 }, "Undo stellte die Seite nicht wieder her")
         snapshot(app, "4-undo")
 
+        // Jetzt endgültig: Seite 2 löschen, Seite 1 drehen, nur das Drehen
+        // einmal zurück und erneut – ⌘Z darf genau einen Schritt nehmen.
+        tiles.element(boundBy: 1).click()
+        app.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(waitFor { tiles.count == 3 })
+        tiles.element(boundBy: 0).click()
+        app.typeKey("r", modifierFlags: .command)
+        app.typeKey("z", modifierFlags: .command)   // nur das Drehen zurück
+        XCTAssertTrue(waitFor { tiles.count == 3 }, "⌘Z nahm auch das Löschen zurück")
+        app.typeKey("r", modifierFlags: .command)
+
         create.click()
         let result = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Sichern'")).firstMatch
         XCTAssertTrue(result.waitForExistence(timeout: 60), "kein Ergebnis")
         snapshot(app, "4-ergebnis")
+        let out = workDir.appendingPathComponent("organisiert", isDirectory: true)
+        try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        result.click()
+        saveThroughPanel(app, in: out)
+        var saved: URL?
+        XCTAssertTrue(waitFor(20) {
+            saved = ((try? FileManager.default.contentsOfDirectory(at: out, includingPropertiesForKeys: nil)) ?? [])
+                .first { $0.pathExtension == "pdf" }
+            return saved != nil
+        }, "Ergebnis nicht gesichert")
+        let doc = try XCTUnwrap(saved.flatMap { PDFDocument(url: $0) })
+        XCTAssertEqual(doc.pageCount, 3, "Seitenzahl des Ergebnisses")
+        XCTAssertEqual(doc.page(at: 0)?.rotation, 90, "Drehung fehlt im Ergebnis")
+        XCTAssertEqual(doc.page(at: 1)?.rotation, 0)
+        XCTAssertEqual(doc.page(at: 1)?.annotations.first?.contents, "b.pdf Seite 1",
+                       "Falsche Seite gelöscht")
     }
 
     // MARK: - 5. OCR auf Scan → durchsuchbare PDF sichern

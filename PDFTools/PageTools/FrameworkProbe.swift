@@ -43,8 +43,36 @@ enum FrameworkProbe {
 
     // MARK: Aufrufe
 
+    // MARK: App-Sandbox (Masterplan G5)
+
+    /// Läuft die App in der Sandbox? Dann gelten die Dateifreigaben (Dialog,
+    /// Drop, „Öffnen mit“) nur für diesen Prozess – der Hilfsprozess ist ein
+    /// eigener Prozess mit eigener Sandbox und dürfte die Datei des Nutzers
+    /// nicht lesen.
+    static var isSandboxed: Bool {
+        ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
+    }
+
+    /// Eine für den Hilfsprozess lesbare Fassung von `url`: in der Sandbox
+    /// eine Kopie im eigenen Temp-Ordner (auf APFS ein Klon, also ohne
+    /// Kopierkosten), sonst `url` selbst. `cleanup` entfernt die Kopie.
+    static func readableForHelper(_ url: URL) -> (url: URL, cleanup: () -> Void) {
+        let temp = FileManager.default.temporaryDirectory.standardizedFileURL.path
+        guard isSandboxed, !url.standardizedFileURL.path.hasPrefix(temp) else { return (url, {}) }
+        let copy = FileManager.default.temporaryDirectory
+            .appendingPathComponent("probe-\(UUID().uuidString).pdf")
+        do {
+            try FileManager.default.copyItem(at: url, to: copy)
+            return (copy, { try? FileManager.default.removeItem(at: copy) })
+        } catch {
+            return (url, {})   // der Hilfsprozess meldet dann „nicht lesbar“
+        }
+    }
+
     static func snapshot(_ url: URL, backend: PDFSemanticSnapshot.Backend) throws -> PDFSemanticSnapshot {
-        let result = run(["snapshot", url.path, backend.rawValue],
+        let readable = readableForHelper(url)
+        defer { readable.cleanup() }
+        let result = run(["snapshot", readable.url.path, backend.rawValue],
                          pageTimeout: PDFSemanticSnapshot.pageTextTimeout)
         switch result {
         case .success(let data):
@@ -64,7 +92,10 @@ enum FrameworkProbe {
     static func renderSample(referenceURL: URL, outputURL: URL,
                              pages: [Int]) -> Result<[PDFValidator.RenderSampleMeasurement], Failure> {
         let list = pages.map(String.init).joined(separator: ",")
-        return run(["render", referenceURL.path, outputURL.path, list],
+        let reference = readableForHelper(referenceURL)
+        let output = readableForHelper(outputURL)
+        defer { reference.cleanup(); output.cleanup() }
+        return run(["render", reference.url.path, output.url.path, list],
                    pageTimeout: PDFValidator.renderSampleTimeout)
             .flatMap { data in
                 guard let pages = try? JSONDecoder().decode([PDFValidator.RenderSampleMeasurement].self, from: data)

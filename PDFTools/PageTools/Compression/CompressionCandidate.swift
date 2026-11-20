@@ -60,8 +60,13 @@ struct MRCCandidateDescriptor: Hashable, Codable, Sendable {
     var photoWidths: [Int] = []
     var photoHeights: [Int] = []
     var photoComponents: [Int] = []
+    /// Masterplan A2 Stufe 2: Füllfarben der Farbmasken (r, g, b je Maske,
+    /// DeviceRGB 0…1), in Zeichnungsreihenfolge vor der schwarzen Maske.
+    /// nil = keine Farbmasken (wie vor Stufe 2).
+    var colorMaskFills: [Double]? = nil
 
     var photoRegionCount: Int { photoRects.count / 4 }
+    var colorMaskCount: Int { (colorMaskFills?.count ?? 0) / 3 }
 }
 
 /// Kodierung der Vordergrund-Maske (§13.6) – beide verlustfrei.

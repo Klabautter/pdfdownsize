@@ -74,13 +74,23 @@ enum ImageImporter {
     }
 
     /// Dekodiert ein Bild in Originalpixeln und richtet die EXIF-Orientierung auf.
+    ///
+    /// N14 (D6): Über `maximumPixels` dekodiert ImageIO gleich auf die
+    /// gedeckelte Kantenlänge – vorher entstand erst das volle Raster (ein
+    /// 400-MP-Scan: 1,6 GB) und wurde danach verkleinert.
     private static func uprightCGImage(of source: CGImageSource, index: Int) -> CGImage? {
         guard let info = pixelInfo(of: source, index: index) else { return nil }
-        // Thumbnail-API mit Transform = voll auflösend + orientierungskorrigiert.
+        let count = info.width * info.height
+        var edge = max(info.width, info.height)
+        if count > maximumPixels {
+            let factor = (Double(maximumPixels) / Double(count)).squareRoot()
+            edge = max(1, Int((Double(edge) * factor).rounded(.down)))
+        }
+        // Thumbnail-API mit Transform = orientierungskorrigiert, bis `edge`.
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: max(info.width, info.height),
+            kCGImageSourceThumbnailMaxPixelSize: edge,
         ]
         return CGImageSourceCreateThumbnailAtIndex(source, index, options as CFDictionary)
     }

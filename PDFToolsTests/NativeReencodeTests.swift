@@ -229,7 +229,10 @@ import UniformTypeIdentifiers
         defer { for r in [klein, smart, qualitaet] { try? FileManager.default.removeItem(at: r.output) } }
 
         #expect(klein.action.transformsImage && smart.action.transformsImage)
-        #expect(klein.bytes <= smart.bytes && smart.bytes < qualitaet.bytes,
+        // N14: Seit H3 rechnen Klein und Smart dasselbe 300-DPI-Raster mit
+        // denselben bitgenauen Kodierern – die Ausgabe muss gleich groß sein
+        // (strenger als das frühere „Klein < Smart“, das H3 nicht mehr zulässt).
+        #expect(klein.bytes == smart.bytes && smart.bytes < qualitaet.bytes,
                 "Klein \(klein.bytes), Smart \(smart.bytes), Qualität \(qualitaet.bytes)")
         guard case .keep(_, .alreadyGrayscale, _) = qualitaet.action else {
             Issue.record("Qualität: \(qualitaet.action)")
@@ -332,7 +335,10 @@ import UniformTypeIdentifiers
         #expect(try Self.dimensions(klein.output) == PixelSize(width: 1500, height: 1500))
         #expect(try Self.dimensions(smart.output) == PixelSize(width: 1500, height: 1500))
         #expect(try Self.dimensions(qualitaet.output) == PixelSize(width: 6000, height: 6000))
-        #expect(klein.bytes <= smart.bytes && smart.bytes < qualitaet.bytes,
+        // N14: Seit H3 rechnen Klein und Smart dasselbe 300-DPI-Raster mit
+        // denselben bitgenauen Kodierern – die Ausgabe muss gleich groß sein
+        // (strenger als das frühere „Klein < Smart“, das H3 nicht mehr zulässt).
+        #expect(klein.bytes == smart.bytes && smart.bytes < qualitaet.bytes,
                 "Klein \(klein.bytes), Smart \(smart.bytes), Qualität \(qualitaet.bytes)")
 
         // Die geschriebene Datei rendert und bleibt nah an der Quelle.

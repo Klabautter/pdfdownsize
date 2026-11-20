@@ -11,8 +11,9 @@ import Darwin
 ///
 /// WARUM EIN EIGENER THREAD
 ///
-/// Das Projekt hat mit `ScopedMemoryMeasurement` bereits einen Abtaster. Der
-/// taktet über den MainActor. Der Korpuslauf läuft selbst auf dem MainActor
+/// Ein Abtaster, der über den MainActor taktet (früher
+/// `ScopedMemoryMeasurement`, seit G6 entfernt), taugt hier nicht: Der
+/// Korpuslauf läuft selbst auf dem MainActor
 /// und blockiert ihn, solange eine Operation rechnet – die Abtastung käme
 /// also ausgerechnet während der Messung nicht zum Zug und meldete den
 /// Ruhewert. Ein eigener Thread misst unabhängig davon weiter.

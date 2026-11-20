@@ -118,6 +118,12 @@ import CoreText
         defer { try? FileManager.default.removeItem(at: a) }
         let viewModel = CompressionViewModel(defaults: .isolatedForTest())
         viewModel.select(a)
+        // Seit C6 lädt `select` abseits des Hauptthreads (N12): erst das
+        // Laden abwarten, dann gilt dieselbe Zusicherung wie vorher.
+        let loaded = Date().addingTimeInterval(10)
+        while viewModel.originalDocument == nil, Date() < loaded {
+            try await Task.sleep(for: .milliseconds(20))
+        }
         let opened = try #require(viewModel.originalDocument)
         viewModel.showPage(3)
         viewModel.showPage(1)

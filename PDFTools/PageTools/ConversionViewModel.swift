@@ -66,8 +66,8 @@ final class ConversionViewModel: ObservableObject {
                 case .success(let unlocked):
                     self.unlocked = unlocked
                     self.stage = .ready
-                case .failure:
-                    self.passwordError = String(localized: "Das Passwort stimmt nicht.")
+                case .failure(let error):
+                    self.passwordError = UnlockedDocument.failureMessage(for: error)
                 }
             }
         }
@@ -226,7 +226,11 @@ final class ConversionViewModel: ObservableObject {
         workTask = Task { @MainActor in
             defer { endWork(returningTo: previous) }
             do {
-                guard let pages = Self.pages(of: url) else {
+                // N14 (C6): Öffnen abseits des Main Threads.
+                let source = url
+                guard let pages = await Task.detached(priority: .userInitiated, operation: {
+                    Self.pages(of: source)
+                }).value else {
                     throw ImageImporter.ImportError.unreadable(url.lastPathComponent)
                 }
                 let total = pages.count
@@ -257,7 +261,7 @@ final class ConversionViewModel: ObservableObject {
     /// Testbarer Kern: kombiniert alle Bilder in eine temporäre PDF.
     /// Die einseitigen Zwischen-PDFs werden nach dem Merge aufgeräumt (Review P0.4).
     @concurrent nonisolated static func combinedTemporaryPDF(from imageURLs: [URL],
-                                                 progress: @escaping (Double) -> Void) async throws -> URL {
+                                                 progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
         guard !imageURLs.isEmpty else {
             throw ImageImporter.ImportError.unreadable("keine Dateien")
         }

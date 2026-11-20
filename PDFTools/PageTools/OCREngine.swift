@@ -160,8 +160,8 @@ enum OCREngine {
     /// fertig ist (siehe `visionIsWarm`).
     @concurrent nonisolated static func run(sourceURL: URL,
                                 languages: [String],
-                                preparing: @escaping (Bool) -> Void = { _ in },
-                                progress: @escaping (Double) -> Void) async throws -> RunOutput {
+                                preparing: @escaping @Sendable (Bool) -> Void = { _ in },
+                                progress: @escaping @Sendable (Double) -> Void) async throws -> RunOutput {
         let (doc, core) = try open(sourceURL)
         let resources = (try? core.imageResources()) ?? []
         let pixels = LibQPDFPixelSource(document: core)
@@ -521,7 +521,7 @@ enum OCREngine {
             throw OCRError.recognitionFailed(error.localizedDescription)
         }
         visionWarm.withLock { $0 = true }
-        let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
+        let observations = request.results ?? []
         return observations.compactMap { obs -> Line? in
             guard let candidate = obs.topCandidates(1).first else { return nil }
             return Line(text: candidate.string,
@@ -574,17 +574,27 @@ enum OCREngine {
         String(format: "%.2f", value)
     }
 
-    /// Natürliche Breite in der glyphenlosen OCR-Schrift: jede UTF-16-
-    /// Codeeinheit ist 500/1000 em breit (/DW 500, Masterplan E5).
+    /// Natürliche Breite in der glyphenlosen OCR-Schrift: jeder Code ist
+    /// 500/1000 em breit (/DW 500, Masterplan E5).
     private nonisolated static func glyphlessWidth(_ text: String, size: Double) -> Double {
-        Double(text.utf16.count) * 0.5 * size
+        Double(codes(text).count) * 0.5 * size
+    }
+
+    /// Ein Code (16 Bit) je Zeichen. N14 (E5): Zeichen außerhalb der BMP
+    /// (Emoji, CJK-Erweiterung B) wurden als Ersatzpaar in ZWEI Codes
+    /// geschrieben; die ToUnicode-Tabelle bildet jeden Code einzeln ab und
+    /// hätte zwei einzelne Ersatzhälften geliefert – formal ungültig. Sie
+    /// stehen jetzt als U+FFFD (Ersatzzeichen): gültig, und die Suche nach
+    /// allen übrigen Zeichen der Zeile bleibt intakt.
+    nonisolated static func codes(_ text: String) -> [UInt16] {
+        text.unicodeScalars.map { $0.value <= 0xFFFF ? UInt16($0.value) : 0xFFFD }
     }
 
     /// Text als UTF-16BE-Hexstring für die Identity-H-Schrift – jede Schrift
     /// bleibt erhalten (vorher CP1252, alles andere wurde „?“).
     nonisolated static func pdfString(_ text: String) -> String? {
         guard !text.isEmpty else { return nil }
-        return "<" + text.utf16.map { String(format: "%04X", $0) }.joined() + ">"
+        return "<" + codes(text).map { String(format: "%04X", $0) }.joined() + ">"
     }
 }
 

@@ -91,10 +91,19 @@ enum MRCSegmenter {
         let crop: CGImage
     }
 
+    /// Masterplan A2 Stufe 2: farbige Tinte als eigene Maske mit Füllfarbe
+    /// (DeviceRGB 0…1). Höchstens `maximumColorMasks` je Seite.
+    struct ColorMask {
+        let mask: BilevelBuffer
+        let fill: (red: Double, green: Double, blue: Double)
+    }
+
     struct Segmentation {
         /// FG-Maske in der Bilevel-Pixelfolge (Bit 1 = Tinte), volle
         /// Rasterauflösung (§13.6 „hohe Auflösung").
         let mask: BilevelBuffer
+        /// A2 Stufe 2: farbige Tinte (vorher blieb sie im weichen Hintergrund).
+        var colorMasks: [ColorMask] = []
         /// Rekonstruierter Hintergrund (volle Auflösung; der Encoder resampelt
         /// auf backgroundDPI).
         let background: CGImage
@@ -183,8 +192,10 @@ enum MRCSegmenter {
         // Maske wird im Kern immer schwarz gefüllt – eine blaue Unterschrift
         // in der Maske wurde schwarz-blau gescheckt. Ist zu viel der Tinte
         // farbig, ist die Seite kein MRC-Fall.
+        var coloredInk = [Bool]()
         guard stripColoredInk(from: &foreground, chroma: chroma,
-                              width: width, height: height) else { return nil }
+                              width: width, height: height,
+                              colored: &coloredInk) else { return nil }
 
         // --- Connected Components → text/line-art-Maske ----------------------
         guard let (mask, blobRects, inkCount) =
@@ -206,10 +217,18 @@ enum MRCSegmenter {
         guard inkFraction >= minimumInkFraction,
               inkFraction <= maximumInkFraction else { return nil }
 
+        // --- A2 Stufe 2: farbige Tinte in eigene Masken -----------------------
+        // Höchstens drei Farben (Median je Gruppe); der Hintergrund wird auch
+        // unter ihnen aufgefüllt, die Tinte malt die Maske in ihrer Farbe.
+        let colorMasks = isGray ? [] : Self.colorMasks(coloredInk: coloredInk, rgb: pixels,
+                                                       width: width, height: height)
+        var inpaint = mask
+        for colorMask in colorMasks { inpaint = inpaint.union(colorMask.mask) }
+
         // --- Hintergrund-Rekonstruktion --------------------------------------
         let background = reconstructBackground(
             pixels: pixels, width: width, height: height,
-            components: isGray ? 1 : 3, mask: mask,
+            components: isGray ? 1 : 3, mask: inpaint,
             effectivelyGray: effectivelyGray)
         guard let background else { return nil }
 
@@ -224,7 +243,7 @@ enum MRCSegmenter {
             photoRegions.append(PhotoRegion(rect: clamped, crop: crop))
         }
 
-        return Segmentation(mask: mask, background: background,
+        return Segmentation(mask: mask, colorMasks: colorMasks, background: background,
                             backgroundIsGray: effectivelyGray,
                             photoRegions: photoRegions,
                             inkFraction: inkFraction,
@@ -244,16 +263,44 @@ enum MRCSegmenter {
     /// Nimmt farbige Tinte und ihren 1-px-Rand aus der Maske; der Rand trägt
     /// sonst als dunkler Saum Schwarz um die farbige Linie. Gibt `false`
     /// zurück, wenn mehr als `maximumColoredInkFraction` der Tinte farbig ist.
+    ///
+    /// N14 (A2): „Farbig“ entscheidet die mittlere Chroma der TINTE in der
+    /// 5×5-Umgebung, nicht das Rohpixel (3×3 reichte nicht: ein Saumpixel
+    /// sieht dort zur Hälfte sich selbst). JPEG-Farbsäume an schwarzer Schrift
+    /// (einzelne Randpixel mit Chroma > 40 neben farblosem Kern) zählten
+    /// vorher als farbige Tinte: Die Seite fiel aus MRC (über 3 %) oder die
+    /// Glyphen wurden ausgedünnt. Ein farbiger Strich bleibt farbig, auch
+    /// 1 px breit – gemittelt wird nur über Tinte, nicht über Papier.
     static func stripColoredInk(from foreground: inout [Bool], chroma: [UInt8],
                                 width: Int, height: Int) -> Bool {
-        var colored = [Bool](repeating: false, count: width * height)
+        var colored = [Bool]()
+        return stripColoredInk(from: &foreground, chroma: chroma, width: width,
+                               height: height, colored: &colored)
+    }
+
+    /// Wie oben; `colored` erhält die als farbige Tinte erkannten Pixel
+    /// (ohne Rand) – die Quelle der Farbmasken (A2 Stufe 2).
+    static func stripColoredInk(from foreground: inout [Bool], chroma: [UInt8],
+                                width: Int, height: Int,
+                                colored: inout [Bool]) -> Bool {
+        colored = [Bool](repeating: false, count: width * height)
         var ink = 0
         var coloredCount = 0
-        for i in 0..<(width * height) where foreground[i] {
-            ink += 1
-            if Int(chroma[i]) > coloredInkChroma {
-                colored[i] = true
-                coloredCount += 1
+        for y in 0..<height {
+            for x in 0..<width where foreground[y * width + x] {
+                ink += 1
+                var sum = 0
+                var count = 0
+                for yy in max(0, y - 2)...min(height - 1, y + 2) {
+                    for xx in max(0, x - 2)...min(width - 1, x + 2) where foreground[yy * width + xx] {
+                        sum += Int(chroma[yy * width + xx])
+                        count += 1
+                    }
+                }
+                if count > 0, sum > coloredInkChroma * count {
+                    colored[y * width + x] = true
+                    coloredCount += 1
+                }
             }
         }
         guard ink > 0, coloredCount > 0 else { return true }
@@ -273,6 +320,101 @@ enum MRCSegmenter {
             }
         }
         return true
+    }
+
+    // MARK: Farbmasken (Masterplan A2, Stufe 2)
+
+    static let maximumColorMasks = 3
+    /// Farbtonabstand (Grad), ab dem eine weitere Gruppe entsteht. Gruppiert
+    /// wird nach Farbton, nicht nach RGB: Die geglätteten Kanten eines blauen
+    /// Strichs sind heller, aber derselbe Farbton – nach RGB-Abstand bildeten
+    /// sie zwei eigene hellblaue Masken.
+    static let colorSplitHueDegrees = 40.0
+    /// Kleinere Gruppen lohnen keine eigene Maske; ihre Pixel bleiben im
+    /// Hintergrund (wie in Stufe 1).
+    static let minimumColorMaskPixels = 16
+
+    /// Gruppiert die farbige Tinte in höchstens drei Farbtöne.
+    /// Deterministisch: Startwert ist der Farbton des Medianpixels, weitere
+    /// Zentren jeweils das am weitesten entfernte Pixel (über
+    /// `colorSplitHueDegrees`); danach fünf Zuordnungsschritte mit
+    /// Kreismittel. Füllfarbe = Median je Kanal über den gesättigten Kern
+    /// der Gruppe (Chroma mindestens Gruppenmedian) – die hellen Kanten
+    /// würden die Farbe sonst ausbleichen.
+    static func colorMasks(coloredInk: [Bool], rgb: Data, width: Int,
+                           height: Int) -> [ColorMask] {
+        let count = width * height
+        guard coloredInk.count == count, rgb.count >= count * 3 else { return [] }
+        let bytes = [UInt8](rgb)
+        var indices: [Int] = []
+        for i in 0..<count where coloredInk[i] { indices.append(i) }
+        guard indices.count >= minimumColorMaskPixels else { return [] }
+        func hue(_ i: Int) -> Double {
+            let r = Double(bytes[i * 3]), g = Double(bytes[i * 3 + 1]), b = Double(bytes[i * 3 + 2])
+            let angle = atan2(3.0.squareRoot() * (g - b), 2 * r - g - b) * 180 / .pi
+            return angle < 0 ? angle + 360 : angle
+        }
+        func chroma(_ i: Int) -> Int {
+            let r = Int(bytes[i * 3]), g = Int(bytes[i * 3 + 1]), b = Int(bytes[i * 3 + 2])
+            return max(r, g, b) - min(r, g, b)
+        }
+        func gap(_ a: Double, _ b: Double) -> Double {
+            let d = abs(a - b).truncatingRemainder(dividingBy: 360)
+            return min(d, 360 - d)
+        }
+        let hues = indices.map(hue)
+        var centers = [hues.sorted()[hues.count / 2]]
+        while centers.count < maximumColorMasks {
+            var farthest = -1.0
+            var pick = hues[0]
+            for h in hues {
+                let d = centers.map { gap(h, $0) }.min() ?? 0
+                if d > farthest { farthest = d; pick = h }
+            }
+            guard farthest > colorSplitHueDegrees else { break }
+            centers.append(pick)
+        }
+        var assignment = [Int](repeating: 0, count: indices.count)
+        for _ in 0..<5 {
+            for k in indices.indices {
+                var best = 0
+                var bestGap = Double.infinity
+                for (n, center) in centers.enumerated() where gap(hues[k], center) < bestGap {
+                    bestGap = gap(hues[k], center); best = n
+                }
+                assignment[k] = best
+            }
+            for n in centers.indices {
+                var sx = 0.0, sy = 0.0
+                for k in indices.indices where assignment[k] == n {
+                    sx += cos(hues[k] * .pi / 180); sy += sin(hues[k] * .pi / 180)
+                }
+                if sx != 0 || sy != 0 {
+                    let mean = atan2(sy, sx) * 180 / .pi
+                    centers[n] = mean < 0 ? mean + 360 : mean
+                }
+            }
+        }
+        let rowBytes = BilevelBuffer.rowBytes(width: width)
+        var masks: [ColorMask] = []
+        for n in centers.indices {
+            let members = indices.indices.filter { assignment[$0] == n }.map { indices[$0] }
+            guard members.count >= minimumColorMaskPixels else { continue }
+            var bits = [UInt8](repeating: 0, count: rowBytes * height)
+            for i in members {
+                let x = i % width, y = i / width
+                bits[y * rowBytes + x / 8] |= 0x80 >> UInt8(x % 8)
+            }
+            guard let buffer = BilevelBuffer(width: width, height: height, data: Data(bits)) else { continue }
+            let medianChroma = members.map(chroma).sorted()[members.count / 2]
+            let core = members.filter { chroma($0) >= medianChroma }
+            func channel(_ c: Int) -> Double {
+                let values = core.map { bytes[$0 * 3 + c] }.sorted()
+                return Double(values[values.count / 2]) / 255
+            }
+            masks.append(ColorMask(mask: buffer, fill: (channel(0), channel(1), channel(2))))
+        }
+        return masks
     }
 
     // MARK: Sobel-Edge-Map

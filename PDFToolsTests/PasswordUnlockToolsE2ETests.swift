@@ -83,10 +83,10 @@ import PDFKit
         #expect(vm.project.documents.first?.fileName == url.lastPathComponent)
 
         // Eine Quelle: Ergebnis bleibt mit demselben Passwort geschützt.
-        let out = FileManager.default.temporaryDirectory.appendingPathComponent("b2-org-\(UUID().uuidString).pdf")
-        try await PageAssemblyService.assemble(pages: vm.project.pages, to: out) { _ in }
-        let outcome = MergeViewModel.MergeOutcome(url: out, pageCount: 1, outputBytes: 1,
-                                                  combinedInputBytes: 1, kind: .extracted)
+        // (N10: über den echten Weg – der Kontext hängt am Ergebnis.)
+        vm.mergeAndPrepare()
+        #expect(await Self.within(30) { vm.outcome != nil || vm.errorMessage != nil })
+        let outcome = try #require(vm.outcome, "\(vm.errorMessage ?? "")")
         let dest = FileManager.default.temporaryDirectory.appendingPathComponent("b2-org-dest-\(UUID().uuidString).pdf")
         defer { try? FileManager.default.removeItem(at: dest) }
         #expect(throws: SourceOverwriteError.self) { try vm.saveOutcome(outcome, to: url) }
@@ -100,5 +100,111 @@ import PDFKit
         let losses = MergeLossSummary.losses(for: vm.project.documents.map(\.url) + [plain],
                                              unlocked: vm.unlockedOriginalNames)
         #expect(losses.contains { $0.feature == .encryption && $0.files == [url.lastPathComponent] })
+    }
+
+    // MARK: Masterplan N10 – Passwortschutz in Organisieren
+
+    /// Drei Seiten, mit Benutzerpasswort (AES-256) verschlüsselt.
+    static func lockedThreePages() throws -> URL {
+        let doc = PDFFixtures.document(pages: (1...3).map { PDFFixtures.textPage("N10-SEITE-\($0)") })
+        let plain = try PDFFixtures.write(doc, name: "n10-plain")
+        defer { try? FileManager.default.removeItem(at: plain) }
+        let locked = FileManager.default.temporaryDirectory
+            .appendingPathComponent("n10-locked-\(UUID().uuidString).pdf")
+        let process = Process()
+        process.executableURL = Compressor.bundledQPDFURL()
+        process.arguments = ["--encrypt", "--user-password=\(PasswordUnlockE2ETests.password)",
+                             "--owner-password=besitzer", "--bits=256", "--", plain.path, locked.path]
+        try process.run()
+        process.waitUntilExit()
+        try #require(process.terminationStatus == 0)
+        return locked
+    }
+
+    static func unlockedOrganizer(_ url: URL) async throws -> MergeViewModel {
+        let vm = MergeViewModel()
+        vm.attachUndoManager(UndoManager())
+        vm.importDocuments([url])
+        #expect(await within(5) { vm.lockedPending == [url] })
+        vm.unlockPending(password: PasswordUnlockE2ETests.password)
+        #expect(await within(10) { vm.project.pages.count == 3 })
+        try #require(vm.project.pages.count == 3)
+        return vm
+    }
+
+    static func isLockedWithTestPassword(_ url: URL, pages: Int) -> Bool {
+        DocumentProbe.inspect(url) == .locked
+            && DocumentProbe.inspect(url, password: PasswordUnlockE2ETests.password) == .ok(pageCount: pages)
+    }
+
+    /// Aufteilen einer entsperrten Quelle: Jeder Teil ist mit demselben
+    /// Passwort verschlüsselt. Vorher schrieb `writeChunks` Klartext.
+    @Test func aufteilenBehaeltDenSchutz() async throws {
+        let url = try Self.lockedThreePages()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let vm = try await Self.unlockedOrganizer(url)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("n10-split-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let pages = vm.project.pages
+        let written = try await vm.writeChunks([[pages[0]], [pages[1], pages[2]]], to: folder, baseName: "teil")
+        #expect(written.count == 2)
+        #expect(Self.isLockedWithTestPassword(written[0], pages: 1), "Teil 1 ist Klartext")
+        #expect(Self.isLockedWithTestPassword(written[1], pages: 2), "Teil 2 ist Klartext")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).count == 2)
+    }
+
+    /// Übergabe an Komprimieren: geschützt hinüber, Komprimieren entsperrt
+    /// selbst, und das Ergebnis ist wieder geschützt.
+    @Test(.timeLimit(.minutes(3))) func uebergabeAnKomprimierenBehaeltDenSchutz() async throws {
+        let url = try Self.lockedThreePages()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let vm = try await Self.unlockedOrganizer(url)
+        vm.selectAll()
+        vm.extractSelectedPages()
+        #expect(await Self.within(30) { vm.outcome != nil || vm.errorMessage != nil })
+        let outcome = try #require(vm.outcome, "\(vm.errorMessage ?? "")")
+        let handoff = try #require(vm.handOffOutcome(outcome))
+        #expect(handoff.password == PasswordUnlockE2ETests.password)
+        #expect(Self.isLockedWithTestPassword(handoff.url, pages: 3), "Übergabe als Klartext")
+
+        let compress = CompressionViewModel(defaults: .isolatedForTest())
+        compress.select(handoff.url, password: handoff.password)
+        #expect(await Self.within(15) { compress.unlocked != nil }, "Komprimieren hat nicht selbst entsperrt")
+        compress.compress()
+        #expect(await Self.within(120) { compress.pendingResult != nil || compress.errorMessage != nil })
+        let result = try #require(compress.pendingResult, "\(compress.errorMessage ?? "")")
+        defer { compress.discardPending() }
+        #expect(DocumentProbe.inspect(result.outputURL) == .locked, "Komprimiertes Ergebnis ist Klartext")
+    }
+
+    /// Alle Zwischenstände liegen im Sitzungsordner (der beim Beenden
+    /// verschwindet), nicht lose im Temp-Stamm. Eine Auswahl aus der
+    /// geschützten Quelle eines Mehr-Quellen-Projekts bleibt geschützt.
+    @Test func zwischenstaendeImSitzungsordnerUndKontextAmErgebnis() async throws {
+        let url = try Self.lockedThreePages()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let vm = try await Self.unlockedOrganizer(url)
+        let plain = try PDFFixtures.vectorTextPDF(lines: 2)
+        defer { try? FileManager.default.removeItem(at: plain) }
+        vm.importDocuments([plain])
+        #expect(await Self.within(10) { vm.project.pages.count == 4 })
+        let session = SessionScratch.directory.standardizedFileURL.path
+        for doc in vm.project.documents where doc.url != plain {
+            #expect(doc.url.standardizedFileURL.path.hasPrefix(session), "Arbeitskopie außerhalb: \(doc.url.path)")
+        }
+        // Nur Seiten der geschützten Quelle auswählen.
+        vm.selectAll()
+        let lockedPages = vm.project.pages.filter { $0.sourceURL != plain }
+        #expect(lockedPages.count == 3)
+        #expect(vm.encryption(for: lockedPages) != nil)
+        #expect(vm.encryption(for: vm.project.pages) == nil, "Mehr-Quellen-Ergebnis kann nicht geschützt sein")
+
+        vm.mergeAndPrepare()
+        #expect(await Self.within(30) { vm.outcome != nil || vm.errorMessage != nil })
+        let merged = try #require(vm.outcome)
+        #expect(merged.url.standardizedFileURL.path.hasPrefix(session), "Ergebnis außerhalb: \(merged.url.path)")
+        vm.discardOutcome()
+        #expect(!FileManager.default.fileExists(atPath: merged.url.path))
     }
 }

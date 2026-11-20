@@ -106,4 +106,57 @@ import PDFKit
                 "Ergebnisse des alten Modus stehen noch")
         vm.clearBulk()
     }
+
+    /// N14 (B4): Wechsel zu „Eigene“ nach dem Lauf startet nicht mit
+    /// Startwerten, sondern wartet auf den Knopf; danach geänderte
+    /// Einstellungen bieten den Knopf erneut an.
+    @Test func eigeneImStapelStartetErstAufWunsch() async throws {
+        let dir = try Self.workDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let inputs = try (1...2).map { try Self.healthy("e-\($0).pdf", in: dir) }
+        let vm = CompressionViewModel(defaults: .isolatedForTest())
+        vm.selectMany(inputs)
+        _ = try await vm.runBulkCompression(vm.bulkInputs)
+        #expect(vm.bulkSuccesses.count == 2)
+        vm.changeBulkMode(to: .custom)
+        #expect(!vm.isWorking, "„Eigene“ startete sofort")
+        #expect(vm.bulkSuccesses.isEmpty, "Ergebnisse des alten Modus stehen noch")
+        #expect(vm.bulkNeedsCustomStart)
+        vm.startBulkWithCurrentSettings()
+        await Self.waitIdle(vm)
+        #expect(vm.bulkSuccesses.count == 2)
+        #expect(!vm.bulkNeedsCustomStart)
+        vm.customQuality = vm.customQuality > 0.5 ? 0.4 : 0.8
+        #expect(vm.bulkNeedsCustomStart, "Geänderte Einstellungen ohne Neustart-Knopf")
+        vm.clearBulk()
+    }
+
+    /// N14 (B2): Eine gesperrte Datei im Stapel lässt sich entsperren; das
+    /// Ergebnis ist wieder mit demselben Passwort geschützt. Ein falsches
+    /// Passwort heißt so.
+    @Test func gesperrteDateiImStapelEntsperren() async throws {
+        let dir = try Self.workDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let healthy = try Self.healthy("offen.pdf", in: dir)
+        let locked = try PasswordUnlockE2ETests.lockedLetter()
+        defer { try? FileManager.default.removeItem(at: locked) }
+        let vm = CompressionViewModel(defaults: .isolatedForTest())
+        vm.selectMany([healthy, locked])
+        _ = try await vm.runBulkCompression(vm.bulkInputs)
+        #expect(vm.bulkVerdicts[locked] == .locked)
+        #expect(vm.bulkSuccesses.count == 1)
+
+        let wrong = await vm.unlockBulkFile(locked, password: "falsch")
+        #expect(wrong == String(localized: "Das Passwort stimmt nicht."))
+        #expect(await vm.unlockBulkFile(locked, password: PasswordUnlockE2ETests.password) == nil)
+        #expect(vm.bulkVerdicts[locked]?.isOK == true)
+
+        _ = try await vm.runBulkCompression(vm.bulkInputs)
+        let result = try #require(vm.bulkResult(for: locked), "\(vm.bulkErrors[locked] ?? "")")
+        #expect(DocumentProbe.inspect(result.outputURL) == .locked, "Ergebnis ist Klartext")
+        #expect(DocumentProbe.inspect(result.outputURL, password: PasswordUnlockE2ETests.password).isOK)
+        let workingCopy = try #require(vm.bulkUnlocked[locked]?.workingCopy)
+        vm.clearBulk()
+        #expect(!FileManager.default.fileExists(atPath: workingCopy.path), "Arbeitskopie blieb liegen")
+    }
 }

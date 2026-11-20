@@ -28,9 +28,18 @@ import PDFKit
         let anyGrayscale = outcome.plan.transformedActions.contains(where: \.grayscale)
         #expect(!anyGrayscale, "Grayscale war nicht angefordert")
 
+        // Masterplan N5: Die Vorlage kommt aus CoreGraphics und trägt selbst
+        // [/ICCBased <sRGB>]; seit N5 bleibt dieses Profil am ersetzten Bild
+        // stehen (vor A4 wurde daraus /DeviceRGB). Gemeint ist „Farbe bleibt
+        // Farbe“: drei Kanäle, kein Grau – in welchem RGB-Farbraum, prüfen
+        // die ICC-Tests.
+        let before = try #require(try PDFCoreDocument(path: url.path).imageResources().first)
         let after = try #require(try PDFCoreDocument(path: out.path)
             .imageResources().first)
-        #expect(after.colorSpace == .deviceRGB, "Farbe ging ohne Anforderung verloren")
+        #expect(after.pixelColorSpace.componentCount == 3,
+                "Farbe ging ohne Anforderung verloren: \(before.colorSpace) → \(after.colorSpace)")
+        #expect(after.pixelColorSpace == before.pixelColorSpace,
+                "Farbraum der Quelle nicht übernommen: \(before.colorSpace) → \(after.colorSpace)")
     }
 
     @Test func grayscaleOnReachesTheProductionEngine() throws {

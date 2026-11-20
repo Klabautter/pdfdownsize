@@ -302,7 +302,7 @@ enum CompressionEstimator {
 
     /// Schnellschätzung aus dem Inventar – für die Anzeige vor dem Lauf.
     static func quickEstimate(url: URL, options: CompressionOptions,
-                              isCancelled: (() -> Bool)? = nil) -> CompressionEstimate? {
+                              isCancelled: (@Sendable () -> Bool)? = nil) -> CompressionEstimate? {
         guard let document = try? PDFCoreDocument(path: url.path),
               let resources = try? document.imageResources() else { return nil }
         if let isCancelled, isCancelled() { return nil }
@@ -625,7 +625,7 @@ enum CompressionEstimator {
     /// Bytes die Planung bereits gemessen hat.
     static func estimate(url: URL, options: CompressionOptions,
                          mode: EstimateMode = .fast,
-                         isCancelled: (() -> Bool)? = nil) -> CompressionEstimate? {
+                         isCancelled: (@Sendable () -> Bool)? = nil) -> CompressionEstimate? {
         guard let document = try? PDFCoreDocument(path: url.path),
               let resources = try? document.imageResources() else { return nil }
         let pixels = LibQPDFPixelSource(document: document)

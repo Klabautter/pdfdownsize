@@ -255,7 +255,7 @@ enum PaletteOptimizer {
                         < channelValue($1, channel: channel)
                 }
                 var seen = 0
-                for (position, key) in ordered.enumerated() {
+                for key in ordered {
                     seen += bins[key].count
                     if seen * 2 >= count {
                         splitValue = channelValue(key, channel: channel)

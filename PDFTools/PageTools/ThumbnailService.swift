@@ -7,7 +7,7 @@ actor PDFDocumentPool {
     private var order: [URL] = []
     private let limit = 6
 
-    func document(for url: URL) -> PDFDocument? {
+    private func document(for url: URL) -> PDFDocument? {
         if let doc = cache[url] { return doc }
         guard let doc = PDFDocument(url: url), !doc.isLocked else { return nil }
         cache[url] = doc
@@ -19,10 +19,26 @@ actor PDFDocumentPool {
         return doc
     }
 
+    /// G6: Eine eigene Kopie der Seite, im Actor erzeugt. Vorher gab der Pool
+    /// das geteilte `PDFDocument` heraus, und parallele Vorschau-Aufrufe
+    /// griffen gleichzeitig darauf zu – PDFKit ist dafür nicht threadsicher.
+    /// Die Kopie gehört danach allein dem Aufrufer.
+    func detachedPage(for url: URL, pageIndex: Int) -> DetachedPage? {
+        guard let page = document(for: url)?.page(at: pageIndex),
+              let copy = page.copy() as? PDFPage else { return nil }
+        return DetachedPage(page: copy, rotation: page.rotation)
+    }
+
     func evictAll() {
         cache.removeAll()
         order.removeAll()
     }
+}
+
+/// Eine Seitenkopie, die genau ein Aufrufer benutzt (siehe `detachedPage`).
+struct DetachedPage: @unchecked Sendable {
+    let page: PDFPage
+    let rotation: Int
 }
 
 struct ThumbnailKey: Hashable {
@@ -70,10 +86,9 @@ final class ThumbnailService: @unchecked Sendable {
     func thumbnail(sourceID: UUID, url: URL, pageIndex: Int,
                    additionalRotation: Int, pixelHeight: CGFloat = 320) async -> NSImage? {
 
-        guard let doc = await pool.document(for: url),
-              let page = doc.page(at: pageIndex) else { return nil }
+        guard let detached = await pool.detachedPage(for: url, pageIndex: pageIndex) else { return nil }
 
-        let absolute = RotationNormalizer.normalized(page.rotation + additionalRotation)
+        let absolute = RotationNormalizer.normalized(detached.rotation + additionalRotation)
         let key = ThumbnailKey(sourceID: sourceID, pageIndex: pageIndex,
                                absoluteRotation: absolute, pixelHeight: pixelHeight)
 
@@ -81,7 +96,7 @@ final class ThumbnailService: @unchecked Sendable {
         // Weggescrollt, während das Dokument geöffnet wurde: nicht rendern.
         if Task.isCancelled { return nil }
 
-        let pageCopy = page.copy() as! PDFPage
+        let pageCopy = detached.page
         pageCopy.rotation = absolute
 
         // CropBox statt MediaBox: Das Vorschaubild zeigt, was der Betrachter

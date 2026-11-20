@@ -317,3 +317,100 @@ private struct SeededGenerator: RandomNumberGenerator {
 private extension CGRect {
     var area: Double { Double(width * height) }
 }
+
+// N14 (A2) und A2 Stufe 2 – als Erweiterung der Suite (nicht im Zufallsgenerator).
+extension MRCSegmentationTests {
+    // MARK: N14 (A2) – Farbsäume an schwarzer Schrift
+
+    /// Schwarzer Balken 6 px breit, an beiden Rändern je eine Spalte mit
+    /// JPEG-Farbsaum (Chroma 90). Vorher zählten die Saumpixel als farbige
+    /// Tinte (2/6 = 33 % > 3 %) – die Seite fiel aus MRC.
+    @Test func farbsaumAnSchwarzerSchriftIstKeineFarbigeTinte() {
+        let (w, h) = (40, 40)
+        var fg = [Bool](repeating: false, count: w * h)
+        var chroma = [UInt8](repeating: 0, count: w * h)
+        for y in 5..<35 {
+            for x in 10..<16 {
+                fg[y * w + x] = true
+                if x == 10 || x == 15 { chroma[y * w + x] = 90 }
+            }
+        }
+        let before = fg.filter { $0 }.count
+        #expect(MRCSegmenter.stripColoredInk(from: &fg, chroma: chroma, width: w, height: h))
+        #expect(fg.filter { $0 }.count == before, "Saumpixel dünnten die Glyphe aus")
+    }
+
+    /// Ein 1 px breiter blauer Strich (Chroma 120) auf Papier bleibt farbige
+    /// Tinte und verlässt samt Rand die Maske – auch mit Mittelung.
+    @Test func duennerFarbigerStrichBleibtFarbig() {
+        let (w, h) = (60, 60)
+        var fg = [Bool](repeating: false, count: w * h)
+        var chroma = [UInt8](repeating: 0, count: w * h)
+        // Viel schwarze Schrift, damit der Anteil unter 3 % bleibt.
+        for y in 0..<60 { for x in 0..<40 { fg[y * w + x] = true } }
+        for y in 10..<50 { fg[y * w + 50] = true; chroma[y * w + 50] = 120 }
+        #expect(MRCSegmenter.stripColoredInk(from: &fg, chroma: chroma, width: w, height: h))
+        #expect((10..<50).allSatisfy { !fg[$0 * w + 50] }, "Blauer Strich blieb in der schwarzen Maske")
+    }
+
+    // MARK: Masterplan A2 Stufe 2 – farbige Masken
+
+    /// Weißes Papier mit schwarzen Textbalken und einer blauen Linie.
+    static func pageWithBlueInk() throws -> CGImage {
+        let (w, h) = (900, 1200)
+        let ctx = try #require(CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                         bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                         bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        ctx.setFillColor(CGColor(red: 0.97, green: 0.97, blue: 0.96, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.setFillColor(CGColor(red: 0.05, green: 0.05, blue: 0.05, alpha: 1))
+        for row in 0..<40 {
+            for word in 0..<12 {
+                ctx.fill(CGRect(x: 60 + word * 65, y: 80 + row * 26, width: 48, height: 12))
+            }
+        }
+        ctx.setStrokeColor(CGColor(red: 0.1, green: 0.2, blue: 0.85, alpha: 1))
+        ctx.setLineWidth(3)
+        ctx.move(to: CGPoint(x: 120, y: 1150))
+        ctx.addLine(to: CGPoint(x: 420, y: 1120))
+        ctx.strokePath()
+        return try #require(ctx.makeImage())
+    }
+
+    @Test func blaueTinteBekommtEigeneFarbmaske() throws {
+        let image = try Self.pageWithBlueInk()
+        let segmentation = try #require(MRCSegmenter.segment(image))
+        #expect(segmentation.colorMasks.count == 1,
+                "Farbmasken: \(segmentation.colorMasks.map { ($0.fill, $0.mask.data.reduce(0) { $0 + $1.nonzeroBitCount }) })")
+        let fill = try #require(segmentation.colorMasks.first?.fill)
+        #expect(fill.blue > 0.6 && fill.red < 0.3 && fill.green < 0.4, "Füllfarbe \(fill)")
+        // Die blaue Linie steht nicht in der schwarzen Maske.
+        let black = segmentation.mask
+        let color = try #require(segmentation.colorMasks.first?.mask)
+        let row = BilevelBuffer.rowBytes(width: black.width)
+        var overlap = 0, colored = 0
+        for i in 0..<min(black.data.count, color.data.count) {
+            overlap += (black.data[i] & color.data[i]).nonzeroBitCount
+            colored += color.data[i].nonzeroBitCount
+        }
+        #expect(colored > 300, "Farbmaske fast leer: \(colored) Pixel")
+        #expect(overlap == 0, "\(overlap) Pixel in beiden Masken")
+        _ = row
+    }
+
+    /// Bündel Version 2 trägt die Füllfarbe; Version 1 bleibt lesbar.
+    @Test func buendelVersionZweiUndEins() throws {
+        let entry = MRCEncoder.Bundle.Entry(kind: 1, isMask: true, components: 1, width: 8, height: 8,
+                                            rect: nil, globals: Data(), data: Data([1, 2, 3]),
+                                            fill: (0.1, 0.2, 0.85))
+        let decoded = try #require(MRCEncoder.Bundle.decode(MRCEncoder.Bundle.encode([entry])))
+        #expect(decoded.count == 1)
+        #expect(decoded[0].fill?.blue == 0.85 && decoded[0].data == Data([1, 2, 3]))
+        // Version 1 von Hand: kein Füllfeld.
+        var v1 = Data(MRCEncoder.Bundle.magic) + Data([1, 1, 1, 1, 1, 0])
+        for value in [UInt32(8), 8, 0, 3] { var le = value.littleEndian; v1.append(Data(bytes: &le, count: 4)) }
+        v1.append(Data(count: 32)); v1.append(Data([1, 2, 3]))
+        let old = try #require(MRCEncoder.Bundle.decode(v1))
+        #expect(old.first?.fill == nil && old.first?.data == Data([1, 2, 3]))
+    }
+}

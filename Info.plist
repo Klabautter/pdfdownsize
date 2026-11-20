@@ -23,6 +23,9 @@
 	</array>
 	<key>CFBundleName</key>
 	<string>PDFdownsize</string>
+	<!-- Masterplan G5: Sparkle installiert aus der Sandbox über den XPC-Dienst. -->
+	<key>SUEnableInstallerLauncherService</key>
+	<true/>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUFeedURL</key>
