@@ -56,13 +56,13 @@ enum FrameworkProbe {
     }
 
     /// Eine für den Hilfsprozess lesbare Fassung von `url`: in der Sandbox
-    /// eine Kopie im eigenen Temp-Ordner (auf APFS ein Klon, also ohne
-    /// Kopierkosten), sonst `url` selbst. `cleanup` entfernt die Kopie.
+    /// eine Kopie im Sitzungsordner (auf APFS ein Klon ohne Kopierkosten,
+    /// beim Beenden/Absturz abgeräumt), sonst `url` selbst. `cleanup` entfernt
+    /// die Kopie.
     static func readableForHelper(_ url: URL) -> (url: URL, cleanup: () -> Void) {
         let temp = FileManager.default.temporaryDirectory.standardizedFileURL.path
         guard isSandboxed, !url.standardizedFileURL.path.hasPrefix(temp) else { return (url, {}) }
-        let copy = FileManager.default.temporaryDirectory
-            .appendingPathComponent("probe-\(UUID().uuidString).pdf")
+        let copy = SessionScratch.makeURL(prefix: "probe-")
         do {
             try FileManager.default.copyItem(at: url, to: copy)
             return (copy, { try? FileManager.default.removeItem(at: copy) })
@@ -96,13 +96,15 @@ enum FrameworkProbe {
 
     /// Render-Stichprobe: Messwerte je Seite, oder der Grund, warum es keine gibt.
     static func renderSample(referenceURL: URL, outputURL: URL,
-                             pages: [Int]) -> Result<[PDFValidator.RenderSampleMeasurement], Failure> {
+                             pages: [Int],
+                             isCancelled: (@Sendable () -> Bool)? = nil) -> Result<[PDFValidator.RenderSampleMeasurement], Failure> {
         let list = pages.map(String.init).joined(separator: ",")
         let reference = readableForHelper(referenceURL)
         let output = readableForHelper(outputURL)
         defer { reference.cleanup(); output.cleanup() }
         return run(["render", reference.url.path, output.url.path, list],
-                   pageTimeout: PDFValidator.renderSampleTimeout)
+                   pageTimeout: PDFValidator.renderSampleTimeout,
+                   isCancelled: isCancelled)
             .flatMap { data in
                 guard let pages = try? JSONDecoder().decode([PDFValidator.RenderSampleMeasurement].self, from: data)
                 else { return .failure(.noResult) }

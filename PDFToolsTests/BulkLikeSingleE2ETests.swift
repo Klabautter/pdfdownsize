@@ -178,8 +178,81 @@ import PDFKit
         #expect(vm.bulkInputs.count == 3)
         #expect(vm.bulkUnlocked[locked]?.workingCopy == copy, "Entsperren nach dem Hinzufügen vergessen")
         #expect(FileManager.default.fileExists(atPath: copy.path))
+        // N30: Die asynchrone Vorprüfung (`refreshBulkPageCounts`) darf eine
+        // bereits entsperrte Datei nicht wieder auf `.locked` überschreiben.
+        for _ in 0..<200 where vm.bulkPageCounts[more] == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(vm.bulkVerdicts[locked]?.isOK == true,
+                "Vorprüfung überschrieb entsperrte Datei: \(String(describing: vm.bulkVerdicts[locked]))")
+        #expect(vm.bulkPageCounts[locked] != nil)
         _ = try await vm.runBulkCompression(vm.bulkInputs)
         #expect(vm.bulkResult(for: locked) != nil, "entsperrte Datei übersprungen")
+        vm.clearBulk()
+    }
+
+    /// Übergang Einzel (entsperrt) → Stapel: Das entsperrte Einzel-Dokument
+    /// bleibt beim Hinzufügen einer zweiten Datei entsperrt.
+    @Test func einzelEntsperrtBleibtBeimWechselInDenStapel() async throws {
+        let dir = try Self.workDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let other = try Self.healthy("zweite.pdf", in: dir)
+        let locked = try PasswordUnlockE2ETests.lockedLetter()
+        defer { try? FileManager.default.removeItem(at: locked) }
+
+        let vm = CompressionViewModel(defaults: .isolatedForTest())
+        vm.select(locked)
+        for _ in 0..<200 where vm.rejection != .locked {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        vm.unlock(password: PasswordUnlockE2ETests.password)
+        for _ in 0..<200 where vm.rejection != nil || vm.unlocked == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(vm.rejection == nil)
+        #expect(vm.unlocked != nil)
+
+        vm.add([other])
+        #expect(!vm.bulkInputs.isEmpty)
+        #expect(vm.bulkUnlocked[locked] != nil, "Entsperrung ging beim Übergang Einzel → Stapel verloren")
+        for _ in 0..<200 where vm.bulkPageCounts[other] == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(vm.bulkVerdicts[locked]?.isOK == true)
+        _ = try await vm.runBulkCompression(vm.bulkInputs)
+        #expect(vm.bulkSuccesses.count == 2)
+        vm.clearBulk()
+    }
+
+    /// Entfernen einer Datei aus dem Stapel räumt Signatur-Flag, Verdict und
+    /// gecachte Dateigröße mit ab (kein stehender Signatur-Hinweis für eine
+    /// längst entfernte Datei).
+    @Test func entfernenRaeumtSignaturUndVerdictAuf() async throws {
+        let dir = try Self.workDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let plain = try Self.healthy("normal.pdf", in: dir)
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let page = b.addPage(parent: pages)
+        b.fill(pages, "<</Type/Pages/Kids[\(page) 0 R]/Count 1>>")
+        let sigValue = b.addObject("<</Type/Sig/Filter/Adobe.PPKLite/ByteRange[0 10 20 30]/Contents<00>>>")
+        let sigField = b.addObject("<</Type/Annot/Subtype/Widget/FT/Sig/T(sig1)/V \(sigValue) 0 R/Rect[0 0 0 0]/P \(page) 0 R>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R/AcroForm<</Fields[\(sigField) 0 R]/SigFlags 3>>>>")
+        let signed = try b.write(rootObject: root, prefix: "bulk-signed")
+        defer { try? FileManager.default.removeItem(at: signed) }
+
+        let vm = CompressionViewModel(defaults: .isolatedForTest())
+        vm.selectMany([plain, signed])
+        for _ in 0..<200 where !vm.bulkSigned.contains(signed) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(vm.bulkSigned.contains(signed))
+        #expect(vm.bulkFileSizes[signed] != nil)
+
+        vm.removeBulkInput(at: 1)
+        #expect(!vm.bulkSigned.contains(signed))
+        #expect(vm.bulkVerdicts[signed] == nil)
+        #expect(vm.bulkFileSizes[signed] == nil)
         vm.clearBulk()
     }
 }

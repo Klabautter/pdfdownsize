@@ -40,7 +40,9 @@ enum MergeLossSummary {
             unique.append(url)
         }
         guard unique.count > 1 else { return [] }
-        return detect(unique, unlocked: unlocked)
+        // N35: Der Mehr-Quellen-Weg kopiert verschachtelte Lesezeichen – sie
+        // gehen dort nicht verloren (anders als beim Ein-Quellen-Neuaufbau).
+        return detect(unique, unlocked: unlocked).filter { $0.feature != .nestedOutlines }
     }
 
     /// N1-Rest: Eine einzige Quelle, die neu aufgebaut werden musste (der

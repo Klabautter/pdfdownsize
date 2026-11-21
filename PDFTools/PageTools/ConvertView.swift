@@ -27,7 +27,8 @@ struct ConvertView: View {
                                      onClose: { vm.reset() },
                                      onUnlock: { vm.unlock(password: $0) },
                                      passwordError: vm.passwordError,
-                                     isUnlocking: vm.isUnlocking)
+                                     isUnlocking: vm.isUnlocking,
+                                     preservesPassword: false)
             case .ready, .working, .done:
                 workingState
             }
@@ -36,6 +37,7 @@ struct ConvertView: View {
         // Für Menü-Befehle (§33-Pattern): VM im Fokus-Environment melden.
         .focusedSceneObject(vm)
         .dropDestination(for: URL.self) { urls, _ in
+            guard !vm.isWorking else { return false }
             vm.accept(urls)
             return true
         } isTargeted: { targeted in

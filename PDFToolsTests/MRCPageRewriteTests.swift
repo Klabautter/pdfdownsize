@@ -239,4 +239,138 @@ import CoreGraphics
         let dE = ((a.0 - o.0) * (a.0 - o.0) + (a.1 - o.1) * (a.1 - o.1) + (a.2 - o.2) * (a.2 - o.2)).squareRoot()
         #expect(dE < 6, "Farbe der Linie verschoben: ΔE \(dE), Original \(a), Ausgabe \(o)")
     }
+
+    /// Masterplan N31: Ein grauer Scan im ROMM-RGB-Profil (Gamma 1,8) muss in
+    /// MRC-Graustufen sein Quellprofil durch `reconstructBackground` behalten,
+    /// damit `drawResize` über das Profil nach Grau konvertiert (statt die
+    /// Rohbytes wie sRGB zu lesen → ΔE ~8).
+    @Test func grauMrcAufRommProfilBehaeltDieHelligkeit() throws {
+        let (w, h) = (1200, 1600)
+        let romm = try #require(CGColorSpace(name: CGColorSpace.rommrgb))
+        let icc = try #require(romm.copyICCData() as Data?)
+        let ctx = try #require(CGContext(
+            data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: romm, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        // Mittleres getöntes Grau (auf ROMM Gamma 1,8 deutlich anders als sRGB)
+        ctx.setFillColor(CGColor(colorSpace: romm, components: [0.68, 0.68, 0.68, 1])!)
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        // Scharfe dunkle Textstriche, damit MRC-Segmentierung Text + Hintergrund trennt.
+        ctx.setFillColor(CGColor(colorSpace: romm, components: [0.05, 0.05, 0.05, 1])!)
+        for row in stride(from: 120, to: h - 120, by: 64) {
+            for col in stride(from: 90, to: w - 120, by: 28) {
+                ctx.fill(CGRect(x: col, y: row, width: 12, height: 20))
+            }
+        }
+        let sourceImage = try #require(ctx.makeImage())
+
+        // 1) Direktprüfung: `reconstructBackground` reicht das angehängte Quellprofil weiter.
+        ImageResampler.tagSourceProfile(sourceImage, romm)
+        let seg = try #require(MRCSegmenter.segment(sourceImage))
+        #expect(ImageResampler.sourceProfile(of: seg.background) != nil,
+                "reconstructBackground hat das Quellprofil verloren")
+
+        // 2) End-to-End im PDF mit [/ICCBased ROMM]: Helligkeit der grauen
+        //    Hintergrundfläche muss im sRGB-Rendering stimmen (ΔE < 3).
+        let rgb = try #require(ImageResampler.rawBitmap(sourceImage, components: 3))
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let profile = b.addStream(dictionary: "/N 3", data: icc)
+        let raster = b.addStream(
+            dictionary: "/Type/XObject/Subtype/Image/Width \(w)/Height \(h)"
+                + "/BitsPerComponent 8/ColorSpace[/ICCBased \(profile) 0 R]/Filter/FlateDecode",
+            data: try #require(ImageProcessor.flate(rgb)))
+        let resources = b.addObject("<</XObject<</Im0 \(raster) 0 R>>>>")
+        let content = b.addStream(dictionary: "", content: "q 600 0 0 800 0 0 cm /Im0 Do Q")
+        let page = b.addObject("<</Type/Page/Parent \(pages) 0 R/MediaBox[0 0 600 800]"
+            + "/Resources \(resources) 0 R/Contents \(content) 0 R>>")
+        b.fill(pages, "<</Type/Pages/Kids[\(page) 0 R]/Count 1>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R>>")
+        let input = try b.write(rootObject: root, prefix: "n31-romm")
+        defer { try? FileManager.default.removeItem(at: input) }
+        let output = Self.tempURL("n31-romm")
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        let outcome = try CompressionPipeline.run(inputURL: input, outputURL: output,
+                                                  options: Self.mrcOptions())
+        #expect(outcome.execution.mrcPages == 1, "Erwartete MRC-Seite für ROMM-Grauscan")
+
+        func backgroundLab(_ url: URL) throws -> (Double, Double, Double) {
+            let page = try #require(PDFDocument(url: url)?.page(at: 0))
+            let (rw, rh) = (300, 400)
+            let rctx = try #require(CGContext(
+                data: nil, width: rw, height: rh, bitsPerComponent: 8, bytesPerRow: rw * 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+            rctx.setFillColor(CGColor(gray: 1, alpha: 1))
+            rctx.fill(CGRect(x: 0, y: 0, width: rw, height: rh))
+            page.draw(with: .mediaBox, to: rctx)
+            let px = try #require(rctx.data).assumingMemoryBound(to: UInt8.self)
+            var sum = (0.0, 0.0, 0.0), n = 0.0
+            // Oberer Rand ohne Text (y = 5..35): reiner Hintergrund.
+            for y in 5..<35 {
+                for x in 20..<(rw - 20) {
+                    let o = (y * rw + x) * 4
+                    sum.0 += Double(px[o]); sum.1 += Double(px[o + 1]); sum.2 += Double(px[o + 2]); n += 1
+                }
+            }
+            return ICCProfileReplacementE2ETests.lab(sum.0 / n / 255, sum.1 / n / 255, sum.2 / n / 255)
+        }
+
+        let before = try backgroundLab(input)
+        let after = try backgroundLab(output)
+        let dE = ((before.0 - after.0) * (before.0 - after.0)
+                  + (before.1 - after.1) * (before.1 - after.1)
+                  + (before.2 - after.2) * (before.2 - after.2)).squareRoot()
+        #expect(dE < 3.0, "ROMM-Grau-MRC Helligkeit verschoben: ΔE \(dE), vorher \(before), nachher \(after)")
+    }
+
+    /// Masterplan N31 (C++): Ein indiziertes Bild mit `[/Indexed [/ICCBased …]]`
+    /// gibt sein Basis-ICC-Profil an 3-kanalige MRC-Ebenen weiter.
+    @Test func indiziertesIccProfilWirdBeiMrcEntpackt() throws {
+        let icc = try #require(CGColorSpace(name: CGColorSpace.displayP3)?.copyICCData() as Data?)
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let profile = b.addStream(dictionary: "/N 3", data: icc)
+        let palette = Data([255, 255, 255, 0, 0, 0])
+        let pixels = Data(repeating: 0, count: 64)
+        let raster = b.addStream(
+            dictionary: "/Type/XObject/Subtype/Image/Width 8/Height 8/BitsPerComponent 8"
+                + "/ColorSpace[/Indexed [/ICCBased \(profile) 0 R] 1 <FFFFFF000000>]",
+            data: pixels)
+        _ = palette
+        let resources = b.addObject("<</XObject<</Im0 \(raster) 0 R>>>>")
+        let content = b.addStream(dictionary: "", content: "q 100 0 0 100 0 0 cm /Im0 Do Q")
+        let page = b.addObject("<</Type/Page/Parent \(pages) 0 R/MediaBox[0 0 100 100]"
+            + "/Resources \(resources) 0 R/Contents \(content) 0 R>>")
+        b.fill(pages, "<</Type/Pages/Kids[\(page) 0 R]/Count 1>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R>>")
+        let input = try b.write(rootObject: root, prefix: "n31-indexed-icc")
+        defer { try? FileManager.default.removeItem(at: input) }
+        let output = Self.tempURL("n31-indexed-icc-out")
+        defer { try? FileManager.default.removeItem(at: output) }
+
+        let doc = try PDFCoreDocument(path: input.path)
+        let resource = try #require(try doc.imageResources().first)
+        let rgbCtx = try #require(CGContext(
+            data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 32,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        let rgbImg = try #require(rgbCtx.makeImage())
+        let jpeg = try #require(ImageResampler.encodeJPEG(rgbImg, quality: 0.8))
+        let maskBits = try #require(BilevelBuffer(width: 8, height: 8, data: Data(repeating: 0, count: 8)))
+        let maskData = try #require(BilevelCodec.encodeG4(maskBits))
+
+        try doc.replacePageImageDrawWithLayers(
+            pageIndex: 0, imageObjectID: resource.objectID, resourceName: "Im0",
+            layers: [
+                .init(kind: .jpeg(components: 3), width: 8, height: 8, data: jpeg, rect: nil),
+                .init(kind: .ccittG4Mask, width: 8, height: 8, data: maskData, rect: nil)
+            ])
+        try doc.save(to: output)
+
+        let outLayers = try PDFCoreDocument(path: output.path).imageResources()
+        let rgbLayers = outLayers.filter { $0.pixelColorSpace.componentCount == 3 }
+        #expect(!rgbLayers.isEmpty && rgbLayers.allSatisfy { $0.colorSpace == .iccBased(components: 3) },
+                "Indiziertes ICC-Profil nicht an 3-Kanal-MRC weitergereicht: \(outLayers.map(\.colorSpace))")
+    }
 }

@@ -63,10 +63,19 @@ final class OCRViewModel: ObservableObject {
     /// Rohergebnis der Engine; die Textspalte liest `textSections`.
     @Published var pageResults: [OCREngine.PageResult] = [] {
         didSet {
-            textSections = Self.sections(from: pageResults)
+            if !suppressSectionRebuild {
+                let built = Self.sections(from: pageResults)
+                textSections = built
+                totalWords = Self.wordCount(in: built)
+            }
             updateSearchHits()
         }
     }
+    private var suppressSectionRebuild = false
+    /// Gecachte Wortzahl (kein `.split` über alle Seiten bei jedem SwiftUI-Render).
+    @Published private(set) var totalWords = 0
+    /// Gecachte Dateigröße der geladenen PDF (kein `stat` im View-Body).
+    @Published private(set) var fileSize: Int64 = 0
     @Published var outputURL: URL?
     @Published var savedURL: URL?
     @Published var errorMessage: String?
@@ -111,7 +120,7 @@ final class OCRViewModel: ObservableObject {
     /// Abschnitte in Seitenreihenfolge – aus `pageResults` abgeleitet.
     @Published private(set) var textSections: [TextSection] = []
 
-    private static func sections(from results: [OCREngine.PageResult]) -> [TextSection] {
+    nonisolated private static func sections(from results: [OCREngine.PageResult]) -> [TextSection] {
         results.sorted { $0.pageIndex < $1.pageIndex }.map { page in
             if page.skippedExistingText {
                 // Vorhandener Text steht in der Spalte und zählt für Kopieren
@@ -135,9 +144,13 @@ final class OCRViewModel: ObservableObject {
         }
     }
 
+    nonisolated private static func wordCount(in sections: [TextSection]) -> Int {
+        sections.reduce(0) { $0 + $1.body.split { $0.isWhitespace || $0.isNewline }.count }
+    }
+
     /// Vorhandenen Seitentext in Absätze bringen: Leerzeilen trennen,
     /// Zeilenumbrüche innerhalb eines Absatzes zu Leerzeichen.
-    private static func paragraphs(fromExistingText text: String) -> String {
+    nonisolated private static func paragraphs(fromExistingText text: String) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
         return trimmed
@@ -242,11 +255,6 @@ final class OCRViewModel: ObservableObject {
         textSections.map(\.body).filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
     var hasText: Bool { textSections.contains { !$0.body.isEmpty } }
-    /// Wörter des sichtbaren Textes – erkannter wie vorhandener (die Spalte
-    /// und „Als Text sichern" liefern beides).
-    var totalWords: Int {
-        textSections.reduce(0) { $0 + $1.body.split { $0.isWhitespace || $0.isNewline }.count }
-    }
     var meanConfidence: Float? {
         let all = pageResults.flatMap(\.lines)
         guard !all.isEmpty else { return nil }
@@ -328,16 +336,20 @@ final class OCRViewModel: ObservableObject {
             pageCount = 0
             discardUnlocked()
             pdfURL = first
+            fileSize = Compressor.fileSize(of: first)
             errorMessage = nil
             stage = .ready
             hasSignature = false
-            // Vorprüfung (B1) – dieselbe wie in Komprimieren und im Stapel.
+            // Vorprüfung (B1) – erst prüfen, dann Erhebung und Signaturscan starten.
             Task.detached(priority: .userInitiated) {
                 let verdict = DocumentProbe.inspect(first)
+                let signed = verdict.isOK ? Compressor.containsDigitalSignature(at: first) : false
                 await MainActor.run {
                     guard self.pdfURL == first, self.stage == .ready else { return }
                     if case .ok(let pages) = verdict {
                         self.pageCount = pages
+                        self.hasSignature = signed
+                        self.startSurvey(source: first, reading: first)
                     } else {
                         self.surveyTask?.cancel()
                         self.survey = nil
@@ -346,14 +358,6 @@ final class OCRViewModel: ObservableObject {
                     }
                 }
             }
-            Task.detached(priority: .utility) {
-                let signed = Compressor.containsDigitalSignature(at: first)
-                await MainActor.run {
-                    guard self.pdfURL == first else { return }
-                    self.hasSignature = signed
-                }
-            }
-            startSurvey(source: first, reading: first)
         } else if !images.isEmpty {
             errorMessage = String(localized: "Bilder bitte zuerst unter „Konvertieren“ als PDF sichern.")
         } else if !urls.isEmpty {
@@ -525,7 +529,15 @@ final class OCRViewModel: ObservableObject {
                     // „Seitenzahl" (Befund B12, Review 2026-10-09).
                     throw OCRError.validationFailed(report.failures.joined(separator: "; "))
                 }
+                let built = await Task.detached(priority: .userInitiated) {
+                    let sections = Self.sections(from: output.pages)
+                    return (sections, Self.wordCount(in: sections))
+                }.value
+                suppressSectionRebuild = true
+                textSections = built.0
+                totalWords = built.1
                 pageResults = output.pages
+                suppressSectionRebuild = false
                 outputURL = output.outputURL
                 stage = .done
                 statusLabel = String(localized: "\(output.recognizedPageCount) von \(total) Seiten erkannt")
@@ -601,10 +613,33 @@ final class OCRViewModel: ObservableObject {
         let guardian = SourceNameGuard(sources: pdfURL.map { [$0] } ?? [])
         panel.delegate = guardian
         guard panel.runModal() == .OK, let dest = panel.url else { return }
-        do {
-            try saveOutcome(to: dest)
-        } catch {
-            errorMessage = error.localizedDescription
+        // Masterplan N37: Neuverschlüsseln und Verschieben abseits des Main Threads.
+        guard let temp = outputURL else { return }
+        let sources = pdfURL.map { [$0] } ?? []
+        let unlocked = self.unlocked
+        Task { @MainActor in
+            do {
+                try SourceOverwrite.check(dest, sources: sources)
+                try await Task.detached(priority: .userInitiated) {
+                    var payload = temp
+                    if let unlocked {
+                        payload = SessionScratch.makeURL(prefix: "locked-")
+                        try unlocked.reencrypt(temp, to: payload)
+                    }
+                    if FileManager.default.fileExists(atPath: dest.path) {
+                        _ = try FileManager.default.replaceItemAt(dest, withItemAt: payload)
+                    } else {
+                        try FileManager.default.moveItem(at: payload, to: dest)
+                    }
+                    if payload != temp { try? FileManager.default.removeItem(at: temp) }
+                }.value
+                guard self.outputURL == temp else { return }
+                self.outputURL = nil
+                self.savedURL = dest
+                self.errorMessage = nil
+            } catch {
+                self.errorMessage = error.localizedDescription
+            }
         }
     }
 

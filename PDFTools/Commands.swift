@@ -50,11 +50,13 @@ extension PDFToolsApp {
         !(organizeVM?.project.pages.isEmpty ?? true)
     }
 
-    /// F2: Seiten löschen nur im Projektzustand – nicht während eines Laufs
-    /// und nicht hinter der Ergebnisansicht.
+    /// F2: Seiten löschen/drehen/verschieben nur im Projektzustand – nicht
+    /// während eines Laufs, hinter der Ergebnisansicht oder hinter einem offenen Sheet.
     private var hasSelection: Bool {
         organizeActive && !(organizeVM?.selectedPageIDs.isEmpty ?? true)
             && !(organizeVM?.isProcessing ?? true) && organizeVM?.outcome == nil
+            && !(organizeVM?.isSheetPresented ?? false)
+            && (organizeVM?.lockedPending.isEmpty ?? true)
     }
 
     /// „Sichern …" ist nur aktiv, wenn das aktive Werkzeug ein ungesichertes

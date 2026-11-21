@@ -22,9 +22,14 @@ struct SplitSheet: View {
         (vm.project.documents.first?.fileName as NSString?)?.deletingPathExtension ?? String(localized: "Seiten")
     }
 
+    private var maxChunkSize: Int {
+        max(100, vm.project.totalPages)
+    }
+
     private var chunks: [[PageItem]] {
-        switch mode {
-        case .everyN: PageSplitter.chunks(from: vm.project.pages, mode: .everyN(chunkSize))
+        let clamped = min(max(chunkSize, 2), maxChunkSize)
+        return switch mode {
+        case .everyN: PageSplitter.chunks(from: vm.project.pages, mode: .everyN(clamped))
         case .perPage: PageSplitter.chunks(from: vm.project.pages, mode: .perPage)
         case .atSelection:
             PageSplitter.chunks(from: vm.project.pages,
@@ -55,8 +60,24 @@ struct SplitSheet: View {
                     }
                     .pickerStyle(.radioGroup)
                     if mode == .everyN {
-                        Stepper("Teilgröße: \(chunkSize) Seiten",
-                                value: $chunkSize, in: 2...100)
+                        LabeledContent("Teilgröße") {
+                            HStack(spacing: 6) {
+                                TextField("Seiten", value: $chunkSize, format: .number)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 64)
+                                    .multilineTextAlignment(.trailing)
+                                    .monospacedDigit()
+                                    .onChange(of: chunkSize) { _, newValue in
+                                        let clamped = min(max(newValue, 2), maxChunkSize)
+                                        if clamped != newValue { chunkSize = clamped }
+                                    }
+                                Stepper("Teilgröße: \(chunkSize) Seiten",
+                                        value: $chunkSize, in: 2...maxChunkSize)
+                                    .labelsHidden()
+                                Text("Seiten")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                     }
                     if mode == .atSelection {
                         Text(vm.selectedPageIDs.isEmpty
@@ -102,8 +123,8 @@ struct SplitSheet: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 SavedResultBlock(title: String(localized: "\(written.count) Teile gesichert"),
-                                 detail: written[0].deletingLastPathComponent().path,
-                                 urls: [written[0]],
+                                 detail: written.first?.deletingLastPathComponent().path,
+                                 urls: written,
                                  followUp: (String(localized: "Fertig"), { dismiss() }))
             }
         } else if isWriting {

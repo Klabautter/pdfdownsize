@@ -217,9 +217,8 @@ private struct ControlPanel: View {
 
     private var pending: CompressionResult? { viewModel.pendingResult }
     private var finished: CompressionResult? { pending ?? viewModel.result }
-    private var originalBytes: Int64 {
-        viewModel.inputURL.map { Compressor.fileSize(of: $0) } ?? 0
-    }
+    private var originalBytes: Int64 { viewModel.inputFileSize }
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Das Pult besteht aus dem Inhalt, der bei Platzmangel scrollt, und der
     /// Aktion, die darunter stehen bleibt (`ToolWorkspace.footer`): In
@@ -464,7 +463,11 @@ private struct ControlPanel: View {
         .onChange(of: showOptions) { _, expanded in
             guard expanded, let scrollProxy else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                withAnimation { scrollProxy.scrollTo(Self.optionsAnchor, anchor: .bottom) }
+                if reduceMotion {
+                    scrollProxy.scrollTo(Self.optionsAnchor, anchor: .bottom)
+                } else {
+                    withAnimation { scrollProxy.scrollTo(Self.optionsAnchor, anchor: .bottom) }
+                }
             }
         }
     }
@@ -697,7 +700,7 @@ struct PageStrip: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .fixedSize()
-        .glassEffect(.regular, in: .rect(cornerRadius: Theme.panelRadius))
+        .adaptiveGlass(in: .rect(cornerRadius: Theme.panelRadius))
     }
 
     private func step(_ delta: Int, symbol: String, help: String) -> some View {
@@ -838,7 +841,7 @@ struct DocumentStage: View {
             .font(.caption.weight(.semibold))
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .glassEffect(.regular, in: .capsule)
+            .adaptiveGlass(in: .capsule)
     }
 
     /// Sichtbarer Teil des Blatts in der Fläche (ohne Messung: die Fläche).
@@ -876,7 +879,7 @@ struct DocumentStage: View {
             Image(systemName: "arrow.left.and.right")
                 .font(.caption.weight(.bold))
                 .frame(width: 30, height: 30)
-                .glassEffect(.regular, in: .circle)
+                .adaptiveGlass(in: .circle)
         }
         .position(x: x, y: top + height / 2)
         .gesture(drag)
@@ -926,7 +929,7 @@ struct DocumentStage: View {
         .buttonStyle(.borderless)
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .glassEffect(.regular, in: .capsule)
+        .adaptiveGlass(in: .capsule)
     }
 }
 
@@ -948,6 +951,9 @@ private struct BulkComparisonStage: View {
     @State private var page = 0
     @State private var original: PDFDocument?
     @State private var compressed: PDFDocument?
+    @State private var thumbs: [Int: NSImage] = [:]
+
+    private var pageCount: Int { original?.pageCount ?? 0 }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -965,34 +971,78 @@ private struct BulkComparisonStage: View {
                     Text("\(Int(r.savedPercent.rounded())) % kleiner · \(CompressionResult.format(r.outputBytes))")
                         .foregroundStyle(Theme.savingsText)
                         .monospacedDigit()
+                    if viewModel.isBulkResultSaved(for: input) {
+                        Label("Gesichert", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(Theme.savingsText)
+                            .font(.callout)
+                    } else if !r.alreadyOptimized {
+                        Button("Sichern …") {
+                            viewModel.saveBulkResult(for: input)
+                            if !viewModel.isBulkResultSaved(for: input), let error = viewModel.errorMessage {
+                                viewModel.errorMessage = nil
+                                viewModel.bulkSaveError = error
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
                 }
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
-            if let original {
-                DocumentStage(original: original, compressed: compressed, pageIndex: page,
-                              fraction: $fraction, onPageChange: { page = $0 })
-                    .padding(24)
-            } else {
-                Spacer()
+            ZStack(alignment: .bottom) {
+                if let original {
+                    DocumentStage(original: original, compressed: compressed, pageIndex: page,
+                                  fraction: $fraction, onPageChange: { page = $0 })
+                        .padding(.top, 16)
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, pageCount > 1 ? 112 : 24)
+                } else {
+                    PaperSheet(image: nil)
+                        .padding(24)
+                }
+                if pageCount > 1 {
+                    PageStrip(thumbs: thumbs,
+                              sampleCount: min(pageCount, CompressionViewModel.samplePageCount),
+                              pageCount: pageCount,
+                              selected: page,
+                              caption: String(localized: "Seite \(page + 1) von \(pageCount)"),
+                              onSelect: { page = min(max($0, 0), pageCount - 1) })
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 16)
+                }
             }
         }
         .background(Theme.canvas)
         .task(id: input) {
+            thumbs = [:]
             // N14 (C6): beide Dokumente abseits des Main Threads öffnen.
             let output = viewModel.bulkResult(for: input)?.outputURL
             // N23: eine entsperrte Datei über ihre Arbeitskopie (die Ausgabe
             // ist wieder verschlüsselt – PDFKit braucht dafür das Passwort).
             let source = viewModel.bulkUnlocked[input]?.workingCopy ?? input
             let password = viewModel.bulkUnlocked[input]?.password
+            let samples = CompressionViewModel.samplePageCount
             let loaded = await Task.detached(priority: .userInitiated) {
                 let compared = output.flatMap { PDFDocument(url: $0) }
-                if let password, compared?.isLocked == true { compared?.unlock(withPassword: password) }
-                return (SendableDocument(PDFDocument(url: source)), SendableDocument(compared))
+                if let password, compared?.isLocked == true { _ = compared?.unlock(withPassword: password) }
+                let srcDoc = PDFDocument(url: source)
+                var preThumbs: [Int: NSImage] = [:]
+                if let srcDoc {
+                    for index in 0..<min(srcDoc.pageCount, samples) {
+                        if Task.isCancelled { break }
+                        autoreleasepool {
+                            if let p = srcDoc.page(at: index) {
+                                preThumbs[index] = p.thumbnail(of: CGSize(width: 80, height: 100), for: .cropBox)
+                            }
+                        }
+                    }
+                }
+                return (SendableDocument(srcDoc), SendableDocument(compared), preThumbs)
             }.value
             guard !Task.isCancelled else { return }
             original = loaded.0.value
             compressed = loaded.1.value
+            thumbs = loaded.2
             page = 0
         }
     }
@@ -1028,12 +1078,18 @@ private struct BulkStage: View {
             header
                 .padding(.horizontal, 20)
                 .padding(.vertical, 14)
-            // B4: „Eigene“ im Stapel – dieselbe Einstellfläche wie im Einzelweg.
+            // B4: „Eigene“ im Stapel – dieselbe Einstellfläche wie im Einzelweg,
+            // aber begrenzt und scrollbar, damit die Dateiliste im 640-pt-Fenster
+            // nicht zusammengedrückt wird.
             if viewModel.mode == .custom, !viewModel.isWorking {
                 DisclosureGroup("Einstellungen für „Eigene“", isExpanded: $showsCustom) {
                     VStack(alignment: .leading, spacing: 10) {
-                        CustomSettingsPanel(viewModel: viewModel)
-                            .frame(maxWidth: 520, alignment: .leading)
+                        ScrollView {
+                            CustomSettingsPanel(viewModel: viewModel)
+                                .frame(maxWidth: 520, alignment: .leading)
+                                .padding(.trailing, 8)
+                        }
+                        .frame(maxHeight: 220)
                         // N14 (B4): Start erst auf Wunsch – auch nach
                         // geänderten Einstellungen. Neu starten verwirft
                         // ungesicherte Ergebnisse, deshalb über DiscardGuard.
@@ -1068,7 +1124,7 @@ private struct BulkStage: View {
                 }
                 .width(60)
                 TableColumn("Größe") { row in
-                    Text(CompressionResult.format(Compressor.fileSize(of: row.url)))
+                    Text(CompressionResult.format(viewModel.bulkFileSizes[row.url] ?? 0))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
@@ -1080,15 +1136,17 @@ private struct BulkStage: View {
                 TableColumn("") { row in
                     trailing(row)
                 }
-                .width(130)
+                .width(155)
             }
             // B4: keine leeren Zebrastreifen unter der letzten Datei.
             .alternatingRowBackgrounds(.disabled)
-            // B4: Doppelklick auf eine fertige Zeile zeigt Vorher/Nachher.
-            .contextMenu(forSelectionType: URL.self) { _ in
-                EmptyView()
+            // B4: Doppelklick oder Kontextmenü auf eine fertige Zeile zeigt Vorher/Nachher.
+            .contextMenu(forSelectionType: URL.self) { urls in
+                if let url = urls.first, let r = viewModel.bulkResult(for: url), !r.alreadyOptimized {
+                    Button("Vorher/Nachher vergleichen") { onCompare(url) }
+                }
             } primaryAction: { urls in
-                guard let url = urls.first, viewModel.bulkResult(for: url) != nil else { return }
+                guard let url = urls.first, let r = viewModel.bulkResult(for: url), !r.alreadyOptimized else { return }
                 onCompare(url)
             }
             if !viewModel.bulkSigned.isEmpty {
@@ -1131,7 +1189,7 @@ private struct BulkStage: View {
     }
 
     private var totalInput: Int64 {
-        viewModel.bulkInputs.reduce(0) { $0 + Compressor.fileSize(of: $1) }
+        viewModel.bulkInputs.reduce(0) { $0 + (viewModel.bulkFileSizes[$1] ?? 0) }
     }
 
     private var header: some View {
@@ -1216,14 +1274,25 @@ private struct BulkStage: View {
     @ViewBuilder
     private func trailing(_ row: BulkRow) -> some View {
         let url = row.url
-        if viewModel.bulkResult(for: url) != nil, !viewModel.isWorking {
-            if viewModel.isBulkResultSaved(for: url) {
-                Label("Gesichert", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(Theme.savingsText)
-                    .font(.callout)
-            } else {
-                Button("Sichern …") { saveSingle(url) }
-                    .buttonStyle(.link)
+        if let result = viewModel.bulkResult(for: url), !viewModel.isWorking {
+            HStack(spacing: 8) {
+                if !result.alreadyOptimized {
+                    Button { onCompare(url) } label: {
+                        Label("Vorher/Nachher vergleichen", systemImage: "rectangle.split.2x1")
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help("Vorher/Nachher vergleichen")
+                }
+                if viewModel.isBulkResultSaved(for: url) {
+                    Label("Gesichert", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(Theme.savingsText)
+                        .font(.callout)
+                } else {
+                    Button("Sichern …") { saveSingle(url) }
+                        .buttonStyle(.link)
+                }
             }
         } else if viewModel.isWorking {
             if !viewModel.bulkCancelledURLs.contains(url), viewModel.bulkResult(for: url) == nil,
@@ -1450,7 +1519,7 @@ private struct CustomSettingsPanel: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .onChange(of: viewModel.currentOptions) { _, _ in viewModel.refreshEstimate() }
+        .onChange(of: viewModel.currentOptions) { _, _ in viewModel.scheduleEstimateRefresh() }
     }
 
     // MARK: Zeilen

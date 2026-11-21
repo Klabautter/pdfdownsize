@@ -187,6 +187,10 @@ ENTITLEMENTS="$(mktemp /tmp/pdfdownsize-entitlements.XXXXXX)"
 trap 'rm -f "$ENTITLEMENTS"' EXIT
 codesign -d --entitlements - --xml "$APP" > "$ENTITLEMENTS" 2>/dev/null
 SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+# Masterplan N29: Helfer vor dem Sandbox-inherit-Signieren direkt prüfen
+# (danach verweigert macOS den direkten Shell-Aufruf mit Exit 133).
+arch -arm64 "$APP/Contents/Helpers/qpdf" --version | grep -q qpdf || {
+    echo "qpdf-Helfer vor dem Signieren nicht lauffähig." >&2; exit 1; }
 # Masterplan G5: Der Helfer erbt die Sandbox der App (app-sandbox + inherit).
 sign --entitlements "$ROOT/PDFTools/Helper.entitlements" "$APP/Contents/Helpers/qpdf"
 sign "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
@@ -205,10 +209,10 @@ while IFS= read -r -d '' bin; do
         echo "Nicht mit Developer ID und Hardened Runtime signiert: ${bin#$APP/}" >&2; exit 1; }
 done < <(find "$APP" -type f -perm +111 -print0)
 
-# Masterplan N22: Der Release-Check läuft am auszuliefernden, signierten
-# Bundle – mit Sandbox-, Helfer- und Abnahme-Prüfung (im Gate übersprungen,
-# weil dessen Messbuild absichtlich ohne Sandbox ist).
-"$ROOT/Scripts/release-check.sh" "$APP" || { echo "Release-Check rot – kein Release." >&2; exit 1; }
+# Masterplan N22/N29: Der Release-Check läuft am auszuliefernden, signierten
+# Bundle – ausdrücklich mit PDFDOWNSIZE_GATE_LAEUFT=0, damit eine exportierte
+# Umgebungsvariable Sandbox- und Abnahme-Prüfung nie überspringt.
+PDFDOWNSIZE_GATE_LAEUFT=0 "$ROOT/Scripts/release-check.sh" "$APP" || { echo "Release-Check rot – kein Release." >&2; exit 1; }
 
 # Kein Pfad des Entwicklungsrechners im veröffentlichten Bundle.
 if grep -rlaF "$HOME/" "$APP" >/dev/null 2>&1; then

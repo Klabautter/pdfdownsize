@@ -965,10 +965,14 @@ enum QualityGates {
             let r = rgbaA[o], g = rgbaA[o + 1], b = rgbaA[o + 2]
             let rb = rgbaB[o], gb = rgbaB[o + 1], bb = rgbaB[o + 2]
             let sourceChroma = Int(max(r, g, b) - min(r, g, b))
-            // N26: Auch Farbe, die erst im Kandidaten entsteht – Schwarz oder
+            let candidateChroma = Int(max(rb, gb, bb) - min(rb, gb, bb))
+            // N26/N32: Auch Farbe, die erst im Kandidaten entsteht – Schwarz oder
             // Grau, das eine Farbmaske umgefärbt hat –, zählt zur Spitze.
+            // Mindest-Sprung `peakMinimumChroma`, damit leichtes JPEG-Rauschen
+            // auf cremefarbenem Papier (Chroma 19 → 20) die Spitze nicht verdünnt.
             let addedColor = sourceChroma < peakMinimumChroma
-                && Int(max(rb, gb, bb) - min(rb, gb, bb)) >= threshold
+                && candidateChroma >= threshold
+                && candidateChroma - sourceChroma >= peakMinimumChroma
             guard sourceChroma >= threshold || addedColor else { continue }
             let labA = lab(r: r, g: g, b: b)
             let labB = lab(r: rb, g: gb, b: bb)

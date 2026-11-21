@@ -110,6 +110,9 @@ struct RootView: View {
             OpenFilesDelegate.current?.confirmQuit = { work, reply in
                 askBeforeQuit(work, reply: reply)
             }
+            if let buffered = OpenFilesDelegate.current?.drainBufferedOpenURLs(), !buffered.isEmpty {
+                receive(buffered)
+            }
         }
     }
 

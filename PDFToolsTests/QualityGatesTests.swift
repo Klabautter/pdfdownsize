@@ -359,6 +359,67 @@ import CoreGraphics
         #expect(violated.contains(.peakDeltaE76))
     }
 
+    /// Masterplan N32: Leichtes Farbrauschen auf warm getöntem Papier (Chroma ~18 → ~21)
+    /// darf nicht als `addedColor` in `peakDeltaE76` rutschen und eine echte
+    /// Farbspitze verwässern; echtes Farb-Übersprechen auf neutralem Grau
+    /// (Chroma ~0 → ≥25) bleibt weiterhin erfasst.
+    @Test func farbrauschenAufGetoentemPapierVerduenntFarbspitzeNicht() throws {
+        let edge = 200
+        func makeImage(bg: (UInt8, UInt8, UInt8), mark: (UInt8, UInt8, UInt8)) throws -> CGImage {
+            let ctx = try #require(CGContext(
+                data: nil, width: edge, height: edge, bitsPerComponent: 8, bytesPerRow: edge * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+            let px = try #require(ctx.data).assumingMemoryBound(to: UInt8.self)
+            for y in 0..<edge {
+                for x in 0..<edge {
+                    let o = (y * edge + x) * 4
+                    // 1 % kleine kräftige Markierung (20 × 20 = 400 Pixel von 40.000)
+                    let inMark = x < 20 && y < 20
+                    let c = inMark ? mark : bg
+                    px[o] = c.0; px[o + 1] = c.1; px[o + 2] = c.2; px[o + 3] = 255
+                }
+            }
+            return try #require(ctx.makeImage())
+        }
+
+        // Warm getöntes Papier (Lab-Chroma ~18) + kräftig blauer Stempel.
+        let reference = try makeImage(bg: (238, 226, 198), mark: (20, 40, 220))
+        // Kandidat: Papier minimal wärmer (Chroma-Zuwachs ~3 < 20), Stempel grau verloren.
+        let noisyPaperLostMark = try makeImage(bg: (240, 225, 192), mark: (110, 110, 110))
+        let measurement = try #require(QualityGates.measure(reference: reference, candidate: noisyPaperLostMark))
+        let peak = try #require(measurement.peakDeltaE76)
+        // Ohne N32 verwässerten die 99 % Papierpixel mit candidateChroma >= 20 das peakDeltaE76 auf ~3.
+        #expect(peak > 40, "Papier-Farbrauschen hat die Farbspitze verwässert: peakDeltaE76=\(peak)")
+
+        // Gegenprobe: Echtes buntes Übersprechen auf neutralem Grau in einem
+        // Farbbild (kleines konstantes grünes Feld, damit `isColor == true`)
+        // bleibt über `addedColor` weiterhin erfasst.
+        func makeContamImage(mark: (UInt8, UInt8, UInt8)) throws -> CGImage {
+            let ctx = try #require(CGContext(
+                data: nil, width: edge, height: edge, bitsPerComponent: 8, bytesPerRow: edge * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+            let px = try #require(ctx.data).assumingMemoryBound(to: UInt8.self)
+            for y in 0..<edge {
+                for x in 0..<edge {
+                    let o = (y * edge + x) * 4
+                    let c: (UInt8, UInt8, UInt8)
+                    if x < 20 && y < 20 { c = mark }
+                    else if x >= edge - 20 && y >= edge - 20 { c = (30, 180, 40) }
+                    else { c = (220, 220, 220) }
+                    px[o] = c.0; px[o + 1] = c.1; px[o + 2] = c.2; px[o + 3] = 255
+                }
+            }
+            return try #require(ctx.makeImage())
+        }
+        let neutralRef = try makeContamImage(mark: (220, 220, 220))
+        let contaminated = try makeContamImage(mark: (220, 30, 30))
+        let contamMeasure = try #require(QualityGates.measure(reference: neutralRef, candidate: contaminated))
+        #expect((contamMeasure.peakDeltaE76 ?? 0) > 40,
+                "Echte Farbverunreinigung auf Grau wurde nicht erfasst: \(String(describing: contamMeasure.peakDeltaE76))")
+    }
+
     // MARK: - 4) Grenzwert-Tabelle (Preset × Klasse, eine Zelle pro Test)
 
     @Test("Grenzwert-Tabelle vollständig und geordnet",

@@ -57,6 +57,8 @@ final class CompressionViewModel: ObservableObject {
     // MARK: - Session State
 
     @Published var inputURL: URL?
+    /// Gecachte Dateigröße der gewählten Einzeldatei (kein `stat` im View-Body).
+    @Published private(set) var inputFileSize: Int64 = 0
 
     /// Masterplan B1: Was die Vorprüfung über die geöffnete Datei weiß.
     /// Eine gesperrte, leere oder kaputte Datei landet in `.rejected` – mit
@@ -109,6 +111,7 @@ final class CompressionViewModel: ObservableObject {
                     self.unlocked = unlocked
                     self.originalDocument = document.value
                     self.documentStatus = .ready(pageCount: pages)
+                    self.startThumbnailsAndMetadata(for: url, reading: unlocked.workingCopy)
                     self.refreshEstimate()
                 case .failure(let error):
                     self.passwordError = UnlockedDocument.failureMessage(for: error)
@@ -463,6 +466,7 @@ final class CompressionViewModel: ObservableObject {
         clearSingleOutcome()
 
         inputURL = url
+        inputFileSize = Compressor.fileSize(of: url)
         selectedPage = 0
         errorMessage = nil
         hasSignature = false
@@ -475,12 +479,15 @@ final class CompressionViewModel: ObservableObject {
         unlocked?.discard()
         unlocked = nil
         passwordError = nil
+        pageThumbnails = [:]
+        thumbnailTask?.cancel()
 
         let currentURL = url
         let probe = self.probe
         probeTask?.cancel()
-        // Vorprüfung und Öffnen abseits des Hauptthreads (B1/C6). Die Fläche
-        // zeigt bis dahin das leere Blatt.
+        // Vorprüfung und Öffnen abseits des Hauptthreads (B1/C6). Miniaturen,
+        // Metadaten und Schätzung starten erst, wenn die Datei lesbar ist –
+        // verhindert 4–5× paralleles Parsen bei gesperrten oder großen PDFs.
         probeTask = Task.detached(priority: .userInitiated) {
             let verdict = probe(currentURL)
             let document = verdict.isOK ? SendableDocument(PDFDocument(url: currentURL)) : SendableDocument(nil)
@@ -488,35 +495,45 @@ final class CompressionViewModel: ObservableObject {
                 guard self.inputURL == currentURL, !Task.isCancelled else { return }
                 self.originalDocument = document.value
                 self.applyProbe(verdict)
-                if verdict == .locked, let password { self.unlock(password: password) }
+                if verdict.isOK {
+                    self.startThumbnailsAndMetadata(for: currentURL, reading: currentURL)
+                    self.refreshEstimate()
+                } else if verdict == .locked, let password {
+                    self.unlock(password: password)
+                }
             }
         }
+    }
+
+    private func startThumbnailsAndMetadata(for shownURL: URL, reading: URL) {
         pageThumbnails = [:]
         thumbnailTask?.cancel()
         thumbnailTask = Task.detached(priority: .utility) {
-            guard let doc = PDFDocument(url: currentURL) else { return }
+            guard !Task.isCancelled, let doc = PDFDocument(url: reading) else { return }
             var thumbs: [Int: NSImage] = [:]
             for index in 0..<min(doc.pageCount, Self.samplePageCount) {
                 if Task.isCancelled { return }
-                guard let page = doc.page(at: index) else { continue }
-                thumbs[index] = page.thumbnail(of: CGSize(width: 80, height: 100), for: .cropBox)
+                autoreleasepool {
+                    if let page = doc.page(at: index) {
+                        thumbs[index] = page.thumbnail(of: CGSize(width: 80, height: 100), for: .cropBox)
+                    }
+                }
             }
             let ready = thumbs
             await MainActor.run {
-                guard self.inputURL == currentURL else { return }
+                guard self.inputURL == shownURL, !Task.isCancelled else { return }
                 self.pageThumbnails = ready
             }
         }
         Task.detached(priority: .utility) {
-            let signature = Compressor.containsDigitalSignature(at: currentURL)
-            let pdfa = (try? PDFCoreDocument(path: currentURL.path))?.pdfaPart ?? 0
+            let signature = Compressor.containsDigitalSignature(at: reading)
+            let pdfa = (try? PDFCoreDocument(path: reading.path))?.pdfaPart ?? 0
             await MainActor.run {
-                guard self.inputURL == currentURL else { return }
+                guard self.inputURL == shownURL else { return }
                 self.hasSignature = signature
                 self.pdfaPart = pdfa
             }
         }
-        refreshEstimate()
     }
 
     /// Ergebnis der Vorprüfung. Eine abgelehnte Datei bekommt keine Schätzung
@@ -554,6 +571,7 @@ final class CompressionViewModel: ObservableObject {
         unlocked = nil
         passwordError = nil
         inputURL = nil
+        inputFileSize = 0
         errorMessage = nil
         hasSignature = false
         pdfaPart = 0
@@ -669,16 +687,31 @@ final class CompressionViewModel: ObservableObject {
         return task
     }
 
-    /// Tastatureingabe ins Zielgrößen-Feld: Je Tastendruck keine Planung –
-    /// der vorherige geparkte Refresh wird verworfen (Debounce).
-    private func scheduleEstimateRefresh() {
+    /// Tastatureingabe ins Zielgrößen-Feld oder Ziehen an „Eigene“-Reglern:
+    /// Verzögert die (seit B5 teurere) Probekodierung um 300 ms, damit nicht
+    /// jeder Slider-Tick eine eigene Schätzung startet.
+    func scheduleEstimateRefresh() {
         estimateGeneration += 1
         estimateDebounceTask?.cancel()
+        if !bulkInputs.isEmpty {
+            scheduleBulkEstimateRefresh()
+            return
+        }
         guard inputURL != nil else { return }
         estimateDebounceTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 350_000_000)
+            try? await Task.sleep(nanoseconds: 300_000_000)
             guard !Task.isCancelled else { return }
             refreshEstimate()
+        }
+    }
+
+    private func scheduleBulkEstimateRefresh() {
+        bulkEstimateDebounceTask?.cancel()
+        guard !bulkInputs.isEmpty else { return }
+        bulkEstimateDebounceTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            refreshBulkEstimates()
         }
     }
 
@@ -772,6 +805,9 @@ final class CompressionViewModel: ObservableObject {
     var bulkResultInputs: [URL] { bulkSuccesses.map(\.input) }
     /// Eingaben des (laufenden oder letzten) Bulk-Laufs, in Reihenfolge.
     @Published private(set) var bulkInputs: [URL] = []
+    /// Gecachte Dateigrößen je Bulk-Eingabe (kein `stat` auf dem Main Thread
+    /// bei jedem Fortschritts-Tick).
+    @Published private(set) var bulkFileSizes: [URL: Int64] = [:]
     /// Billige Metadaten je Bulk-Eingabe (nur Öffnen, kein Planen):
     /// Seitenzahl für die Listenanzeige, asynchron nachgeladen.
     @Published private(set) var bulkPageCounts: [URL: Int] = [:]
@@ -1062,6 +1098,9 @@ final class CompressionViewModel: ObservableObject {
         bulkErrors.removeValue(forKey: url)
         bulkCancelledURLs.remove(url)
         bulkPageCounts.removeValue(forKey: url)
+        bulkFileSizes.removeValue(forKey: url)
+        bulkVerdicts.removeValue(forKey: url)
+        bulkSigned.remove(url)
         bulkEstimates.removeValue(forKey: url)
         bulkFractions = [:]
         bulkLabels = [:]
@@ -1081,6 +1120,7 @@ final class CompressionViewModel: ObservableObject {
         workTask?.cancel()
         // Einzel-State zurücksetzen, damit die Bulk-Liste die Bühne bekommt.
         inputURL = nil
+        inputFileSize = 0
         guard let flag = beginBulkRun(urls) else { return }
         workTask = Task.detached(priority: .userInitiated) {
             _ = try? await self.performBulkRun(urls, flag: flag)
@@ -1230,7 +1270,11 @@ final class CompressionViewModel: ObservableObject {
             clearSingleOutcome()
             errorMessage = nil
             inputURL = nil
+            inputFileSize = 0
             originalDocument = nil
+            unlocked?.discard()
+            unlocked = nil
+            passwordError = nil
             targetSizeText = ""
             thumbnailTask?.cancel()
             pageThumbnails = [:]
@@ -1238,6 +1282,7 @@ final class CompressionViewModel: ObservableObject {
             targetAssessment = nil
             discardBulkResults()
             bulkInputs = pdfs
+            bulkFileSizes = Dictionary(uniqueKeysWithValues: pdfs.map { ($0, Compressor.fileSize(of: $0)) })
             bulkFractions = [:]
             bulkLabels = [:]
             bulkErrors = [:]
@@ -1255,22 +1300,33 @@ final class CompressionViewModel: ObservableObject {
     /// hinzufügen“).
     func add(_ urls: [URL]) {
         let existing = bulkInputs.isEmpty ? (inputURL.map { [$0] } ?? []) : bulkInputs
-        // N23: Entsperrte Stapeldateien bleiben entsperrt, wenn weitere dazukommen –
-        // vorher stand die Zeile wieder auf „Passwortgeschützt“.
-        let keptUnlocked = bulkUnlocked
-        let keptVerdicts = bulkVerdicts.filter { keptUnlocked[$0.key] != nil }
-        let keptPages = bulkPageCounts.filter { keptUnlocked[$0.key] != nil }
+        // N23/N30: Entsperrte Dateien – sowohl aus dem Stapel als auch eine
+        // entsperrte Einzeldatei beim Wechsel in den Stapel – bleiben entsperrt.
+        var keptUnlocked = bulkUnlocked
+        var keptVerdicts = bulkVerdicts.filter { keptUnlocked[$0.key] != nil }
+        var keptPages = bulkPageCounts.filter { keptUnlocked[$0.key] != nil }
+        if bulkInputs.isEmpty, let singleURL = inputURL, let singleUnlocked = unlocked {
+            keptUnlocked[singleURL] = singleUnlocked
+            if case .ready(let pages) = documentStatus {
+                keptVerdicts[singleURL] = .ok(pageCount: pages)
+                keptPages[singleURL] = pages
+            }
+            unlocked = nil   // Arbeitskopie nicht verwerfen: wandert gleich in bulkUnlocked
+        }
         bulkUnlocked = [:]   // nicht verwerfen: die Arbeitskopien gehen gleich zurück
         selectMany(existing + urls)
-        for (url, unlocked) in keptUnlocked {
+        var restoredAny = false
+        for (url, item) in keptUnlocked {
             if bulkInputs.contains(url) {
-                bulkUnlocked[url] = unlocked
+                bulkUnlocked[url] = item
                 if let verdict = keptVerdicts[url] { bulkVerdicts[url] = verdict }
                 if let pages = keptPages[url] { bulkPageCounts[url] = pages }
+                restoredAny = true
             } else {
-                unlocked.discard()
+                item.discard()
             }
         }
+        if restoredAny { refreshBulkEstimates() }
     }
 
     /// Schnellschätzung je Datei (Millisekunden je Dokument), neu bei
@@ -1280,12 +1336,15 @@ final class CompressionViewModel: ObservableObject {
         let urls = bulkInputs
         guard !urls.isEmpty else { bulkEstimates = [:]; return }
         let options = currentOptions
+        // N30: Entsperrte Stapeldateien schätzen auf ihrer Arbeitskopie.
+        let working = Dictionary(uniqueKeysWithValues: urls.map { ($0, bulkWorkingURL($0)) })
         bulkEstimateTask = Task.detached(priority: .utility) {
             var estimates: [URL: CompressionEstimate] = [:]
             for url in urls {
                 if Task.isCancelled { return }
+                let target = working[url] ?? url
                 if let e = CompressionEstimator.quickEstimate(
-                    url: url, options: options, isCancelled: { Task.isCancelled }) {
+                    url: target, options: options, isCancelled: { Task.isCancelled }) {
                     estimates[url] = e
                 }
             }
@@ -1302,7 +1361,8 @@ final class CompressionViewModel: ObservableObject {
     private func refreshBulkPageCounts() {
         let urls = bulkInputs
         let probe = self.probe
-        Task.detached(priority: .userInitiated) {
+        bulkProbeTask?.cancel()
+        bulkProbeTask = Task.detached(priority: .userInitiated) {
             // Vorprüfung je Datei (B1): Seitenzahl für die Liste UND der
             // Grund, falls die Datei nicht verarbeitbar ist – sofort in der
             // Zeile statt „…“.
@@ -1319,9 +1379,21 @@ final class CompressionViewModel: ObservableObject {
                 }
             }
             await MainActor.run {
-                guard self.bulkInputs == urls else { return }
-                self.bulkPageCounts = counts
-                self.bulkVerdicts = verdicts
+                guard self.bulkInputs == urls, !Task.isCancelled else { return }
+                // Masterplan N30: Bereits entsperrte Dateien nicht wieder auf
+                // `.locked` zurücksetzen, wenn `add()` weitere Dateien ergänzt.
+                var mergedCounts = counts
+                var mergedVerdicts = verdicts
+                for url in self.bulkUnlocked.keys where urls.contains(url) {
+                    if let existingVerdict = self.bulkVerdicts[url], existingVerdict.isOK {
+                        mergedVerdicts[url] = existingVerdict
+                    }
+                    if let existingPages = self.bulkPageCounts[url] {
+                        mergedCounts[url] = existingPages
+                    }
+                }
+                self.bulkPageCounts = mergedCounts
+                self.bulkVerdicts = mergedVerdicts
                 self.bulkSigned = signed
             }
         }
@@ -1330,8 +1402,12 @@ final class CompressionViewModel: ObservableObject {
     /// Bulk-Auswahl + Temps verwerfen (Einzel-State bleibt unberührt).
     func clearBulk() {
         guard !isWorking else { return }
+        bulkProbeTask?.cancel()
+        bulkEstimateTask?.cancel()
+        bulkEstimateDebounceTask?.cancel()
         discardBulkResults()
         bulkInputs = []
+        bulkFileSizes = [:]
         bulkFractions = [:]
         bulkLabels = [:]
         bulkErrors = [:]
@@ -1391,17 +1467,48 @@ final class CompressionViewModel: ObservableObject {
     @Published var bulkSaveError: String?
 
     /// „Alle sichern …“ mit Ordner-Dialog – Knopf im Stapel und ⌘S (F2).
-    /// Ein Fehler landet in `bulkSaveError` und wird zurückgegeben.
-    @discardableResult
-    func saveAllBulkWithPanel() -> String? {
+    /// Dateikopien laufen abseits des Main Threads; ein Fehler landet in `bulkSaveError`.
+    func saveAllBulkWithPanel() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.prompt = String(localized: "Hier sichern")
         panel.message = String(localized: "Ordner für die komprimierten PDFs wählen")
-        guard panel.runModal() == .OK, let folder = panel.url else { return nil }
-        return saveAllBulkReportingError(to: folder)
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        let items = bulkSuccesses.compactMap { entry -> (input: URL, result: CompressionResult)? in
+            entry.savedTo == nil ? (entry.input, entry.result) : nil
+        }
+        guard !items.isEmpty else { return }
+        let saveMode = bulkMode
+        Task { @MainActor in
+            var reserved: [URL] = []
+            for item in items {
+                let suggested = folder.appendingPathComponent(
+                    Compressor.suggestedOutputName(for: item.input, mode: saveMode))
+                var dest = suggested
+                var suffix = 2
+                while FileManager.default.fileExists(atPath: dest.path)
+                    || reserved.contains(where: { $0.path.caseInsensitiveCompare(dest.path) == .orderedSame }) {
+                    dest = folder.appendingPathComponent(
+                        suggested.deletingPathExtension().lastPathComponent + "_\(suffix).pdf")
+                    suffix += 1
+                }
+                reserved.append(dest)
+                do {
+                    let finalized = try await Task.detached(priority: .userInitiated) {
+                        try Compressor.finalize(result: item.result, destination: dest,
+                                                preservingSource: true)
+                    }.value
+                    if let i = self.bulkSuccesses.firstIndex(where: { $0.input == item.input && $0.result.outputURL == item.result.outputURL }) {
+                        self.bulkSuccesses[i].savedTo = finalized.outputURL
+                    }
+                } catch {
+                    self.bulkSaveError = error.localizedDescription
+                    return
+                }
+            }
+        }
     }
 
     /// Sichert alle Ergebnisse in `folder`; ein Fehler landet in
@@ -1418,22 +1525,33 @@ final class CompressionViewModel: ObservableObject {
     }
 
     /// Sichert EIN Bulk-Ergebnis über ein Save-Panel – hier ist der Name
-    /// frei wählbar (Vorschlag: Eingabename + Modus-Suffix).
+    /// frei wählbar (Vorschlag: Eingabename + Modus-Suffix). Kopiert abseits
+    /// des Main Threads.
     func saveBulkResult(for url: URL) {
-        guard bulkResult(for: url) != nil else { return }
+        guard let result = bulkResult(for: url) else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.nameFieldStringValue = Compressor.suggestedOutputName(for: url, mode: bulkMode)
         if let dir = url.deletingLastPathComponent() as URL? {
             panel.directoryURL = dir
         }
-        let guardian = SourceNameGuard(sources: bulkInputs)
+        let sources = bulkInputs
+        let guardian = SourceNameGuard(sources: sources)
         panel.delegate = guardian
         guard panel.runModal() == .OK, let dest = panel.url else { return }
-        do {
-            try saveBulkResult(for: url, to: dest)
-        } catch {
-            errorMessage = error.localizedDescription
+        Task { @MainActor in
+            do {
+                try SourceOverwrite.check(dest, sources: sources)
+                _ = try await Task.detached(priority: .userInitiated) {
+                    try Compressor.finalize(result: result, destination: dest,
+                                            preservingSource: true)
+                }.value
+                if let i = self.bulkSuccesses.firstIndex(where: { $0.input == url && $0.result.outputURL == result.outputURL }) {
+                    self.bulkSuccesses[i].savedTo = dest
+                }
+            } catch {
+                self.errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -1465,9 +1583,14 @@ final class CompressionViewModel: ObservableObject {
         guard let pending = pendingResult else { return }
         if compressedDocument?.documentURL == pending.outputURL { return }
         let url = pending.outputURL
+        // B2: Eine entsperrte Einzeldatei erzeugt eine wieder verschlüsselte
+        // Ausgabe – PDFKit braucht das Passwort für den Vorher/Nachher-Vergleich.
+        let password = unlocked?.password
         Task {
             let loaded = await Task.detached(priority: .userInitiated) {
-                SendableDocument(PDFDocument(url: url))
+                let doc = PDFDocument(url: url)
+                if let password, doc?.isLocked == true { _ = doc?.unlock(withPassword: password) }
+                return SendableDocument(doc)
             }.value
             guard self.pendingResult?.outputURL == url else { return }
             self.compressedDocument = loaded.value
@@ -1498,13 +1621,24 @@ final class CompressionViewModel: ObservableObject {
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         do {
             try SourceOverwrite.check(destination, sources: sources)
-            // Das Ergebnis wird verschoben – vorher die offene Ansicht lösen.
-            compressedDocument = nil
-            singleOutcome = .saved(try Compressor.finalize(result: r, destination: destination))
-            errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
-            loadCompressedDocument()   // Sichern gescheitert: Vergleich bleibt
+            return
+        }
+        // Das Ergebnis wird abseits des Main Threads verschoben – vorher die offene Ansicht lösen.
+        compressedDocument = nil
+        Task { @MainActor in
+            do {
+                let finalized = try await Task.detached(priority: .userInitiated) {
+                    try Compressor.finalize(result: r, destination: destination)
+                }.value
+                guard self.pendingResult?.outputURL == r.outputURL else { return }
+                self.singleOutcome = .saved(finalized)
+                self.errorMessage = nil
+            } catch {
+                self.errorMessage = error.localizedDescription
+                self.loadCompressedDocument()   // Sichern gescheitert: Vergleich bleibt
+            }
         }
     }
 
@@ -1535,6 +1669,8 @@ final class CompressionViewModel: ObservableObject {
 
     private var workTask: Task<Void, Never>?
     private var estimateDebounceTask: Task<Void, Never>?
+    private var bulkEstimateDebounceTask: Task<Void, Never>?
+    private var bulkProbeTask: Task<Void, Never>?
     private var estimateGeneration = 0
     private var estimateTask: Task<Void, Never>?
     var estimateProvider: @Sendable (URL, CompressionOptions) -> CompressionEstimate? = {

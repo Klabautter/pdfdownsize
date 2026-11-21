@@ -2402,7 +2402,6 @@
       }
     },
     "Die Kompressionskomponente fehlt oder ist beschädigt. Bitte installiere PDFdownsize erneut.": {
-      "extractionState": "stale",
       "localizations": {
         "de": {
           "stringUnit": {
@@ -4238,6 +4237,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Try another mode"
+          }
+        }
+      }
+    },
+    "Mit dem Passwort lässt sie sich für diese Verarbeitung entsperren.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mit dem Passwort lässt sie sich für diese Verarbeitung entsperren."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter the password to unlock it for this operation."
           }
         }
       }
@@ -6203,6 +6218,22 @@
         }
       }
     },
+    "Teilgröße": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Teilgröße"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Part size"
+          }
+        }
+      }
+    },
     "Teilgröße: %lld Seiten": {
       "localizations": {
         "de": {
@@ -6575,6 +6606,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Before-and-after comparison"
+          }
+        }
+      }
+    },
+    "Vorher/Nachher vergleichen": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vorher/Nachher vergleichen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compare before & after"
           }
         }
       }
@@ -7292,18 +7339,18 @@
         }
       }
     },
-    "Übernommen: Seiten, Anmerkungen, Links und Formularfelder. Nicht übernommen: Dateianhänge, XMP-Metadaten, Tag-Struktur und Ebenen. Lesezeichen nur die erste Ebene und Seitenbeschriftungen nur, wenn alle Seiten aus einer Datei stammen.": {
+    "Übernommen: Seiten, Anmerkungen, Links, Lesezeichen und Formularfelder. Nicht übernommen: Dateianhänge, XMP-Metadaten, Tag-Struktur und Ebenen. Seitenbeschriftungen nur, wenn alle Seiten aus einer Datei stammen.": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Übernommen: Seiten, Anmerkungen, Links und Formularfelder. Nicht übernommen: Dateianhänge, XMP-Metadaten, Tag-Struktur und Ebenen. Lesezeichen nur die erste Ebene und Seitenbeschriftungen nur, wenn alle Seiten aus einer Datei stammen."
+            "value": "Übernommen: Seiten, Anmerkungen, Links, Lesezeichen und Formularfelder. Nicht übernommen: Dateianhänge, XMP-Metadaten, Tag-Struktur und Ebenen. Seitenbeschriftungen nur, wenn alle Seiten aus einer Datei stammen."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Carried over: pages, annotations, links and form fields. Not carried over: file attachments, XMP metadata, tag structure and layers. Bookmarks only on the first level, and page labels only if all pages come from one file."
+            "value": "Preserved: pages, annotations, links, bookmarks, and form fields. Not preserved: file attachments, XMP metadata, tag structure, and layers. Page labels only when all pages come from a single file."
           }
         }
       }

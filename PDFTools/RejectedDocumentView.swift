@@ -15,6 +15,9 @@ struct RejectedDocumentView: View {
     var onUnlock: ((String) -> Void)? = nil
     var passwordError: String? = nil
     var isUnlocking = false
+    /// Bleibt das Passwort im Ergebnis erhalten? false für Bild-Export
+    /// (Konvertieren) und Mehr-Quellen-Zusammenfügen (Organisieren).
+    var preservesPassword = true
     /// Beschriftung des Ausweichknopfs (Organisieren: „Überspringen“).
     var chooseOtherLabel: String? = nil
 
@@ -41,7 +44,9 @@ struct RejectedDocumentView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text(verdict == .locked && onUnlock != nil
-                     ? String(localized: "Mit dem Passwort lässt sie sich verarbeiten. Das Ergebnis bleibt mit demselben Passwort geschützt.")
+                     ? (preservesPassword
+                        ? String(localized: "Mit dem Passwort lässt sie sich verarbeiten. Das Ergebnis bleibt mit demselben Passwort geschützt.")
+                        : String(localized: "Mit dem Passwort lässt sie sich für diese Verarbeitung entsperren."))
                      : verdict.detail)
             }
         } actions: {

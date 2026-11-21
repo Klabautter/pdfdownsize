@@ -14,6 +14,15 @@ struct ScrollOffsetKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
+/// Layout-Messwerte außerhalb von SwiftUI-`@State`, damit Scrollen bei großen
+/// Projekten (z. B. 5.000 Seiten) nicht pro Scroll-Pixel den gesamten Grid-Body
+/// neu auswertet. Wird nur bei Drag/Auto-Scroll und Pfeiltasten gelesen.
+@MainActor
+private final class GridLayoutMetrics {
+    var cellFrames: [UUID: CGRect] = [:]
+    var contentOffsetY: CGFloat = 0
+}
+
 struct OrganizeView: View {
     /// Von der AppShell gehalten – überlebt Toolwechsel (§7).
     @ObservedObject var vm: MergeViewModel
@@ -34,7 +43,7 @@ struct OrganizeView: View {
     @State private var showImporter = false
     @State private var showSplitSheet = false
     @State private var showImageExportSheet = false
-    @State private var cellFrames: [UUID: CGRect] = [:]
+    @State private var layoutMetrics = GridLayoutMetrics()
     @State private var dragInsertIndex: Int?
 
     // MARK: Drag-State (Reorder V1.5 + Multi-Drag V2)
@@ -42,7 +51,6 @@ struct OrganizeView: View {
     @State private var dragPreviewThumb: NSImage?
     @State private var pointerX: CGFloat = 0
     @State private var pointerViewportY: CGFloat = 0
-    @State private var contentOffsetY: CGFloat = 0
     @State private var viewportHeight: CGFloat = 1
     @State private var autoScrollTask: Task<Void, Never>?
     @State private var scrollPosition = ScrollPosition()
@@ -103,6 +111,28 @@ struct OrganizeView: View {
         .sheet(isPresented: $showImageExportSheet) {
             ImageExportSheet(vm: vm, onOpenConvert: onOpenConvert)
         }
+        // Masterplan B2: gesperrte PDFs aus dem Import – Passwort oder überspringen.
+        // Hängt am obersten Group, damit es auch aus dem leeren Zustand erscheint.
+        .sheet(isPresented: Binding(get: { !vm.lockedPending.isEmpty },
+                                    set: { if !$0 { vm.skipPendingLocked() } })) {
+            if let url = vm.lockedPending.first {
+                RejectedDocumentView(fileName: url.lastPathComponent,
+                                     verdict: .locked,
+                                     onChooseOther: { vm.skipPendingLocked() },
+                                     onClose: { vm.skipPendingLocked() },
+                                     onUnlock: { vm.unlockPending(password: $0) },
+                                     passwordError: vm.passwordError,
+                                     isUnlocking: vm.isUnlocking,
+                                     preservesPassword: vm.project.documents.isEmpty && vm.lockedPending.count == 1,
+                                     chooseOtherLabel: String(localized: "Überspringen"))
+                    .frame(width: 460, height: 380)
+                    .id(url)
+            }
+        }
+        .onChange(of: showSplitSheet || showImageExportSheet) { _, open in
+            vm.isSheetPresented = open
+        }
+        .onDisappear { vm.isSheetPresented = false }
         .fileImporter(isPresented: $showImporter,
                       allowedContentTypes: ImageImporter.allowedTypes,
                       allowsMultipleSelection: true) { result in
@@ -234,7 +264,7 @@ struct OrganizeView: View {
                 }
                 .coordinateSpace(name: "grid")
                 .scrollPosition($scrollPosition)
-                .onPreferenceChange(ScrollOffsetKey.self) { contentOffsetY = $0 }
+                .onPreferenceChange(ScrollOffsetKey.self) { layoutMetrics.contentOffsetY = $0 }
                 .onAppear { viewportHeight = geo.size.height }
                 .onChange(of: geo.size.height) { _, h in viewportHeight = h }
                 .overlay {
@@ -255,22 +285,6 @@ struct OrganizeView: View {
             }
         }
         .motionSafeAnimation(.easeInOut(duration: 0.18), value: vm.selectedPageIDs.isEmpty)
-        // Masterplan B2: gesperrte PDFs aus dem Import – Passwort oder überspringen.
-        .sheet(isPresented: Binding(get: { !vm.lockedPending.isEmpty },
-                                    set: { if !$0 { vm.skipPendingLocked() } })) {
-            if let url = vm.lockedPending.first {
-                RejectedDocumentView(fileName: url.lastPathComponent,
-                                     verdict: .locked,
-                                     onChooseOther: { vm.skipPendingLocked() },
-                                     onClose: { vm.skipPendingLocked() },
-                                     onUnlock: { vm.unlockPending(password: $0) },
-                                     passwordError: vm.passwordError,
-                                     isUnlocking: vm.isUnlocking,
-                                     chooseOtherLabel: String(localized: "Überspringen"))
-                    .frame(width: 460, height: 380)
-                    .id(url)
-            }
-        }
         .task(id: vm.project.documents.map(\.url)) {
             let urls = vm.project.documents.map(\.url)
             let unlocked = vm.unlockedOriginalNames
@@ -333,23 +347,30 @@ struct OrganizeView: View {
 
     private var pageGrid: some View {
         let columns = [GridItem(.adaptive(minimum: 150), spacing: 12)]
+        let documents = vm.project.documents
+        let hasMultipleDocs = documents.count > 1
+        let docIndexByID: [UUID: Int] = hasMultipleDocs
+            ? Dictionary(uniqueKeysWithValues: documents.enumerated().map { ($0.element.id, $0.offset) })
+            : [:]
+        let docNameByID: [UUID: String] = Dictionary(uniqueKeysWithValues: documents.map { ($0.id, $0.fileName) })
+        let pages = vm.project.pages
         return LazyVGrid(columns: columns, spacing: 12) {
-            ForEach(Array(vm.project.pages.enumerated()), id: \.element.id) { index, item in
-                let documentIndex = vm.project.documents.firstIndex { $0.id == item.sourceDocumentID }
+            ForEach(Array(pages.enumerated()), id: \.element.id) { index, item in
+                let documentIndex = docIndexByID[item.sourceDocumentID]
+                let docName = docNameByID[item.sourceDocumentID]
                 // Dateiname nur am Beginn eines Blocks aus demselben Dokument.
                 let startsBlock = index == 0
-                    || vm.project.pages[index - 1].sourceDocumentID != item.sourceDocumentID
+                    || pages[index - 1].sourceDocumentID != item.sourceDocumentID
                 PageCellView(item: item,
-                             documentLabel: startsBlock && vm.project.documents.count > 1
-                                ? vm.project.document(for: item.sourceDocumentID)?.fileName : nil,
-                             documentColor: vm.project.documents.count > 1
+                             documentLabel: startsBlock && hasMultipleDocs ? docName : nil,
+                             documentColor: hasMultipleDocs
                                 ? documentIndex.map(DocumentPalette.color) : nil,
                              isSelected: vm.selectedPageIDs.contains(item.id),
                              showLeadingIndicator: dragInsertIndex == index,
-                             showTrailingIndicator: dragInsertIndex == vm.project.pages.count && index == vm.project.pages.count - 1,
+                             showTrailingIndicator: dragInsertIndex == pages.count && index == pages.count - 1,
                              service: ThumbnailService.shared,
-                             sourceName: vm.project.document(for: item.sourceDocumentID)?.fileName,
-                             positionLabel: String(localized: "Position \(index + 1) von \(vm.project.pages.count)"),
+                             sourceName: docName,
+                             positionLabel: String(localized: "Position \(index + 1) von \(pages.count)"),
                              onRotate: { delta in
                                  vm.ensureContextSelection(item)
                                  vm.rotateSelectedPages(by: delta)
@@ -402,7 +423,7 @@ struct OrganizeView: View {
                     )
             }
         }
-        .onPreferenceChange(CellFramesKey.self) { cellFrames = $0 }
+        .onPreferenceChange(CellFramesKey.self) { layoutMetrics.cellFrames = $0 }
         // Tastatur (Befund S10): Pfeiltasten bewegen die Auswahl, ⇧ erweitert
         // sie. Das System-⌘A beantwortet die View oben (`selectAll`).
         .focusable()
@@ -426,7 +447,7 @@ struct OrganizeView: View {
     /// Spalten des adaptiven Rasters aus den gemessenen Kachelrahmen: alle
     /// Kacheln der ersten Zeile.
     private var gridColumns: Int {
-        let frames = vm.project.pages.compactMap { cellFrames[$0.id] }
+        let frames = vm.project.pages.compactMap { layoutMetrics.cellFrames[$0.id] }
         guard let top = frames.map(\.minY).min() else { return 1 }
         return max(frames.filter { abs($0.minY - top) < 1 }.count, 1)
     }
@@ -484,7 +505,7 @@ struct OrganizeView: View {
                 }
                 guard !draggingIDs.isEmpty else { return }
                 pointerX = value.location.x
-                pointerViewportY = value.location.y - contentOffsetY
+                pointerViewportY = value.location.y - layoutMetrics.contentOffsetY
                 dragInsertIndex = insertionIndex(at: value.location)
             }
             .onEnded { _ in
@@ -581,11 +602,11 @@ struct OrganizeView: View {
                     continue
                 }
 
-                scrollPosition.scrollTo(y: max(0, contentOffsetY + delta))
+                scrollPosition.scrollTo(y: max(0, layoutMetrics.contentOffsetY + delta))
                 // Finger ruht horizontal unverändert; Content-Y unter dem Finger
                 // verschiebt sich um den gescrollten Betrag.
                 let contentUnderFinger = CGPoint(x: pointerX,
-                                                 y: pointerViewportY + contentOffsetY)
+                                                 y: pointerViewportY + layoutMetrics.contentOffsetY)
                 dragInsertIndex = insertionIndex(at: contentUnderFinger)
             }
         }
@@ -645,7 +666,7 @@ struct OrganizeView: View {
         guard !vm.project.pages.isEmpty else { return 0 }
 
         for (i, item) in vm.project.pages.enumerated() {
-            if let frame = cellFrames[item.id], frame.contains(point) {
+            if let frame = layoutMetrics.cellFrames[item.id], frame.contains(point) {
                 return point.x < frame.midX ? i : i + 1
             }
         }
@@ -653,7 +674,7 @@ struct OrganizeView: View {
         var nearest = 0
         var bestDistance = CGFloat.greatestFiniteMagnitude
         for (i, item) in vm.project.pages.enumerated() {
-            guard let frame = cellFrames[item.id] else { continue }
+            guard let frame = layoutMetrics.cellFrames[item.id] else { continue }
             let center = CGPoint(x: frame.midX, y: frame.midY)
             let dx = point.x - center.x, dy = point.y - center.y
             let d = dx * dx + dy * dy
@@ -730,7 +751,7 @@ struct OrganizeView: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
         .fixedSize()
-        .glassEffect(.regular, in: .capsule)
+        .adaptiveGlass(in: .capsule)
         // Haarlinie: Glas auf weißer Fläche hat sonst keine Kante.
         .overlay { Capsule().strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5) }
         .motionSafeAnimation(.easeInOut(duration: 0.15), value: vm.selectedPageIDs.isEmpty)
@@ -743,7 +764,9 @@ struct OrganizeView: View {
     /// Sichern, „Mit Smart komprimieren" und dem Weg zurück zu den Seiten.
     private func outcomeState(_ o: MergeViewModel.MergeOutcome) -> some View {
         ToolWorkspace {
-            DocumentPreview(url: vm.savedURL ?? o.url, scanning: vm.isProcessing)
+            DocumentPreview(url: vm.savedURL ?? o.url,
+                            password: o.encryption?.password,
+                            scanning: vm.isProcessing)
         } panel: {
             VStack(alignment: .leading, spacing: 20) {
                 PanelHeader(title: o.kind.title,
@@ -786,7 +809,7 @@ struct OrganizeView: View {
                     // Seit E1 gilt das nur für mehrere Quellen – eine einzelne
                     // wird im Original umgebaut und behält ihren Katalog.
                     if vm.project.documents.count > 1 {
-                        Text("Übernommen: Seiten, Anmerkungen, Links und Formularfelder. Nicht übernommen: Dateianhänge, XMP-Metadaten, Tag-Struktur und Ebenen. Lesezeichen nur die erste Ebene und Seitenbeschriftungen nur, wenn alle Seiten aus einer Datei stammen.")
+                        Text("Übernommen: Seiten, Anmerkungen, Links, Lesezeichen und Formularfelder. Nicht übernommen: Dateianhänge, XMP-Metadaten, Tag-Struktur und Ebenen. Seitenbeschriftungen nur, wenn alle Seiten aus einer Datei stammen.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -983,8 +1006,7 @@ struct PageCellView: View {
         }
         .help(rotationText.map { String(localized: "Seite \(item.sourcePageIndex + 1) · \($0)") }
               ?? String(localized: "Seite \(item.sourcePageIndex + 1)"))
-        .task(id: item.id) { await reloadThumb() }
-        .onChange(of: item.rotation) { _, _ in Task { await reloadThumb() } }
+        .task(id: "\(item.id)-\(item.rotation)") { await reloadThumb() }
         // VoiceOver (Befund S10): ein Element je Kachel mit Name, Zustand
         // und den wichtigsten Aktionen.
         .accessibilityElement(children: .ignore)

@@ -114,12 +114,18 @@ struct OCRView: View {
     @ViewBuilder
     private var workingState: some View {
         // Die Suche gehört in die Toolbar (Befund S13) – nur mit Text.
-        if vm.showsText {
+        // Über ein leeres Geschwisterelement im ZStack bleibt die strukturelle
+        // Identität von `workspace` (und `DocumentPreview`) stabil – kein
+        // Neuaufbau/Flackern beim Übergang auf `showsText`.
+        ZStack {
             workspace
-                .searchable(text: $vm.searchQuery, placement: .toolbar,
-                            prompt: "Im erkannten Text suchen")
-        } else {
-            workspace
+            if vm.showsText {
+                Color.clear
+                    .frame(width: 0, height: 0)
+                    .allowsHitTesting(false)
+                    .searchable(text: $vm.searchQuery, placement: .toolbar,
+                                prompt: "Im erkannten Text suchen")
+            }
         }
     }
 
@@ -146,12 +152,13 @@ struct OCRView: View {
                 }
                 .frame(width: canvasWidth, height: geo.size.height)
                 // Vor dem Lauf so hoch wie ihr Inhalt (wie die anderen
-                // Pulte); mit Text fensterhoch, weil der scrollt.
+                // Pulte), aber am Fenster gedeckelt; mit Text fensterhoch.
                 textColumn
                     .frame(width: Self.columnWidth,
                            height: vm.showsText ? geo.size.height - 2 * Self.columnInset : nil)
+                    .frame(maxHeight: max(geo.size.height - 2 * Self.columnInset, 200))
                     .clipShape(RoundedRectangle(cornerRadius: Theme.panelRadius, style: .continuous))
-                    .glassEffect(.regular, in: .rect(cornerRadius: Theme.panelRadius))
+                    .adaptiveGlass(in: .rect(cornerRadius: Theme.panelRadius))
                     .padding(Self.columnInset)
                     .frame(width: geo.size.width, height: geo.size.height, alignment: .topTrailing)
             }
@@ -218,8 +225,8 @@ struct OCRView: View {
         case .done:
             return String(localized: "\(vm.totalWords.formatted()) Wörter")
         default:
-            guard let url = vm.pdfURL else { return "" }
-            let size = CompressionResult.format(Compressor.fileSize(of: url))
+            guard vm.pdfURL != nil else { return "" }
+            let size = CompressionResult.format(vm.fileSize)
             guard vm.pageCount > 0 else { return size }
             return "\(size) · \(Counted.pages(vm.pageCount))"
         }
@@ -278,10 +285,16 @@ struct OCRView: View {
             }
             .frame(height: 220)
         default:
-            // Kein ScrollView: Die Karte ist so hoch wie ihr Inhalt, wie
-            // das Pult in Komprimieren und Konvertieren.
-            setupView
-                .padding(Theme.panelPadding)
+            // Kompakt solange Platz ist; bei großer Schrift/kleinem Fenster
+            // scrollt der Mittelteil statt den Footer abzuschneiden.
+            ViewThatFits(in: .vertical) {
+                setupView
+                    .padding(Theme.panelPadding)
+                ScrollView {
+                    setupView
+                        .padding(Theme.panelPadding)
+                }
+            }
         }
     }
 

@@ -37,8 +37,16 @@ check "Helper ausführbar"         test -x "$QPDF"
 check "Helper nur arm64"          sh -c "[ \"\$(lipo -archs '$QPDF')\" = arm64 ]"
 check "App nur arm64"             sh -c "[ \"\$(lipo -archs '$APP/Contents/MacOS/PDFdownsize')\" = arm64 ]"
 check "Keine Homebrew-Dylibs"     sh -c "! otool -L '$QPDF' | grep -qE '/opt/homebrew|/usr/local/'"
-check "--version läuft (arm64)"   sh -c "arch -arm64 '$QPDF' --version | grep -q qpdf" 
-check "--check läuft"             sh -c "'$QPDF' --help >/dev/null"
+# Masterplan N29: Ein mit Sandbox + inherit signierter Helfer lässt sich aus
+# der Shell nicht direkt starten (macOS beendet ihn mit Exit 133). Dann prüft
+# der Check die Signatur; die Lauffähigkeit prüft release.sh vor dem Signieren
+# und das Gate am unsignierten Messbuild.
+if codesign -d --entitlements - --xml "$QPDF" 2>/dev/null | grep -q 'com.apple.security.inherit'; then
+    check "Helfer-Signatur gültig" codesign --verify --strict "$QPDF"
+else
+    check "--version läuft (arm64)" sh -c "arch -arm64 '$QPDF' --version | grep -q qpdf"
+    check "--check läuft"           sh -c "'$QPDF' --help >/dev/null"
+fi
 
 for f in LICENSE-qpdf.txt NOTICE-qpdf.md \
     LICENSE-libjpeg-mozjpeg.md LICENSE-zopfli.txt LICENSE-mozjpeg.md \

@@ -235,7 +235,8 @@ enum PDFValidator {
                          referenceURL: URL? = nil,
                          referenceDocument: PDFDocument? = nil,
                          referenceSnapshot: PDFSemanticSnapshot? = nil,
-                         policy: Policy) -> Report {
+                         policy: Policy,
+                         isCancelled: (@Sendable () -> Bool)? = nil) -> Report {
         // Die Validierung öffnet Dokumente, liest jede Seite und erzeugt bei
         // Bedarf zwei vollständige Snapshots. Alles davon ist autoreleased;
         // ohne eigenen Pool blieb je Aufruf rund 15 MB liegen. Der Report
@@ -259,32 +260,19 @@ enum PDFValidator {
             return report
         }
 
-        guard let outDoc = PDFDocument(url: outputURL), !outDoc.isLocked else {
-            report.fail("Ausgabe kann nicht geöffnet werden", ValidationFinding(
-                kind: .structure, severity: .fatal, pages: [],
-                message: "Ausgabe kann nicht geöffnet werden"))
-            return report
-        }
-
-        let refDoc: PDFDocument?
-        if let referenceDocument {
-            refDoc = referenceDocument
-        } else {
-            refDoc = referenceURL.flatMap { PDFDocument(url: $0) }
-        }
-
         // Masterplan C2: Die Snapshots entstehen VOR der Strukturprüfung –
-        // deren Textvergleich liest dann die Zeichenzahlen aus ihnen, statt
-        // den Text aller Seiten ein drittes und viertes Mal zu extrahieren.
-        // Die Referenz kommt, wenn vorhanden, vom Aufrufer (einmal je Lauf,
-        // auch über Re-Plans hinweg).
+        // Text-, Annotations- und Geometrievergleiche lesen dann aus ihnen,
+        // statt die Referenz noch einmal im Hauptprozess per PDFKit zu öffnen.
         var snapshots: (before: PDFSemanticSnapshot, after: PDFSemanticSnapshot)?
         var snapshotError: Error?
         if policy.failsOnSemanticSeverity != nil, let referenceURL {
             do {
-                let before = try referenceSnapshot ?? PDFSemanticSnapshot.capture(referenceURL)
-                let after = try PDFSemanticSnapshot.capture(outputURL)
+                let before = try referenceSnapshot ?? PDFSemanticSnapshot.capture(referenceURL, isCancelled: isCancelled)
+                if isCancelled?() == true { return report }
+                let after = try PDFSemanticSnapshot.capture(outputURL, isCancelled: isCancelled)
                 snapshots = (before, after)
+            } catch is CancellationError {
+                return report
             } catch {
                 snapshotError = error
             }
@@ -298,17 +286,36 @@ enum PDFValidator {
             report.fail(message, ValidationFinding(kind: .text, severity: .error, pages: [], message: message))
             return report
         }
+        if isCancelled?() == true { return report }
+
+        guard let outDoc = PDFDocument(url: outputURL), !outDoc.isLocked else {
+            report.fail("Ausgabe kann nicht geöffnet werden", ValidationFinding(
+                kind: .structure, severity: .fatal, pages: [],
+                message: "Ausgabe kann nicht geöffnet werden"))
+            return report
+        }
+
+        // C2/C5: Wenn beide Snapshots vorliegen und kein Seitenmapping nötig ist,
+        // muss die Referenzdatei im Hauptprozess gar nicht mehr über PDFKit
+        // geöffnet werden (spart bei statab/IPCC Sekunden und Hunderte MB RAM).
+        let needsReferenceDoc = snapshots == nil || policy.pageMapping != nil
+        let refDoc: PDFDocument?
+        if let referenceDocument {
+            refDoc = referenceDocument
+        } else if needsReferenceDoc {
+            refDoc = referenceURL.flatMap { PDFDocument(url: $0) }
+        } else {
+            refDoc = nil
+        }
 
         validateStructure(outDoc,
                           expectedPageCount: policy.expectedPageCount,
                           reference: refDoc,
                           policy: policy,
-                          textCounts: snapshots.map {
-                              ($0.before.pages.reduce(0) { $0 + $1.textCharacterCount },
-                               $0.after.pages.reduce(0) { $0 + $1.textCharacterCount },
-                               $0.before.pages.reduce(0) { $0 + $1.wordCount })
-                          },
+                          snapshots: snapshots,
                           report: &report)
+
+        if isCancelled?() == true { return report }
 
         // Masterplan Schritt 8 – unabhängige Strukturprüfung über libqpdf.
         // PDFKit öffnet auch Dokumente, die strukturell beschädigt sind.
@@ -324,6 +331,8 @@ enum PDFValidator {
                         + "\(error.localizedDescription)"))
             }
         }
+
+        if isCancelled?() == true { return report }
 
         // Vollständiger semantischer Vergleich gegen die Referenz.
         //
@@ -365,15 +374,22 @@ enum PDFValidator {
             }
         }
 
-        if policy.preservesGeometry, let refDoc {
-            validateGeometry(outDoc, reference: refDoc, report: &report)
+        if policy.preservesGeometry {
+            if let (before, after) = snapshots {
+                validateGeometry(before: before, after: after, report: &report)
+            } else if let refDoc {
+                validateGeometry(outDoc, reference: refDoc, report: &report)
+            }
         }
+
+        if isCancelled?() == true { return report }
 
         if let pages = policy.renderSamplePages, !pages.isEmpty {
             if let referenceURL {
                 validateRenderSample(outputURL: outputURL, referenceURL: referenceURL,
                                      pages: pages,
                                      expectsGrayscale: policy.renderSampleExpectsGrayscale,
+                                     isCancelled: isCancelled,
                                      report: &report)
             } else {
                 report.warnings.append("Render-Stichprobe übersprungen: keine Referenzdatei")
@@ -495,11 +511,15 @@ enum PDFValidator {
     /// Prüfung gilt als nicht bestanden.
     private static func validateRenderSample(outputURL: URL, referenceURL: URL,
                                              pages: [Int], expectsGrayscale: Bool,
+                                             isCancelled: (@Sendable () -> Bool)? = nil,
                                              report: inout Report) {
         let measurements: [RenderSampleMeasurement]
-        switch FrameworkProbe.renderSample(referenceURL: referenceURL, outputURL: outputURL, pages: pages) {
+        switch FrameworkProbe.renderSample(referenceURL: referenceURL, outputURL: outputURL,
+                                           pages: pages, isCancelled: isCancelled) {
         case .success(let values):
             measurements = values
+        case .failure(.cancelled):
+            return
         case .failure(.stalled(let page)):
             report.frameworkTimedOut = true
             let number = (page ?? pages.first ?? 0) + 1
@@ -643,6 +663,38 @@ enum PDFValidator {
     /// Seitengeometrie muss Punkt für Punkt der Referenz entsprechen.
     /// Ein verschobener CropBox-Ursprung ist sichtbares Cropping und darf
     /// bei einer Kompression nicht vorkommen.
+    /// Geometrieprüfung direkt aus den vorhandenen Snapshots (C2/C5: kein
+    /// zweites PDFKit-Öffnen der Referenz).
+    private static func validateGeometry(before: PDFSemanticSnapshot,
+                                         after: PDFSemanticSnapshot,
+                                         report: inout Report) {
+        guard before.pages.count == after.pages.count else { return }
+        for i in 0..<after.pages.count {
+            let refPage = before.pages[i], page = after.pages[i]
+            for (name, a, b) in [("MediaBox", page.mediaBox, refPage.mediaBox),
+                                 ("CropBox", page.cropBox, refPage.cropBox)] where a.count == 4 && b.count == 4 {
+                let aw = a[2] - a[0], ah = a[3] - a[1]
+                let bw = b[2] - b[0], bh = b[3] - b[1]
+                if abs(a[0] - b[0]) > 1 || abs(a[1] - b[1]) > 1
+                    || abs(aw - bw) > 1 || abs(ah - bh) > 1 {
+                    let message = "Seite \(i + 1): \(name) verändert "
+                        + "(\(Int(bw))×\(Int(bh)) → \(Int(aw))×\(Int(ah)))"
+                    report.fail(message, ValidationFinding(
+                        kind: .geometry, severity: .error, pages: [i + 1],
+                        message: message))
+                }
+            }
+            if RotationNormalizer.normalized(page.rotation)
+                != RotationNormalizer.normalized(refPage.rotation) {
+                let message = "Seite \(i + 1): Rotation verändert "
+                    + "(\(refPage.rotation)° → \(page.rotation)°)"
+                report.fail(message, ValidationFinding(
+                    kind: .geometry, severity: .error, pages: [i + 1],
+                    message: message))
+            }
+        }
+    }
+
     private static func validateGeometry(_ doc: PDFDocument,
                                          reference: PDFDocument,
                                          report: inout Report) {
@@ -720,7 +772,7 @@ enum PDFValidator {
                                           expectedPageCount: Int?,
                                           reference: PDFDocument?,
                                           policy: Policy,
-                                          textCounts: (input: Int, output: Int, inputWords: Int)? = nil,
+                                          snapshots: (before: PDFSemanticSnapshot, after: PDFSemanticSnapshot)? = nil,
                                           report: inout Report) {
         if let expected = expectedPageCount, doc.pageCount != expected {
             report.fail("Seitenzahl \(doc.pageCount) ≠ erwartet \(expected)",
@@ -761,7 +813,7 @@ enum PDFValidator {
             }
         }
 
-        if policy.preservesText, let ref = reference {
+        if policy.preservesText, reference != nil || snapshots != nil {
             // Mit Seitenzuordnung wird nur der Text der ÜBERNOMMENEN Seiten
             // verglichen. Ohne sie meldete jede Teilmengen-Operation einen
             // Verlust: `extract-first-half` behält die Hälfte der Seiten und
@@ -769,13 +821,16 @@ enum PDFValidator {
             // Mangel.
             let inputText: String
             let outputText: String
-            if policy.pageMapping == nil, let textCounts {
+            if policy.pageMapping == nil, let snapshots {
                 // C2: Zeichenzahlen aus den Snapshots – derselbe Vergleich
                 // (Summe der Seitentexte), ohne erneute Extraktion.
                 // Wie bisher: Eingaben ohne sichtbaren Text (nur Leerraum)
                 // prüfen nichts.
-                if textCounts.inputWords > 0, textCounts.input > 0 {
-                    let ratio = Double(textCounts.output) / Double(textCounts.input)
+                let inputChars = snapshots.before.pages.reduce(0) { $0 + $1.textCharacterCount }
+                let outputChars = snapshots.after.pages.reduce(0) { $0 + $1.textCharacterCount }
+                let inputWords = snapshots.before.pages.reduce(0) { $0 + $1.wordCount }
+                if inputWords > 0, inputChars > 0 {
+                    let ratio = Double(outputChars) / Double(inputChars)
                     if ratio < policy.textSimilarityThreshold {
                         let message = String(format: "Textverlust: %.0f %% erhalten", ratio * 100)
                         report.fail(message, ValidationFinding(
@@ -784,13 +839,16 @@ enum PDFValidator {
                 }
                 inputText = ""
                 outputText = ""
-            } else if let mapping = policy.pageMapping {
+            } else if let mapping = policy.pageMapping, let ref = reference {
                 let pairs = mapping.sorted { $0.key < $1.key }
                 inputText = pairs.compactMap { ref.page(at: $0.value)?.string }.joined()
                 outputText = pairs.compactMap { doc.page(at: $0.key)?.string }.joined()
-            } else {
+            } else if let ref = reference {
                 inputText = (0..<ref.pageCount).compactMap { ref.page(at: $0)?.string }.joined()
                 outputText = (0..<doc.pageCount).compactMap { doc.page(at: $0)?.string }.joined()
+            } else {
+                inputText = ""
+                outputText = ""
             }
             if !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let ratio = Double(outputText.count) / Double(max(inputText.count, 1))
@@ -806,6 +864,20 @@ enum PDFValidator {
         if let mapping = policy.pageMapping, let ref = reference {
             comparePerPage(mapping: mapping, reference: ref, output: doc,
                            policy: policy, report: &report)
+        } else if let snapshots {
+            // C2/C5: Zählungen aus den Snapshots übernehmen statt 3× PDFKit-Seitenlauf.
+            compareCount(before: snapshots.before.pages.reduce(0) { $0 + $1.annotationCount },
+                         after: snapshots.after.pages.reduce(0) { $0 + $1.annotationCount },
+                         label: "Annotationen", kind: .annotation,
+                         hardFail: policy.preservesAnnotations, report: &report)
+            compareCount(before: snapshots.before.pages.reduce(0) { $0 + $1.linkCount },
+                         after: snapshots.after.pages.reduce(0) { $0 + $1.linkCount },
+                         label: "Links", kind: .link,
+                         hardFail: policy.preservesLinks, report: &report)
+            compareCount(before: snapshots.before.pages.reduce(0) { $0 + $1.widgetCount },
+                         after: snapshots.after.pages.reduce(0) { $0 + $1.widgetCount },
+                         label: "Formularfelder", kind: .form,
+                         hardFail: policy.preservesForms, report: &report)
         } else {
             compareCounts(in: reference, out: doc,
                           selector: { totalAnnotations($0) },
@@ -964,8 +1036,15 @@ enum PDFValidator {
                                       hardFail: Bool,
                                       report: inout Report) {
         guard let ref = reference else { return }
-        let before = selector(ref)
-        let after = selector(doc)
+        compareCount(before: selector(ref), after: selector(doc),
+                     label: label, kind: kind, hardFail: hardFail, report: &report)
+    }
+
+    private static func compareCount(before: Int, after: Int,
+                                     label: String,
+                                     kind: ValidationFinding.Kind,
+                                     hardFail: Bool,
+                                     report: inout Report) {
         guard before > 0 else { return }
         if after < before {
             let message = "\(label): \(before) → \(after)"

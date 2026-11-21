@@ -20,8 +20,28 @@ final class OpenFilesDelegate: NSObject, NSApplicationDelegate {
         Self.current = self
     }
 
+    /// Dateien, die vor dem ersten `RootView.onAppear` über „Öffnen mit“
+    /// oder das Dock ankamen – ohne Puffer ging die Notification beim Kaltstart
+    /// ins Leere.
+    @MainActor private var bufferedOpenURLs: [URL] = []
+    @MainActor private var receiverReady = false
+
+    @MainActor
     func application(_ application: NSApplication, open urls: [URL]) {
-        NotificationCenter.default.post(name: Self.didReceiveFiles, object: urls)
+        guard !urls.isEmpty else { return }
+        if receiverReady {
+            NotificationCenter.default.post(name: Self.didReceiveFiles, object: urls)
+        } else {
+            bufferedOpenURLs.append(contentsOf: urls)
+        }
+    }
+
+    @MainActor
+    func drainBufferedOpenURLs() -> [URL] {
+        receiverReady = true
+        let pending = bufferedOpenURLs
+        bufferedOpenURLs = []
+        return pending
     }
 
     // MARK: Beenden (Masterplan B3)

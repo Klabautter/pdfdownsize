@@ -144,38 +144,102 @@ final class CompareCanvasView: NSView {
     private var highlightQuery = ""
     private var highlightPages: Set<Int> = []
     private weak var highlightDocument: PDFDocument?
+    private var highlightPageIndex: Int = -1
 
     /// Markiert Suchtreffer (gelb) – ohne Suche den Text der markierten
     /// Seiten (dezent in Akzentfarbe), damit sichtbar ist, was erkannt wurde.
+    ///
+    /// Performance (C6): Da `PDFView` in `.singlePage` arbeitet, reicht die
+    /// Markierung der AKTUELL sichtbaren Seite – vorher suchte `findString`
+    /// bzw. `page.selection(for:)` synchron auf dem Hauptthread über alle
+    /// 500–1000 Seiten des Dokuments.
     func setHighlight(_ query: String, markedPages: Set<Int> = []) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentIndex = base.currentPage.flatMap { base.document?.index(for: $0) } ?? -1
         guard trimmed != highlightQuery || markedPages != highlightPages
-                || highlightDocument !== base.document else { return }
+                || highlightDocument !== base.document
+                || currentIndex != highlightPageIndex else { return }
         highlightQuery = trimmed
         highlightPages = markedPages
         highlightDocument = base.document
-        guard let document = base.document else { base.highlightedSelections = nil; return }
-        if trimmed.count >= 2 {
-            let hits = document.findString(trimmed, withOptions: .caseInsensitive)
-            hits.forEach { $0.color = .systemYellow.withAlphaComponent(0.55) }
-            base.highlightedSelections = hits
+        highlightPageIndex = currentIndex
+        refreshHighlightForCurrentPage()
+    }
+
+    /// Ab dieser Seitenzahl sucht und markiert `setHighlight` nur noch die
+    /// aktuell angezeigte Seite (C6), statt synchron auf dem Hauptthread über
+    /// 500–1000 Seiten zu laufen. Kleine Dokumente bleiben komplett markiert.
+    static let perPageHighlightThreshold = 20
+
+    private func refreshHighlightForCurrentPage() {
+        guard let document = base.document else {
+            base.highlightedSelections = nil
             return
         }
-        let marks = markedPages.sorted().compactMap { index -> PDFSelection? in
-            guard let page = document.page(at: index),
-                  let selection = page.selection(for: page.bounds(for: .cropBox)),
-                  !(selection.string ?? "").isEmpty else { return nil }
-            selection.color = NSColor.controlAccentColor.withAlphaComponent(0.18)
-            return selection
+        if document.pageCount <= Self.perPageHighlightThreshold {
+            if highlightQuery.count >= 2 {
+                let hits = document.findString(highlightQuery, withOptions: [.caseInsensitive, .diacriticInsensitive])
+                for hit in hits { hit.color = .systemYellow.withAlphaComponent(0.55) }
+                base.highlightedSelections = hits.isEmpty ? nil : hits
+                return
+            }
+            let marks = highlightPages.sorted().compactMap { index -> PDFSelection? in
+                guard let page = document.page(at: index),
+                      let selection = page.selection(for: page.bounds(for: .cropBox)),
+                      !(selection.string ?? "").isEmpty else { return nil }
+                selection.color = NSColor.controlAccentColor.withAlphaComponent(0.18)
+                return selection
+            }
+            base.highlightedSelections = marks.isEmpty ? nil : marks
+            return
         }
-        base.highlightedSelections = marks.isEmpty ? nil : marks
+
+        guard let page = base.currentPage else {
+            base.highlightedSelections = nil
+            return
+        }
+        let index = document.index(for: page)
+        highlightPageIndex = index
+        if highlightQuery.count >= 2 {
+            // Nur die angezeigte Seite durchsuchen statt das gesamte Dokument.
+            let pageText = page.string ?? ""
+            guard !pageText.isEmpty else { base.highlightedSelections = nil; return }
+            var hits: [PDFSelection] = []
+            let nsText = pageText as NSString
+            var search = NSRange(location: 0, length: nsText.length)
+            while search.length > 0 {
+                let found = nsText.range(of: highlightQuery, options: [.caseInsensitive, .diacriticInsensitive], range: search)
+                guard found.location != NSNotFound else { break }
+                if let selection = page.selection(for: found) {
+                    selection.color = .systemYellow.withAlphaComponent(0.55)
+                    hits.append(selection)
+                }
+                let next = found.location + max(found.length, 1)
+                search = NSRange(location: next, length: nsText.length - next)
+            }
+            base.highlightedSelections = hits.isEmpty ? nil : hits
+            return
+        }
+        if highlightPages.contains(index),
+           let selection = page.selection(for: page.bounds(for: .cropBox)),
+           !(selection.string ?? "").isEmpty {
+            selection.color = NSColor.controlAccentColor.withAlphaComponent(0.18)
+            base.highlightedSelections = [selection]
+        } else {
+            base.highlightedSelections = nil
+        }
     }
 
     func go(toPage index: Int) {
+        var moved = false
         for view in [base, overlay] {
             guard let document = view.document, index < document.pageCount,
                   let page = document.page(at: index), view.currentPage !== page else { continue }
             view.go(to: page)
+            if view === base { moved = true }
+        }
+        if moved && (!highlightQuery.isEmpty || !highlightPages.isEmpty) {
+            refreshHighlightForCurrentPage()
         }
     }
 
@@ -210,6 +274,9 @@ final class CompareCanvasView: NSView {
                 guard let self, let page = view.currentPage,
                       let index = view.document?.index(for: page) else { return }
                 self.mirror(from: view)
+                if view === self.base, !self.highlightQuery.isEmpty || !self.highlightPages.isEmpty {
+                    self.refreshHighlightForCurrentPage()
+                }
                 let report = self.onPageChange
                 DispatchQueue.main.async { report(index) }
             }

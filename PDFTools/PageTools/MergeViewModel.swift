@@ -153,6 +153,9 @@ final class MergeViewModel: ObservableObject {
     /// View soll das Bildexport-Sheet öffnen („Seiten als Bilder exportieren …“).
     @Published var wantsImages = false
 
+    /// Ist ein Sheet (Aufteilen / Bildexport) offen? Sperrt Seiten-Shortcuts im Hintergrund.
+    @Published var isSheetPresented = false
+
     /// Unveränderter Import-Zustand – Grundlage für „Änderungen zurücksetzen“ (§22–§25).
     private var baselineProject = PageProject()
 
@@ -163,8 +166,6 @@ final class MergeViewModel: ObservableObject {
     /// Abbruch oder nach dem Start eines neuen Laufs eintrifft, wird
     /// verworfen statt den Zustand zu überschreiben (Befund B11).
     private var activeRunID = UUID()
-    /// Laufender Kompressions-Engine-Task (wird von cancelProcessing mit gestoppt).
-    private var engineTask: Task<CompressionResult, Error>?
 
     // MARK: - Change Tracking
 
@@ -669,7 +670,6 @@ final class MergeViewModel: ObservableObject {
         guard isProcessing else { return }
         activity = .processing(cancelling: true)
         workTask?.cancel()
-        engineTask?.cancel()
     }
 
     // Die Assembly-Implementierung liegt in `PageAssemblyService`
@@ -689,7 +689,7 @@ final class MergeViewModel: ObservableObject {
                      baseName: String) async throws -> [URL] {
         guard !chunks.isEmpty else { return [] }
         splitRebuildNotice = nil
-        var rebuiltSource: URL?
+        var rebuiltSources: [URL] = []
         activity = .processing(cancelling: false)
         progress = 0
         processingLabel = "Vorbereiten …"
@@ -743,16 +743,22 @@ final class MergeViewModel: ObservableObject {
                     throw MergeError.validationFailed
                 }
 
-                // Masterplan N10: Ein Teil aus einer entsperrten Quelle geht
-                // mit ihrem Passwort hinaus – vorher Klartext ohne Hinweis.
+                // Masterplan N10/N37: Ein Teil aus einer entsperrten Quelle geht
+                // mit ihrem Passwort hinaus – Neuverschlüsseln abseits des Main Threads.
                 var payload = staging
                 if let encryption = encryption(for: chunk) {
-                    payload = SessionScratch.makeURL(prefix: "split-locked-")
-                    try encryption.reencrypt(staging, to: payload)
+                    let locked = SessionScratch.makeURL(prefix: "split-locked-")
+                    try await Task.detached(priority: .userInitiated) {
+                        try encryption.reencrypt(staging, to: locked)
+                    }.value
+                    payload = locked
                 }
                 do {
                     try fm.moveItem(at: payload, to: dest)
-                    if assembly.rebuiltSingleSource { rebuiltSource = chunk.first?.sourceURL }
+                    if assembly.rebuiltSingleSource, let src = chunk.first?.sourceURL,
+                       !rebuiltSources.contains(src) {
+                        rebuiltSources.append(src)
+                    }
                 } catch {
                     if payload != staging { try? fm.removeItem(at: payload) }
                     throw error
@@ -760,10 +766,21 @@ final class MergeViewModel: ObservableObject {
                 written.append(dest)
             }
             progress = 1
-            if let source = rebuiltSource {
-                let shownName = unlockedSources[source]?.original.lastPathComponent
+            if !rebuiltSources.isEmpty {
+                let sources = rebuiltSources
+                let names = Dictionary(uniqueKeysWithValues: sources.compactMap { src in
+                    unlockedSources[src].map { (src, $0.original.lastPathComponent) }
+                })
                 let losses = await Task.detached(priority: .userInitiated) {
-                    MergeLossSummary.rebuildLosses(for: source, displayName: shownName)
+                    var seen = Set<MergeLossSummary.Feature>()
+                    var combined: [MergeLossSummary.Loss] = []
+                    for src in sources {
+                        for loss in MergeLossSummary.rebuildLosses(for: src, displayName: names[src])
+                        where seen.insert(loss.feature).inserted {
+                            combined.append(loss)
+                        }
+                    }
+                    return combined
                 }.value
                 splitRebuildNotice = MergeLossSummary.rebuildSentence(for: losses)
             }
@@ -799,7 +816,7 @@ final class MergeViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Smart nach Merge
+    // MARK: - Übergabe an Komprimieren
 
     /// Komprimiert das Merge-/Extract-Ergebnis über EXAKT dieselbe zentrale
     /// Pipeline wie das Compress-Tool (#3): SmartCompressor → qpdf → Validation.
@@ -851,8 +868,7 @@ final class MergeViewModel: ObservableObject {
         return "\(stem)_\(suffix).pdf"
     }
 
-    @discardableResult
-    func saveOutcome(_ outcome: MergeOutcome) -> URL? {
+    func saveOutcome(_ outcome: MergeOutcome) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.nameFieldStringValue = suggestedFileName(for: outcome)
@@ -863,17 +879,34 @@ final class MergeViewModel: ObservableObject {
                 panel.directoryURL = original.deletingLastPathComponent()
             }
         }
-        let guardian = SourceNameGuard(sources: project.documents.map(\.url)
-                                       + unlockedSources.values.map(\.original))
+        let sources = project.documents.map(\.url) + unlockedSources.values.map(\.original)
+        let guardian = SourceNameGuard(sources: sources)
         panel.delegate = guardian
 
-        guard panel.runModal() == .OK, let dest = panel.url else { return nil }
-        do {
-            try saveOutcome(outcome, to: dest)
-            return dest
-        } catch {
-            errorMessage = error.localizedDescription
-            return nil
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+        // Masterplan N37: Neuverschlüsseln und Verschieben abseits des Main Threads.
+        Task { @MainActor in
+            do {
+                try SourceOverwrite.check(dest, sources: sources)
+                try await Task.detached(priority: .userInitiated) {
+                    var payload = outcome.url
+                    if let encryption = outcome.encryption {
+                        payload = SessionScratch.makeURL(prefix: "locked-")
+                        try encryption.reencrypt(outcome.url, to: payload)
+                    }
+                    if FileManager.default.fileExists(atPath: dest.path) {
+                        _ = try FileManager.default.replaceItemAt(dest, withItemAt: payload)
+                    } else {
+                        try FileManager.default.moveItem(at: payload, to: dest)
+                    }
+                    if payload != outcome.url { try? FileManager.default.removeItem(at: outcome.url) }
+                }.value
+                guard self.outcome?.url == outcome.url else { return }
+                self.outcomeState = .saved(outcome, to: dest)
+                self.errorMessage = nil
+            } catch {
+                self.errorMessage = error.localizedDescription
+            }
         }
     }
 

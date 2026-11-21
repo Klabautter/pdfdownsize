@@ -4870,7 +4870,15 @@ int pdfcore_get_image_icc_profile(pdfcore_document_t *doc, int obj, int gen,
     if (!image.isStream()) { return PDFCORE_ERR_CHECK_FAILED; }
     QPDFObjectHandle icc = image_icc_stream(image);
     if (!icc.isStream()) { return PDFCORE_ERR_CHECK_FAILED; }
-    std::shared_ptr<Buffer> data = icc.getStreamData(qpdf_dl_generalized);
+    // Masterplan N37: ICC-Profil mit Dekodiergrenze lesen (Dekompressionsbombe).
+    static size_t constexpr max_icc_profile_bytes = 16 * 1024 * 1024;
+    Pl_Buffer buf("icc");
+    Pl_Limit limit("icc-limit", &buf, max_icc_profile_bytes);
+    bool attempted = false;
+    if (!icc.pipeStreamData(&limit, &attempted, 0, qpdf_dl_generalized, true, false)) {
+        return PDFCORE_ERR_CHECK_FAILED;
+    }
+    std::unique_ptr<Buffer> data(buf.getBuffer());
     if (!data || data->getSize() == 0) { return PDFCORE_ERR_CHECK_FAILED; }
     *out = static_cast<unsigned char*>(std::malloc(data->getSize()));
     if (!*out) { return PDFCORE_ERR_INTERNAL; }
@@ -11661,8 +11669,14 @@ int pdfcore_replace_page_image_draw_with_layers(
 
         // Layer in ZEICHNUNGSREIHENFOEGE des Aufrufers (Hintergrund zuerst,
         // Maske zuletzt) unter eindeutigen Namen anlegen.
-        // Masterplan N21: dreikanaliges /ICCBased der Quelle für die Ebenen.
+        // Masterplan N21/N31: dreikanaliges /ICCBased der Quelle (auch als
+        // Basis von /Indexed) für die Ebenen übernehmen.
         QPDFObjectHandle sourceICC = imageDict.getKey("/ColorSpace");
+        if (sourceICC.isArray() && sourceICC.getArrayNItems() > 1
+            && sourceICC.getArrayItem(0).isName()
+            && sourceICC.getArrayItem(0).getName() == "/Indexed") {
+            sourceICC = sourceICC.getArrayItem(1);
+        }
         if (!(is_icc_based(sourceICC) && replacement_components(sourceICC) == 3)) {
             sourceICC = QPDFObjectHandle::newNull();
         }

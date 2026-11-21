@@ -225,11 +225,14 @@ enum MRCSegmenter {
         var inpaint = mask
         for colorMask in colorMasks { inpaint = inpaint.union(colorMask.mask) }
 
+        let sourceProfile = ImageResampler.sourceProfile(of: image)
+
         // --- Hintergrund-Rekonstruktion --------------------------------------
         let background = reconstructBackground(
             pixels: pixels, width: width, height: height,
             components: isGray ? 1 : 3, mask: inpaint,
-            effectivelyGray: effectivelyGray)
+            effectivelyGray: effectivelyGray,
+            sourceProfile: sourceProfile)
         guard let background else { return nil }
 
         // Photo-Ausschnitte aus dem ORIGINAL-Raster (volle Auflösung).
@@ -240,6 +243,9 @@ enum MRCSegmenter {
                 .integral
             guard clamped.width >= 2, clamped.height >= 2,
                   let crop = image.cropping(to: clamped) else { continue }
+            // N31: cropping(to:) erzeugt ein neues CGImage ohne Associated Object –
+            // das Quellprofil muss mitwandern, sonst rechnet Grau wie sRGB.
+            if let sourceProfile { ImageResampler.tagSourceProfile(crop, sourceProfile) }
             photoRegions.append(PhotoRegion(rect: clamped, crop: crop))
         }
 
@@ -725,7 +731,8 @@ enum MRCSegmenter {
     /// überdeckt.
     static func reconstructBackground(pixels: Data, width: Int, height: Int,
                                       components: Int, mask: BilevelBuffer,
-                                      effectivelyGray: Bool) -> CGImage? {
+                                      effectivelyGray: Bool,
+                                      sourceProfile: CGColorSpace? = nil) -> CGImage? {
         let count = width * height
         let channels = components
         let maskBits = [UInt8](mask.data)
@@ -846,15 +853,19 @@ enum MRCSegmenter {
                 padded[i * 4 + 1] = buffer[i * 3 + 1]
                 padded[i * 4 + 2] = buffer[i * 3 + 2]
             }
-            guard let provider = CGDataProvider(data: Data(padded) as CFData)
+            guard let provider = CGDataProvider(data: Data(padded) as CFData),
+                  let image = CGImage(width: width, height: height,
+                                      bitsPerComponent: 8, bitsPerPixel: 32,
+                                      bytesPerRow: width * 4,
+                                      space: colorSpace,
+                                      bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
+                                      provider: provider, decode: nil,
+                                      shouldInterpolate: false, intent: .defaultIntent)
             else { return nil }
-            return CGImage(width: width, height: height,
-                           bitsPerComponent: 8, bitsPerPixel: 32,
-                           bytesPerRow: width * 4,
-                           space: colorSpace,
-                           bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
-                           provider: provider, decode: nil,
-                           shouldInterpolate: false, intent: .defaultIntent)
+            // N31: Quellprofil am Hintergrund behalten – wird er grau kodiert
+            // (z. B. ROMM-Scan), rechnet drawResize über das Profil statt sRGB.
+            if let sourceProfile { ImageResampler.tagSourceProfile(image, sourceProfile) }
+            return image
         }
         guard let provider = CGDataProvider(data: Data(buffer) as CFData)
         else { return nil }

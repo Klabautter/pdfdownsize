@@ -81,8 +81,8 @@ enum StructureTrial {
     private static func measure(url: URL, original: Int64,
                                 compatibility: CompatibilityPolicy) -> Double? {
         guard let qpdfPath = Compressor.findQPDF() else { return nil }
-        let output = FileManager.default.temporaryDirectory
-            .appendingPathComponent("structure-trial-\(UUID().uuidString).pdf")
+        // N36: Im Sitzungsordner (Klartext entsperrter Quellen).
+        let output = SessionScratch.makeURL(prefix: "structure-trial-")
         defer { try? FileManager.default.removeItem(at: output) }
 
         let process = Compressor.makeStructureProcess(

@@ -574,8 +574,8 @@ enum MRCPageRewriter {
                                       descriptor: MRCCandidateDescriptor,
                                       bundle: Data) -> MRCPageQuality? {
         let fileManager = FileManager.default
-        let outputURL = fileManager.temporaryDirectory
-            .appendingPathComponent("mrc-qa-\(UUID().uuidString).pdf")
+        // N36: Im Sitzungsordner (Klartext entsperrter Quellen).
+        let outputURL = SessionScratch.makeURL(prefix: "mrc-qa-")
         defer { try? fileManager.removeItem(at: outputURL) }
         do {
             let scratch = try PDFCoreDocument(path: inputURL.path)

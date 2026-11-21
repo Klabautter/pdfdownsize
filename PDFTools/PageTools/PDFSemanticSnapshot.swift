@@ -201,16 +201,25 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
         case .libQPDF:
             return try captureViaLibQPDF(url)
         case .merged:
+            // Dokumentstrukturen zuerst aus libqpdf (schnell, exakt, kein PDFKit-RAM):
+            // So kennen wir die Seitenzahl vorab, ohne während `parallelPages`
+            // ein siebtes PDFDocument offenzuhalten, und PDFKit überspringt
+            // Outlines/Formularwerte/URLs, die libqpdf ohnehin liefert.
+            let structure = try? captureViaLibQPDF(url)
+            let precomputedPages: PagePart? = structure.flatMap {
+                Self.parallelPages(url: url, pageCount: $0.document.pageCount,
+                                   skipStructureDetails: true, onPage: onPage)
+            }
             guard let doc = PDFDocument(url: url), !doc.isLocked else {
                 throw CocoaError(.fileReadCorruptFile)
             }
-            var snapshot = capture(doc, pages: Self.collectedPages(doc, url: url, onPage: onPage))
+            let pagesPart = precomputedPages
+                ?? Self.collectedPages(doc, url: url,
+                                       skipStructureDetails: structure != nil,
+                                       onPage: onPage)
+            var snapshot = capture(doc, pages: pagesPart, skipOutline: structure != nil)
             snapshot.backend = .merged
-            // Dokumentstrukturen kommen von libqpdf: PDFKit meldet Named
-            // Destinations, Page Labels, Attachments und Feldwerte nicht
-            // zuverlässig. Ist libqpdf nicht verfügbar, bleibt der PDFKit-
-            // Stand stehen – erkennbar am Backend-Feld, kein stiller Verlust.
-            if let structure = try? captureViaLibQPDF(url) {
+            if let structure {
                 snapshot.document.hasPageLabels = structure.document.hasPageLabels
                 snapshot.document.pageLabelRanges = structure.document.pageLabelRanges
                 snapshot.navigation.namedDestinations = structure.navigation.namedDestinations
@@ -281,15 +290,39 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
     /// PDFDocument-Instanzen verteilt. Eine Instanz ist nicht parallel
     /// benutzbar, getrennte Instanzen schon. nil = seriell im Aufrufer.
     static let parallelPageThreshold = 100
-    static func parallelPages(url: URL, pageCount: Int, onPage: PageProgress? = nil) -> PagePart? {
-        guard pageCount >= parallelPageThreshold else { return nil }
-        let workers = min(6, max(1, pageCount / 50))
+    /// Dateigrößen-Deckel für parallele PDFDocument-Instanzen (C5): Sechs
+    /// gleichzeitige Instanzen einer 423-MB-PDF sprengen den Speicher.
+    static func parallelWorkerCount(pageCount: Int, fileBytes: Int64) -> Int {
+        guard pageCount >= parallelPageThreshold else { return 1 }
+        let byPages = min(6, max(1, pageCount / 50))
+        let bySize: Int
+        if fileBytes >= 250 * 1024 * 1024 {
+            bySize = 1
+        } else if fileBytes >= 80 * 1024 * 1024 {
+            bySize = 2
+        } else if fileBytes >= 20 * 1024 * 1024 {
+            bySize = 4
+        } else {
+            bySize = 6
+        }
+        return min(byPages, bySize)
+    }
+
+    static func parallelPages(url: URL, pageCount: Int,
+                              skipStructureDetails: Bool = false,
+                              onPage: PageProgress? = nil) -> PagePart? {
+        let fileBytes = Compressor.fileSize(of: url)
+        let workers = parallelWorkerCount(pageCount: pageCount, fileBytes: fileBytes)
+        guard workers > 1 else { return nil }
         let chunk = (pageCount + workers - 1) / workers
         let parts: [PagePart?] = ParallelWork.map(count: workers, limit: workers) { w in
             let range = (w * chunk)..<min(pageCount, (w + 1) * chunk)
             guard let doc = PDFDocument(url: url), !doc.isLocked else { return nil }
             var part = PagePart()
-            for i in range { collectPage(doc, index: i, into: &part, onPage: onPage) }
+            for i in range {
+                collectPage(doc, index: i, into: &part,
+                            skipStructureDetails: skipStructureDetails, onPage: onPage)
+            }
             return part
         }
         var merged = PagePart()
@@ -303,16 +336,24 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
     }
 
     /// Seitenteil (parallel ab der Schwelle, sonst seriell).
-    static func collectedPages(_ doc: PDFDocument, url: URL, onPage: PageProgress? = nil) -> PagePart {
-        if let parallel = parallelPages(url: url, pageCount: doc.pageCount, onPage: onPage) {
+    static func collectedPages(_ doc: PDFDocument, url: URL,
+                               skipStructureDetails: Bool = false,
+                               onPage: PageProgress? = nil) -> PagePart {
+        if let parallel = parallelPages(url: url, pageCount: doc.pageCount,
+                                        skipStructureDetails: skipStructureDetails,
+                                        onPage: onPage) {
             return parallel
         }
         var part = PagePart()
-        for i in 0..<doc.pageCount { collectPage(doc, index: i, into: &part, onPage: onPage) }
+        for i in 0..<doc.pageCount {
+            collectPage(doc, index: i, into: &part,
+                        skipStructureDetails: skipStructureDetails, onPage: onPage)
+        }
         return part
     }
 
-    static func capture(_ doc: PDFDocument, pages precomputed: PagePart? = nil) -> PDFSemanticSnapshot {
+    static func capture(_ doc: PDFDocument, pages precomputed: PagePart? = nil,
+                        skipOutline: Bool = false) -> PDFSemanticSnapshot {
         autoreleasepool {
         var part = precomputed ?? PagePart()
         if precomputed == nil {
@@ -321,13 +362,15 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
         let pages = part.pages
         let fields = part.fields
         let externalURLs = part.externalURLs
-        return finish(doc, pages: pages, fields: fields, externalURLs: externalURLs)
+        return finish(doc, pages: pages, fields: fields, externalURLs: externalURLs,
+                      skipOutline: skipOutline)
         }
     }
 
     /// Eine Seite erfassen (Text, Annotationen, Boxen).
     static func collectPage(_ doc: PDFDocument, index i: Int, into part: inout PagePart,
-                                    onPage: PageProgress? = nil) {
+                            skipStructureDetails: Bool = false,
+                            onPage: PageProgress? = nil) {
             onPage?(true, i)
             defer { onPage?(false, i) }
             // Seitenzugriffe von PDFKit sind autoreleased; bei einem
@@ -338,19 +381,33 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
             let crop = page.bounds(for: .cropBox)
             let annos = page.annotations
 
-            for a in annos where Self.subtype(a) == "Widget" {
-                guard let name = a.fieldName else { continue }
-                part.fields.append(FormSnapshot.Field(
-                    name: name,
-                    type: a.widgetFieldType.rawValue,
-                    value: Self.widgetValue(a),
-                    flags: 0))
-            }
-            for a in annos where Self.subtype(a) == "Link" {
-                if let url = a.url?.absoluteString { part.externalURLs.append(url) }
+            if !skipStructureDetails {
+                for a in annos where Self.subtype(a) == "Widget" {
+                    guard let name = a.fieldName else { continue }
+                    part.fields.append(FormSnapshot.Field(
+                        name: name,
+                        type: a.widgetFieldType.rawValue,
+                        value: Self.widgetValue(a),
+                        flags: 0))
+                }
+                for a in annos where Self.subtype(a) == "Link" {
+                    if let url = a.url?.absoluteString { part.externalURLs.append(url) }
+                }
             }
 
             let text = page.string ?? ""
+            var annotationTypes: [String] = []
+            annotationTypes.reserveCapacity(annos.count)
+            var linkCount = 0
+            var widgetCount = 0
+            for a in annos {
+                if let sub = Self.subtype(a) {
+                    annotationTypes.append(sub)
+                    if sub == "Link" { linkCount += 1 }
+                    else if sub == "Widget" { widgetCount += 1 }
+                }
+            }
+            annotationTypes.sort()
             part.pages.append(PageSnapshot(
                 index: i,
                 mediaBox: [media.minX, media.minY, media.maxX, media.maxY],
@@ -360,18 +417,21 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
                 wordCount: text.split(whereSeparator: { $0.isWhitespace }).count,
                 textFingerprint: Self.fingerprint(text),
                 annotationCount: annos.count,
-                annotationTypes: annos.compactMap { Self.subtype($0) }.sorted(),
-                linkCount: annos.filter { Self.subtype($0) == "Link" }.count,
-                widgetCount: annos.filter { Self.subtype($0) == "Widget" }.count))
+                annotationTypes: annotationTypes,
+                linkCount: linkCount,
+                widgetCount: widgetCount))
             }
     }
 
     /// Dokumentteil einer Erfassung (Gliederung, Attribute) plus Seitenteil.
     private static func finish(_ doc: PDFDocument, pages: [PageSnapshot],
                                fields: [FormSnapshot.Field],
-                               externalURLs: [String]) -> PDFSemanticSnapshot {
+                               externalURLs: [String],
+                               skipOutline: Bool = false) -> PDFSemanticSnapshot {
         var outline: [NavigationSnapshot.OutlineEntry] = []
-        flatten(doc.outlineRoot, depth: 0, into: &outline)
+        if !skipOutline {
+            flatten(doc.outlineRoot, depth: 0, into: &outline)
+        }
 
         let attrs = (doc.documentAttributes ?? [:]) as? [PDFDocumentAttribute: Any]
 

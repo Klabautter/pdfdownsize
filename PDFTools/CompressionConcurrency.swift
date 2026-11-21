@@ -141,6 +141,20 @@ enum CompressionConcurrency {
     /// in der Liste); `isCancelled` bleibt der globale Schalter. Beide werden
     /// vom Compressor regelmäßig geprüft, der Abbruch greift also auch bei
     /// langen Einzel-Encodes – die übrigen Dokumente laufen weiter.
+    /// C5: Große Dateien (≥ 50 MB, bzw. ≥ 15 MB auf 8-GB-Macs) laufen im
+    /// Stapel nacheinander, damit sich Pixel-Budgets und Validierungs-
+    /// Snapshots nicht stapeln. Explizite Aufrufer-Limits oder
+    /// Umgebungsvorgaben bleiben unangetastet.
+    static func effectiveBulkLimit(largestBytes: Int64,
+                                   physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory,
+                                   explicitLimit: Int? = nil) -> Int {
+        let baseLimit = max(1, explicitLimit ?? maxConcurrentDocuments)
+        let lowMemoryMac = physicalMemory <= 8 * 1024 * 1024 * 1024
+        let sizeThrottle = (largestBytes >= 50 * 1024 * 1024)
+            || (lowMemoryMac && largestBytes >= 15 * 1024 * 1024)
+        return (explicitLimit == nil && environmentLimit == nil && sizeThrottle) ? 1 : baseLimit
+    }
+
     static func compressDocumentsCollecting(inputURLs: [URL],
                                             options: CompressionOptions,
                                             limit: Int? = nil,
@@ -149,7 +163,8 @@ enum CompressionConcurrency {
                                             onDocumentProgress: (@Sendable (Int, URL, Double, String) -> Void)? = nil) async throws -> [Result<CompressionResult, Error>] {
         var results = [Result<CompressionResult, Error>?](repeating: nil, count: inputURLs.count)
         var iterator = inputURLs.enumerated().makeIterator()
-        let maxInFlight = max(1, limit ?? maxConcurrentDocuments)
+        let largestBytes = inputURLs.map { Compressor.fileSize(of: $0) }.max() ?? 0
+        let maxInFlight = effectiveBulkLimit(largestBytes: largestBytes, explicitLimit: limit)
         try await withThrowingTaskGroup(of: (Int, Result<CompressionResult, Error>).self) { group in
             for _ in 0..<maxInFlight {
                 guard let (index, url) = iterator.next() else { break }

@@ -392,7 +392,9 @@ enum CompressionEstimator {
                                                   qualities: ladder.qualities,
                                                   minimumSSIM: ladder.minimumSSIM)
             else { return retention }
-            return min(retention, probe)
+            // N33: Die Messung ersetzt die Kurve statt `min(retention, probe)` –
+            // sonst kann eine zu optimistische Kurve nie nach oben korrigiert werden.
+            return probe
         }
         for resource in resources {
             let bytes = Double(max(resource.encodedByteCount, 0))
@@ -408,7 +410,12 @@ enum CompressionEstimator {
                 resource: resource, options: modelOptions, target: target,
                 allowsPaperScanRule: CompressionPlanner.adaptivePreset(for: options.image) != nil,
                 pageHasVisibleText: pageHasVisibleText, looksLikePaper: looksLikePaper) {
-                imagesOut += bytes * probed(retention, resource, target) * hull
+                // N33: In Qualität endet ein JPEG im Budget (`target == nil`) als
+                // „behalten“ (nur Repack) – dort darf die Neukodier-Probe nicht
+                // laufen und mehr Ersparnis versprechen.
+                let useProbe = target != nil
+                    || CompressionPlanner.adaptivePreset(for: options.image) == nil
+                imagesOut += bytes * (useProbe ? probed(retention, resource, target) : retention) * hull
                 continue
             }
             // Das MRC-Scan-Modell gilt nicht für feste Nutzerparameter

@@ -78,8 +78,10 @@ struct CandidateRecipe: Equatable, Codable, Sendable {
          pixelCache: PixelDecodeCache = PixelDecodeCache()) {
         self.config = config
         self.pixelCache = pixelCache
-        let base = directory ?? FileManager.default.temporaryDirectory
-            .appendingPathComponent("PDFTools-CandidateStore-\(UUID().uuidString)",
+        // N36: Im Sitzungsordner, damit Payloads entsperrter Quellen beim
+        // Beenden oder nach Absturz zuverlässig abgeräumt werden.
+        let base = directory ?? SessionScratch.directory
+            .appendingPathComponent("CandidateStore-\(UUID().uuidString)",
                                     isDirectory: true)
         self.directory = base
         try? FileManager.default.createDirectory(at: base,

@@ -337,35 +337,70 @@ extension View {
     }
 }
 
-/// Eine Stelle, die Stufen-Texte der Pipeline in Nutzer-Deutsch bringt
-/// (Befund S7): Passiv, „Seite 3 von 10", keine Diagnosesprache.
+/// Eine Stelle, die Stufen-Texte der Pipeline in lokalisierte Nutzersprache
+/// bringt (Befund S7, F1): Passiv, „Seite 3 von 10“, keine Diagnosesprache,
+/// kein deutsches „von“ im englischen UI.
 enum ProgressText {
-    static func userFacing(_ raw: String) -> String {
+    enum Stage {
+        case preparing
+        case analyzing
+        case optimizingImages
+        case optimizingStructure
+        case validating
+        case buildingPDF
+        case adjustingTarget
+        case replanningQuality
+        case finished
+        case page(current: Int, total: Int, suffix: String)
+
+        var localized: String {
+            switch self {
+            case .preparing: return String(localized: "Wird vorbereitet …")
+            case .analyzing: return String(localized: "Dokument wird analysiert …")
+            case .optimizingImages: return String(localized: "Bilder werden optimiert …")
+            case .optimizingStructure: return String(localized: "Struktur wird optimiert …")
+            case .validating: return String(localized: "Ergebnis wird geprüft …")
+            case .buildingPDF: return String(localized: "PDF wird erstellt …")
+            case .adjustingTarget: return String(localized: "Zielgröße wird angepasst …")
+            case .replanningQuality: return String(localized: "Qualität wird geprüft – Bilder werden erneut optimiert …")
+            case .finished: return String(localized: "Fertig")
+            case .page(let done, let total, let suffix):
+                return String(localized: "Seite \(done) von \(total)") + suffix
+            }
+        }
+    }
+
+    static func stage(for raw: String) -> Stage? {
         let label = raw.trimmingCharacters(in: .whitespaces)
-        guard !label.isEmpty else { return "" }
+        guard !label.isEmpty else { return nil }
         switch label {
-        case "Vorbereiten …": return String(localized: "Wird vorbereitet …")
-        case "Analysiere …", "Analysiere Dokument …": return String(localized: "Dokument wird analysiert …")
-        case "Optimiere Bilder …": return String(localized: "Bilder werden optimiert …")
-        case "Optimiere Struktur …": return String(localized: "Struktur wird optimiert …")
-        case "Validiere Ergebnis …": return String(localized: "Ergebnis wird geprüft …")
-        case "Erstelle PDF …": return String(localized: "PDF wird erstellt …")
+        case "Vorbereiten …": return .preparing
+        case "Analysiere …", "Analysiere Dokument …": return .analyzing
+        case "Optimiere Bilder …": return .optimizingImages
+        case "Optimiere Struktur …": return .optimizingStructure
+        case "Validiere Ergebnis …": return .validating
+        case "Erstelle PDF …": return .buildingPDF
+        case "Fertig": return .finished
         default: break
         }
         if label.hasPrefix("Qualitätsprüfung") || label.hasPrefix("Optimiere Bilder (") {
-            if label.contains("Ziel") { return String(localized: "Zielgröße wird angepasst …") }
-            return String(localized: "Qualität wird geprüft – Bilder werden erneut optimiert …")
+            return label.contains("Ziel") ? .adjustingTarget : .replanningQuality
         }
-        if label.hasPrefix("Zielgröße") { return String(localized: "Zielgröße wird angepasst …") }
-        // „Seite 3 / 10 …" → „Seite 3 von 10 …"
+        if label.hasPrefix("Zielgröße") { return .adjustingTarget }
         let parts = label.components(separatedBy: " / ")
         if parts.count == 2, parts[0].hasPrefix("Seite "),
            let done = Int(parts[0].dropFirst(6)),
            let total = Int(parts[1].prefix(while: \.isNumber)) {
-            return String(localized: "Seite \(done) von \(total)")
-                + parts[1].drop(while: \.isNumber)
+            return .page(current: done, total: total, suffix: String(parts[1].drop(while: \.isNumber)))
         }
-        return label.replacingOccurrences(of: " / ", with: " von ")
+        return nil
+    }
+
+    static func userFacing(_ raw: String) -> String {
+        let label = raw.trimmingCharacters(in: .whitespaces)
+        guard !label.isEmpty else { return "" }
+        if let known = stage(for: label) { return known.localized }
+        return label
     }
 }
 
@@ -374,6 +409,9 @@ enum ProgressText {
 /// blättern nur.
 struct DocumentPreview: View {
     let url: URL
+    /// Optionales Passwort für verschlüsselte Ergebnisse (z. B. nach dem
+    /// Sichern einer entsperrten Ein-Quellen-PDF in Organisieren).
+    var password: String? = nil
     var scanning = false
     /// Von außen gesteuerte Seite (z. B. Sprung zu einem Suchtreffer);
     /// ohne Bindung verwaltet die Vorschau die Seite selbst.
@@ -436,20 +474,29 @@ struct DocumentPreview: View {
         document = nil
         // N14 (C6): Öffnen abseits des Main Threads.
         let target = url
+        let unlockPassword = password
         let loaded = await Task.detached(priority: .userInitiated) {
-            SendableDocument(PDFDocument(url: target))
+            let doc = PDFDocument(url: target)
+            if let unlockPassword, doc?.isLocked == true { _ = doc?.unlock(withPassword: unlockPassword) }
+            return SendableDocument(doc)
         }.value
         // N28: `.task(id: url)` bricht diese Aufgabe beim Wechsel ab – nur das
         // zählt. (`url == target` verglich die eigene Kopie und war immer wahr.)
         guard !Task.isCancelled else { return }
         document = loaded.value
+        // Einseitige PDFs zeigen keinen PageStrip – zweites PDFDocument-Öffnen sparen.
+        guard (loaded.value?.pageCount ?? 0) > 1 else { return }
         let samples = CompressionViewModel.samplePageCount
         let loadedThumbs = await Task.detached(priority: .utility) { () -> [Int: NSImage] in
-            guard let doc = PDFDocument(url: target) else { return [:] }
+            guard !Task.isCancelled, let doc = PDFDocument(url: target) else { return [:] }
+            if let unlockPassword, doc.isLocked { _ = doc.unlock(withPassword: unlockPassword) }
             var out: [Int: NSImage] = [:]
             for index in 0..<min(doc.pageCount, samples) {
-                if let page = doc.page(at: index) {
-                    out[index] = page.thumbnail(of: CGSize(width: 80, height: 100), for: .cropBox)
+                if Task.isCancelled { return [:] }
+                autoreleasepool {
+                    if let page = doc.page(at: index) {
+                        out[index] = page.thumbnail(of: CGSize(width: 80, height: 100), for: .cropBox)
+                    }
                 }
             }
             return out

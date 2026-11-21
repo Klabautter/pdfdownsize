@@ -238,4 +238,40 @@ import AppKit
         #expect(CompressionEstimator.assessTargetSize(
             url: url, goal: .targetBytes(0)) == nil)
     }
+
+    /// Masterplan N33: Ein dichtes q0.98-Foto im DPI-Budget der Stufe „Qualität“
+    /// (`target == nil`, ≥ 0,9 bpp) wird unverändert behalten (höchstens Repack) –
+    /// `quickEstimate` darf dort keine Neukodier-Probe laufen lassen und ~60 %
+    /// Ersparnis versprechen (vorher lief `probed` auch bei `target == nil` mit q0.85).
+    @Test(.hangGuard) func behalteneQualityJpegsWerdenNichtUeberschaetzt() throws {
+        let photo = try #require(QualityGatesTests.photoImage(width: 800, height: 600))
+        let jpeg = try #require(ImageResampler.encodeJPEG(photo, quality: 0.98))
+        let (w, h) = (photo.width, photo.height)
+        // Dicht genug (≥ 0,9 bpp), damit `quickBehaviorRetention` `dctKeptDenseRetention` (0,93) wählt.
+        let bpp = Double(jpeg.count) * 8.0 / Double(w * h)
+        #expect(bpp >= 0.9, "Fixture zu sparsam für Dense-Pfad: \(bpp) bpp")
+
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let img = b.addStream(
+            dictionary: "/Type/XObject/Subtype/Image/Width \(w)/Height \(h)"
+                + "/ColorSpace/DeviceRGB/BitsPerComponent 8/Filter/DCTDecode",
+            data: jpeg)
+        // 72 DPI Platzierung → im 300-DPI-Budget von Qualität (`target == nil`).
+        let content = b.addStream(dictionary: "", content: "q \(w) 0 0 \(h) 0 0 cm /Im0 Do Q")
+        let page = b.addPage(parent: pages, mediaBox: "[0 0 \(w) \(h)]",
+                             resources: "<</XObject<</Im0 \(img) 0 R>>>>", contents: content)
+        b.fill(pages, "<</Type/Pages/Kids[\(page) 0 R]/Count 1>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R>>")
+        let url = try b.write(rootObject: root, prefix: "n33-kept-quality")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let inputBytes = Compressor.fileSize(of: url)
+        let qualityOptions = CompressionOptions.make(mode: .quality, customConfig: nil,
+                                                     stripMetadata: false, linearize: false)
+        let estimate = try #require(CompressionEstimator.quickEstimate(url: url, options: qualityOptions))
+        let ratio = Double(estimate.pointBytes) / Double(max(inputBytes, 1))
+        #expect(ratio >= 0.85,
+                "quickEstimate versprach zu viel für ein im Quality-Budget gehaltenes JPEG: ratio=\(ratio)")
+    }
 }

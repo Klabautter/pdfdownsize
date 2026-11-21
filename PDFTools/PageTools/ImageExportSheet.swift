@@ -114,8 +114,8 @@ struct ImageExportSheet: View {
     private var footer: some View {
         if let written {
             SavedResultBlock(title: String(localized: "\(written.count) Bilder exportiert"),
-                             detail: written[0].deletingLastPathComponent().path,
-                             urls: [written[0]],
+                             detail: written.first?.deletingLastPathComponent().path,
+                             urls: written,
                              followUp: (String(localized: "Fertig"), { dismiss() }))
         } else if isWriting {
             WorkProgressBar(progress: vm.progress,

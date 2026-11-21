@@ -233,13 +233,10 @@ enum FontOptimizer {
         guard !decisions.isEmpty else { return outcome }
 
         let fileManager = FileManager.default
-        let temporary = fileManager.temporaryDirectory
-        // preURL ist zugleich rollender Checkpoint: er trägt nach jedem
-        // akzeptierten Font den Stand MIT diesem Font.
-        let checkpointURL = temporary.appendingPathComponent(
-            "pdfcore-selective-font-checkpoint-\(UUID().uuidString).pdf")
-        let candidateURL = temporary.appendingPathComponent(
-            "pdfcore-selective-font-candidate-\(UUID().uuidString).pdf")
+        // N36: Im Sitzungsordner statt im Temp-Stamm – bei entsperrten Quellen
+        // liegt hier Klartext, der beim Beenden oder Absturz weg muss.
+        let checkpointURL = SessionScratch.makeURL(prefix: "font-checkpoint-")
+        let candidateURL = SessionScratch.makeURL(prefix: "font-candidate-")
         defer {
             try? fileManager.removeItem(at: checkpointURL)
             try? fileManager.removeItem(at: candidateURL)

@@ -205,6 +205,8 @@ final class ConversionViewModel: ObservableObject {
     }
 
     func exportPdfToImages(to parent: URL) {
+        guard !isWorking, direction == .pdfToImages, let url = workingURL else { return }
+        if case .rejected = stage { return }
         let folder: URL
         do {
             folder = try PageImageExporter.makeExportFolder(
@@ -213,8 +215,6 @@ final class ConversionViewModel: ObservableObject {
             errorMessage = error.localizedDescription
             return
         }
-        guard !isWorking, direction == .pdfToImages, let url = workingURL else { return }
-        if case .rejected = stage { return }
         let options = exportSettings.options
         let runID = UUID()
         operationID = runID
@@ -314,8 +314,23 @@ final class ConversionViewModel: ObservableObject {
     }
 
     /// Kombiniert die geladenen Bilder und speichert sie über ein Save-Panel.
+    /// Das Ziel wird wie in den übrigen Exportwegen ZUERST gewählt – vorher
+    /// poppte der Dialog erst nach bis zu 30 s Rechenzeit auf.
     func saveImagesAsPdf() {
         guard !isWorking, direction == .imagesToPdf, !imageURLs.isEmpty else { return }
+        let urls = imageURLs
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.nameFieldStringValue = String(localized: "Konvertiert.pdf")
+        if let dir = urls.first?.deletingLastPathComponent() { panel.directoryURL = dir }
+        let guardian = SourceNameGuard(sources: urls)
+        panel.delegate = guardian
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+        if SourceOverwrite.isSource(dest, among: urls) {
+            errorMessage = SourceOverwriteError.destinationIsSource.localizedDescription
+            return
+        }
+
         let runID = UUID()
         operationID = runID
         let previous = beginWork()
@@ -323,7 +338,6 @@ final class ConversionViewModel: ObservableObject {
         statusLabel = "Erstelle PDF …"
         errorMessage = nil
 
-        let urls = imageURLs
         workTask = Task { @MainActor in
             defer { endWork(returningTo: previous) }
             do {
@@ -337,36 +351,18 @@ final class ConversionViewModel: ObservableObject {
                     try? FileManager.default.removeItem(at: tempURL)
                     return
                 }
-
-                let panel = NSSavePanel()
-                panel.allowedContentTypes = [.pdf]
-                panel.nameFieldStringValue = String(localized: "Konvertiert.pdf")
-                // Wie Komprimieren: im Ordner der (ersten) Quelle.
-                if let dir = imageURLs.first?.deletingLastPathComponent() { panel.directoryURL = dir }
-                let sources = imageURLs
-                let guardian = SourceNameGuard(sources: sources)
-                panel.delegate = guardian
-                guard panel.runModal() == .OK, let dest = panel.url else {
-                    try? FileManager.default.removeItem(at: tempURL)
-                    statusLabel = ""
-                    return
-                }
-
-                if SourceOverwrite.isSource(dest, among: sources) {
-                    try? FileManager.default.removeItem(at: tempURL)
-                    statusLabel = ""
-                    throw SourceOverwriteError.destinationIsSource
-                }
-                if FileManager.default.fileExists(atPath: dest.path) {
-                    _ = try FileManager.default.replaceItemAt(dest, withItemAt: tempURL)
-                } else {
-                    try FileManager.default.moveItem(at: tempURL, to: dest)
-                }
+                try await Task.detached(priority: .userInitiated) {
+                    if FileManager.default.fileExists(atPath: dest.path) {
+                        _ = try FileManager.default.replaceItemAt(dest, withItemAt: tempURL)
+                    } else {
+                        try FileManager.default.moveItem(at: tempURL, to: dest)
+                    }
+                }.value
                 savedPDF = dest
                 stage = .done
                 statusLabel = String(localized: "Gesichert")
             } catch is CancellationError {
-                // nichts tun
+                statusLabel = ""
             } catch {
                 errorMessage = error.localizedDescription
             }

@@ -277,7 +277,8 @@ struct Compressor {
         // Die Kopie für „Quelle behalten“ liegt deshalb im eigenen Temp-Ordner.
         let source: URL
         if preservingSource {
-            source = fm.temporaryDirectory.appendingPathComponent("save-\(UUID().uuidString).pdf")
+            // N36: Im Sitzungsordner statt im Temp-Stamm.
+            source = SessionScratch.makeURL(prefix: "save-")
             try fm.copyItem(at: result.outputURL, to: source)
         } else {
             source = result.outputURL
@@ -350,11 +351,19 @@ struct Compressor {
             return iso
         }
 
+        // Performance: in der Sandbox eine einzige Helper-Kopie der Quelle für
+        // frühen Snapshot und Render-Stichproben teilen (statt zweimal physisch
+        // zu kopieren, z. B. bei externem Laufwerk/SMB).
+        let helperInput = qaValidationHook == nil
+            ? FrameworkProbe.readableForHelper(inputURL)
+            : (url: inputURL, cleanup: {})
+        defer { helperInput.cleanup() }
+
         // Masterplan C5 (Laufzeit): Die Referenz der Validierung hängt nur an
         // der Quelle. Ihr Snapshot läuft deshalb gleich jetzt im Hilfsprozess,
         // parallel zur Kompression, statt erst danach (statab: rund 3,8 s).
         let earlyReference = qaValidationHook == nil
-            ? EarlyReferenceSnapshot(inputURL, isCancelled: isCancelled) : nil
+            ? EarlyReferenceSnapshot(helperInput.url, isCancelled: isCancelled) : nil
         defer { earlyReference?.cancel() }
 
         progress?(0.05, "Analysiere Dokument …")
@@ -445,7 +454,8 @@ struct Compressor {
         // den Standard-Validator, nil heißt Produktverhalten.
         var referenceUnreadable: String?
         var referenceSnapshot: PDFSemanticSnapshot?
-        func validate(_ url: URL) -> PDFValidator.Report {
+        func validate(_ url: URL) throws -> PDFValidator.Report {
+            if let isCancelled, isCancelled() { throw CancellationError() }
             // Masterplan C2, Schritt 1: Größe zuerst. Ist die Ausgabe nicht
             // kleiner, liefert der Never-Grow-Zweig unten das byte-identische
             // Original – eine Prüfung dieser Ausgabe wäre verlorene Zeit
@@ -463,7 +473,7 @@ struct Compressor {
                 changedBytesByPage: outcome.plan.changedImageBytesByPage)
             // Masterplan N4: „Eigene" mit Graustufen – fehlende Farbe ist gewollt.
             runPolicy.renderSampleExpectsGrayscale = options.image.forceGrayscale
-            return StageTimer.run(stageTimer, .semanticValidationMs) {
+            return try StageTimer.run(stageTimer, .semanticValidationMs) {
                 if let hooked = qaValidationHook?(url) { return hooked }
                 // C2, Schritt 2: Die Referenz einmal je Operation erfassen und
                 // an alle Validierungen (Erstlauf, Re-Plans) weiterreichen.
@@ -480,25 +490,32 @@ struct Compressor {
                 if referenceSnapshot == nil {
                     do {
                         referenceSnapshot = try earlyReference?.value()
-                            ?? PDFSemanticSnapshot.capture(inputURL)
+                            ?? PDFSemanticSnapshot.capture(helperInput.url, isCancelled: isCancelled)
+                    } catch is CancellationError {
+                        // Masterplan N37: Abbruch des frühen Snapshots nicht
+                        // verschlucken – sonst startet die Validierung ihn neu.
+                        throw CancellationError()
                     } catch let timeout as PDFSemanticSnapshot.SnapshotError {
                         referenceUnreadable = timeout.localizedDescription
-                        return validate(url)
+                        return try validate(url)
                     } catch {
                         // Andere Fehler: der Validator erfasst die Referenz selbst
                         // und meldet sie dort (unverändertes Verhalten).
                     }
                 }
-                return PDFValidator.validate(
-                    outputURL: url, referenceURL: inputURL,
-                    referenceSnapshot: referenceSnapshot, policy: runPolicy)
+                let result = PDFValidator.validate(
+                    outputURL: url, referenceURL: helperInput.url,
+                    referenceSnapshot: referenceSnapshot, policy: runPolicy,
+                    isCancelled: isCancelled)
+                if let isCancelled, isCancelled() { throw CancellationError() }
+                return result
             }
         }
 
         // N14 (C4): Die Validierung (Snapshot, Render-Stichprobe) dauert bei
         // großen Dateien Sekunden – vorher kein Abbruch davor oder danach.
         if let isCancelled, isCancelled() { throw CancellationError() }
-        var report = validate(structureOutput)
+        var report = try validate(structureOutput)
         if let isCancelled, isCancelled() { throw CancellationError() }
 
         // Ein Re-Plan-Lauf (V2-5 §11.5 / V2-6 §12.6): Original öffnen, Plan
@@ -575,7 +592,7 @@ struct Compressor {
                                             qpdfPath: Self.findQPDF())
             }
             if let isCancelled, isCancelled() { throw CancellationError() }
-            report = validate(structureOutput)
+            report = try validate(structureOutput)
             if let isCancelled, isCancelled() { throw CancellationError() }
         }
 

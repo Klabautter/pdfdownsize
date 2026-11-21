@@ -36,6 +36,16 @@ import PDFKit
         defer { try? FileManager.default.removeItem(at: url) }
         #expect(PDFSemanticSnapshot.parallelPages(url: url, pageCount: 1) == nil)
     }
+
+    /// C2: Große Dateien drosseln die Worker-Anzahl des parallelen Snapshots,
+    /// damit PDFKit nicht 6× ein 400-MB-Dokument gleichzeitig im RAM öffnet.
+    @Test func workerAnzahlSkaliertMitDateigroesse() {
+        #expect(PDFSemanticSnapshot.parallelWorkerCount(pageCount: 400, fileBytes: 250 * 1024 * 1024) == 1)
+        #expect(PDFSemanticSnapshot.parallelWorkerCount(pageCount: 400, fileBytes: 80 * 1024 * 1024) <= 2)
+        #expect(PDFSemanticSnapshot.parallelWorkerCount(pageCount: 400, fileBytes: 20 * 1024 * 1024) <= 4)
+        #expect(PDFSemanticSnapshot.parallelWorkerCount(pageCount: 400, fileBytes: 2 * 1024 * 1024) >= 2)
+        #expect(PDFSemanticSnapshot.parallelWorkerCount(pageCount: 400, fileBytes: 2 * 1024 * 1024) <= 6)
+    }
 }
 
 @Suite struct MRCDPIRuleTests {
@@ -115,5 +125,101 @@ import PDFKit
         try #require(process.terminationStatus == 0)
         #expect(MergeLossSummary.rebuildLosses(for: locked).contains { $0.feature == .encryption })
         #expect(!MergeLossSummary.rebuildLosses(for: locked, displayName: "orig.pdf").contains { $0.feature == .encryption })
+    }
+
+    /// N35: Mehr-Quellen-Merge übernimmt verschachtelte Lesezeichen (E2) –
+    /// `losses(for:)` darf `.nestedOutlines` daher nicht mehr als Verlust melden,
+    /// während der Ein-Quellen-Neuaufbau (`rebuildLosses`) es weiterhin meldet.
+    @Test func mehrQuellenMeldetKeineVerschachteltenLesezeichen() throws {
+        let nested = try PDFFixtures.nestedOutlinePDF()
+        let plain = try PDFFixtures.vectorTextPDF(lines: 2)
+        defer { try? FileManager.default.removeItem(at: nested); try? FileManager.default.removeItem(at: plain) }
+
+        let multi = MergeLossSummary.losses(for: [nested, plain]).map(\.feature)
+        #expect(!multi.contains(.nestedOutlines), "Mehr-Quellen meldete fälschlich verschachtelte Lesezeichen: \(multi)")
+        let rebuild = MergeLossSummary.rebuildLosses(for: nested).map(\.feature)
+        #expect(rebuild.contains(.nestedOutlines), "Ein-Quellen-Neuaufbau meldete verschachtelte Lesezeichen nicht")
+    }
+}
+
+/// Prüfungen für N36 (SessionScratch), N37 (Abbruch/Drosselung) und UI/UX-Helfer.
+@Suite struct PolishingAndHardeningTests {
+
+    /// N36: `CandidateStore` legt ausgelagerte Payloads im Sitzungsordner ab,
+    /// nicht lose im Wurzel-Temp-Verzeichnis.
+    @Test func candidateStoreSpilltInSessionScratch() {
+        var config = CandidateStore.Config()
+        config.ramPayloadLimitBytes = 0
+        let store = CandidateStore(config: config)
+        defer { store.cancel() }
+        let payload = store.store(Data(repeating: 0xAB, count: 1024),
+                                  resource: PDFObjectID(objectNumber: 1, generation: 0),
+                                  candidate: CandidateID("c1"),
+                                  kind: .keep)
+        guard case .file(let url, _) = payload else {
+            Issue.record("Erwartete Dateiauslagerung, bekam \(payload)")
+            return
+        }
+        let actualPath: String = url.path
+        let expectedPrefix: String = SessionScratch.directory.path
+        #expect(actualPath.hasPrefix(expectedPrefix),
+                "CandidateStore schrieb außerhalb von SessionScratch: \(actualPath)")
+    }
+
+    /// N37 / Abbruch: Ein bereits abgebrochener Validator überspringt die
+    /// teure Render-Stichprobe ohne Absturz.
+    @Test func validatorBrichtBeiAbbruchVorStichprobeAb() throws {
+        let doc = PDFFixtures.document(pages: [PDFFixtures.textPage("Abbruch")])
+        let url = try PDFFixtures.write(doc, name: "validator-cancel")
+        defer { try? FileManager.default.removeItem(at: url) }
+        var policy = PDFValidator.Policy.compression
+        policy.expectedPageCount = 1
+        policy.renderSamplePages = [0]
+        let report = PDFValidator.validate(outputURL: url, referenceURL: url,
+                                           policy: policy, isCancelled: { true })
+        #expect(report.isValid)
+    }
+
+    /// C5: Große Dateien (≥ 50 MB bzw. ≥ 15 MB auf 8-GB-Macs) drosseln den
+    /// Stapel automatisch auf 1 Datei gleichzeitig; explizite Limits bleiben.
+    @Test func bulkLimitDrosseltGrosseDateien() {
+        let sixteenGB: UInt64 = 16 * 1024 * 1024 * 1024
+        let eightGB: UInt64 = 8 * 1024 * 1024 * 1024
+        #expect(CompressionConcurrency.effectiveBulkLimit(
+            largestBytes: 60 * 1024 * 1024, physicalMemory: sixteenGB) == 1)
+        #expect(CompressionConcurrency.effectiveBulkLimit(
+            largestBytes: 20 * 1024 * 1024, physicalMemory: eightGB) == 1)
+        #expect(CompressionConcurrency.effectiveBulkLimit(
+            largestBytes: 60 * 1024 * 1024, physicalMemory: sixteenGB, explicitLimit: 2) == 2)
+    }
+
+    /// Cold-Launch-Puffer: Dateien aus `application(_:open:)` vor
+    /// `RootView.onAppear` gehen nicht verloren, sondern werden einmalig geleert.
+    @Test @MainActor func openFilesDelegatePuffertKaltstartDateien() {
+        let delegate = OpenFilesDelegate()
+        let u1 = URL(fileURLWithPath: "/tmp/a.pdf")
+        let u2 = URL(fileURLWithPath: "/tmp/b.pdf")
+        delegate.application(NSApp, open: [u1])
+        delegate.application(NSApp, open: [u2])
+        #expect(delegate.drainBufferedOpenURLs() == [u1, u2])
+        #expect(delegate.drainBufferedOpenURLs().isEmpty)
+    }
+
+    /// `ProgressText` bildet bekannte Stufen lokalisiert ab und ersetzt keine
+    /// beliebigen „ / “-Zeichenketten mit hartem deutschem „ von “.
+    @Test func progressTextVermeidetDeutschenFallback() {
+        #expect(ProgressText.stage(for: "Analysiere …") != nil)
+        #expect(ProgressText.stage(for: "Seite 2 / 5") != nil)
+        #expect(ProgressText.userFacing("A / B") == "A / B")
+        #expect(ProgressText.userFacing("") == "")
+    }
+
+    /// UI-Hilfszustände: gecachte OCR-Wortzahl/Dateigröße und Sheet-Flag im MergeVM.
+    @Test @MainActor func viewModelCachesUndSheetZustand() {
+        let ocr = OCRViewModel()
+        #expect(ocr.totalWords == 0)
+        #expect(ocr.fileSize == 0)
+        let merge = MergeViewModel()
+        #expect(!merge.isSheetPresented)
     }
 }

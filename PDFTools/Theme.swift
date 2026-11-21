@@ -37,6 +37,12 @@ extension View {
         modifier(GlassPanelModifier())
     }
 
+    /// Einheitliche Glasfläche für Leisten, Marken, Griffe und Spalten –
+    /// achtet überall auf „Transparenz reduzieren“ (Masterplan F3).
+    func adaptiveGlass<S: InsettableShape>(in shape: S) -> some View {
+        modifier(AdaptiveGlassModifier(shape: shape))
+    }
+
     /// Masterplan F3: Animation nur ohne „Bewegung reduzieren“.
     func motionSafeAnimation<V: Equatable>(_ animation: Animation?, value: V) -> some View {
         modifier(MotionSafeAnimation(animation: animation, value: value))
@@ -44,14 +50,23 @@ extension View {
 }
 
 private struct GlassPanelModifier: ViewModifier {
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     func body(content: Content) -> some View {
-        let padded = content.padding(Theme.panelPadding)
+        content
+            .padding(Theme.panelPadding)
+            .adaptiveGlass(in: .rect(cornerRadius: Theme.panelRadius))
+    }
+}
+
+private struct AdaptiveGlassModifier<S: InsettableShape>: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    let shape: S
+    func body(content: Content) -> some View {
         if reduceTransparency {
-            padded.background(Color(nsColor: .controlBackgroundColor),
-                              in: .rect(cornerRadius: Theme.panelRadius))
+            content
+                .background(Color(nsColor: .controlBackgroundColor), in: shape)
+                .overlay { shape.strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.5) }
         } else {
-            padded.glassEffect(.regular, in: .rect(cornerRadius: Theme.panelRadius))
+            content.glassEffect(.regular, in: shape)
         }
     }
 }
