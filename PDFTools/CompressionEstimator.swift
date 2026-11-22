@@ -290,9 +290,10 @@ enum CompressionEstimator {
         /// Verschwenderisches JPEG im Budget auf Originalgröße neu kodiert.
         static let dctReencodeBitsSmall = 0.8
         static let dctReencodeBitsSmart = 1.05
-        /// Papier-Scan (Vollseite, kein Text, schmale Helligkeit).
+        /// Papier-Scan (Vollseite, kein Text, schmale Helligkeit). Seit H1/H2
+        /// zerlegt Smart Papier-Scans per MRC (~84–87 % Ersparnis statt ~75 %).
         static let paperScanBitsSmall = 0.35
-        static let paperScanBitsSmart = 0.5
+        static let paperScanBitsSmart = 0.30
         /// Obergrenze für verkleinerte JPEGs auf Bezugsstufe Smart: Sehr große
         /// Fotos schrumpfen stärker, als die Pixelkurve sagt (74 MP: Qualität
         /// geschätzt 33 %, tatsächlich 6 %).
