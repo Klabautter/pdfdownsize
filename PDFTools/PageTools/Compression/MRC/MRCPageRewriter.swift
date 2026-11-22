@@ -520,13 +520,9 @@ enum MRCPageRewriter {
         let resourceName = trimmedName   // unveränderlich für die parallelen Stufen (G6)
         guard !resourceName.isEmpty else { return nil }
 
-        // Die Stufen sind voneinander unabhängig (eigene Ebenen, eigenes
-        // Scratch-Dokument für die Seiten-QA) – sie laufen parallel und
-        // werden in Leiterreihenfolge eingesammelt (2026-10-13). Vorher
-        // nacheinander: Ein einseitiger Scan nutzte hier nur einen Kern.
-        let prepared: [PreparedMRCCandidate?] = ParallelWork.map(count: rungs.count) { index in
+        // Einzelstufe auswerten: Layer kodieren, Never-Grow, Scratch-Seiten-QA.
+        let evaluateRung: @Sendable (MRCEncoder.Rung) -> PreparedMRCCandidate? = { rung in
             if let isCancelled, isCancelled() { return nil }
-            let rung = rungs[index]
             let rungStart = ContinuousClock.now
             guard let layers = MRCEncoder.encodeLayers(
                 segmentation: segmentation, mask: mask, colorMasks: colorMasks,
@@ -559,8 +555,29 @@ enum MRCPageRewriter {
                                      workingBytes: Int64(rasterSize.pixelCount) * 6),
                 bundle: bundle)
         }
+
+        // Ohne Größenziel genügt die kleinste QA-bestandene Stufe: erst die
+        // Zielstufe des Modus (balanced/small) prüfen; hält sie die strenge
+        // Seiten-QA, entfällt die doppelt so große konservative Stufe samt
+        // zweitem Seitenrender (~2× schneller auf Mehrseiten-Scans).
+        let candidates: [PreparedMRCCandidate]
+        if case .targetBytes = options.goal {
+            let prepared: [PreparedMRCCandidate?] = ParallelWork.map(count: rungs.count) { index in
+                evaluateRung(rungs[index])
+            }
+            candidates = prepared.compactMap { $0 }
+        } else {
+            var found: [PreparedMRCCandidate] = []
+            for rung in rungs.reversed() {
+                if let isCancelled, isCancelled() { throw CancellationError() }
+                if let hit = evaluateRung(rung) {
+                    found.append(hit)
+                    break
+                }
+            }
+            candidates = found
+        }
         if let isCancelled, isCancelled() { throw CancellationError() }
-        let candidates = prepared.compactMap { $0 }
         return candidates.isEmpty
             ? nil : MRCProvision(resourceID: resourceID, pageIndex: pageIndex,
                                  candidates: candidates)

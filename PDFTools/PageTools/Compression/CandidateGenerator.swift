@@ -932,7 +932,18 @@ enum CandidateGenerator {
             let allowsNativeReencode = true
             isWastefulJPEGWithinBudget = resize == nil && !needsColorChange
                 && CandidateGenerator.isWastefullyEncodedJPEG(resource, options: options)
+            // Custom-Qualität < 75 %: Senkt der Nutzer den Qualitätsregler unter
+            // den Smart-Anker (0,75), werden vorhandene JPEGs auch innerhalb des
+            // DPI-Budgets neu kodiert (Never-Grow entscheidet wie immer).
+            let customLowerQualityDCT: Bool = {
+                guard resize == nil, !needsColorChange,
+                      resource.terminalFilter == .dct,
+                      resource.pixelColorSpace.allowsLossyReplacement,
+                      case .fixed(let quality) = options.qualityPolicy else { return false }
+                return quality < QualityGatePolicy.smartAnchorQuality
+            }()
             guard resize != nil || needsColorChange || isWastefulJPEGWithinBudget
+                    || customLowerQualityDCT
                     || (allowsNativeReencode
                         && resource.terminalFilter != .dct
                         && resource.pixelColorSpace.allowsLossyReplacement) else {
@@ -1084,12 +1095,18 @@ enum CandidateGenerator {
             let grayscale = options.forceGrayscale || stats.isGrayscale
 
             // Graustufen angefordert, Bild schon grau, kein Resize nötig.
-            // Qualität und Custom bleiben hier stehen. Klein und Smart laufen
-            // seit 2026-11-03 auch für graue Bilder im Budget in die normalen
-            // Kandidaten auf Originalgröße: Vorher blieb etwa ein grauer
-            // Flate-Scan in allen Stufen gleich groß wie die Eingabe.
+            // Qualität und Custom (ab 75 %) bleiben hier stehen. Klein, Smart
+            // und Custom mit explizit gesenkter Qualität (< 75 %) laufen auch
+            // für graue Bilder im Budget in die normalen Kandidaten auf
+            // Originalgröße: Vorher blieb etwa ein grauer Flate- oder JPEG-Scan
+            // trotz gesenktem Qualitätsregler unverändert.
+            let customLowerQuality: Bool = {
+                guard case .fixed(let quality) = options.qualityPolicy else { return false }
+                return quality < QualityGatePolicy.smartAnchorQuality
+            }()
             if resize == nil && stats.isGrayscale
-                && !CandidateGenerator.reencodesWithinBudget(options) {
+                && !CandidateGenerator.reencodesWithinBudget(options)
+                && !customLowerQuality {
                 keepReason = .alreadyGrayscale
                 return
             }
@@ -2030,6 +2047,34 @@ enum CandidateGenerator {
                     || (!losslessAdded && transforms.isEmpty) else { return }
             let policyTarget = target
             let target = intermediate ?? target
+            if case .fixed(let quality) = options.qualityPolicy {
+                // Eigene Einstellungen: Scheitert bei einer bereits verlustbehaftet
+                // gespeicherten Grafik/Scan-Quelle (JPEG/JPX) der verlustfreie
+                // Flate-Resize am Never-Grow, greift die gewählte Custom-Qualität
+                // als JPEG-Fallback – sonst meldete „Eigene“ trotz 72 DPI „Bereits optimal“.
+                guard !losslessAdded, transforms.isEmpty,
+                      resource.terminalFilter == .dct || resource.terminalFilter == .jpx,
+                      let reference = ImageResampler.resize(targetImage, to: target,
+                                                            grayscale: grayscale),
+                      let originalSize = referenceSize,
+                      let original = decodedRaster(for: originalSize),
+                      let sourceSample = CandidateGenerator.referenceSample(
+                          original: original, target: policyTarget, fine: false)
+                else { return }
+                let rungs = autoreleasepool {
+                    BracketedJPEGSearch.run(reference: reference,
+                                            grayscale: grayscale,
+                                            backend: options.jpegBackend,
+                                            policy: .ungated(quality: quality),
+                                            sourceSample: sourceSample)
+                }
+                for rung in rungs where rung.passed && (originalBytes < 0 || rung.data.count < originalBytes) && hasSearchBudget {
+                    appendJPEGCandidate(rungResult: rung, rung: target, rungIndex: 0,
+                                        grayscale: grayscale, jpegOptions: options,
+                                        reason: "Custom-JPEG-Fallback für verlustbehaftete Grafikquelle")
+                }
+                return
+            }
             guard case .adaptive(let ladderQ, let minimumSSIM) = options.qualityPolicy
             else { return }
             guard let raster = intermediate != nil ? decodedRaster(for: target) : targetImage,

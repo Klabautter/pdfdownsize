@@ -169,13 +169,18 @@ import Foundation
         #expect(set.candidates.count <= CandidateGenerator.maximumCandidatesPerImage)
     }
 
-    /// Oversized Foto: die §9.4-Leiter greift (native/1.25×/Ziel/0.85×) und
+    /// Oversized Foto: die §9.4-Leiter greift (Ziel + Zusatzstufe) und
     /// mehrere Zielauflösungen tauchen in den Kandidaten auf.
+    /// Hinweis (Masterplan H2): Smart überspringt größere Stufen, sobald
+    /// 180/150 DPI den Ansichts-Anker schlagen – daher prüft dieser Test
+    /// mit Qualität (300/240 DPI ohne Anker-Skip) die volle Leiter-Ausgabe,
+    /// während `smartLeiterKodiertKeineDominiertenGrossenStufen` den H2-Skip prüft.
     @Test(.hangGuard) func aufloesungsleiterSetztSichDurch() throws {
-        let url = try PDFFixtures.photoAtWidth(2400)
+        let url = try PDFFixtures.photoAtWidth(3200)
         defer { try? FileManager.default.removeItem(at: url) }
-        let planned = try CompressionPipeline.plan(inputURL: url,
-                                                   options: Self.candidateOptions())
+        let planned = try CompressionPipeline.plan(
+            inputURL: url,
+            options: Self.candidateOptions(CompressionOptions(image: .quality)))
         let set = try #require(planned.plan.candidateSets.first)
         var widths = Set<Int>()
         for candidate in set.candidates {
@@ -183,7 +188,7 @@ import Foundation
                 widths.insert(target.width)
             }
         }
-        // Zielauflösung (DPI-Regel) UND mindestens eine Zusatzstufe.
+        // Zielauflösung (300 DPI) UND Zusatzstufe (240 DPI).
         #expect(widths.count >= 2,
                 "Auflösungsleiter lief nur eine Stufe: \(widths.sorted())")
     }
@@ -308,10 +313,14 @@ import Foundation
             return nil
         })
         #expect(!widths.isEmpty)
-        // Ziel 220 DPI auf 8,5 Zoll = 1870 px; 1,25× = 2338; 0,85× = 1590.
-        let target = Int((8.5 * ImageCompressionOptions.smart.targetDPI).rounded(.up))
-        #expect(widths.contains { abs($0 - target) <= 2 || abs($0 - Int(Double(target) * 0.85)) <= 2 },
-                "Zielstufe fehlt: \(widths.sorted())")
+        // Ziel 220 DPI auf 8,5 Zoll = 1870 px; H2-Smart-Stufen: 180 DPI = 1530, 150 DPI = 1275.
+        let allowedSmartWidths = [
+            Int((8.5 * ImageCompressionOptions.smart.targetDPI).rounded(.up)),
+            Int((8.5 * 180.0).rounded(.up)),
+            Int((8.5 * 150.0).rounded(.up)),
+        ]
+        #expect(widths.contains { w in allowedSmartWidths.contains { abs(w - $0) <= 2 } },
+                "Smart-Zielstufe (220/180/150 DPI) fehlt: \(widths.sorted())")
         #expect(!widths.contains(4000), "Native Stufe wurde trotz bestandener Zielstufe kodiert: \(widths.sorted())")
     }
 

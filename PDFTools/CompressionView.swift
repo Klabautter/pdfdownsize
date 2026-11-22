@@ -884,8 +884,10 @@ struct DocumentStage: View {
         .position(x: x, y: top + height / 2)
         .gesture(drag)
         // Masterplan F2: per Tastatur fokussierbar, Pfeiltasten verschieben
-        // um 5 %.
+        // um 5 %. System-Fokusrahmen unterdrücken, damit Ziehen mit der Maus
+        // keinen blauen Rahmen um die gesamte Seite legt.
         .focusable()
+        .focusEffectDisabled()
         .onMoveCommand { direction in
             switch direction {
             case .left: fraction = max(fraction - 0.05, 0)

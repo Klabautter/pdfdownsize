@@ -262,4 +262,96 @@ import PDFKit
         #expect(!CandidateGenerator.isWastefullyEncodedJPEG(compact, options: smart))
         #expect(MRCProvisionBudget.oneClick.provisionIfCandidateExceedsBytes <= 48 * 1024)
     }
+
+    /// Eigene Einstellungen: Niedrige Qualität (< 75 %) kodiert vorhandene JPEGs
+    /// auch innerhalb des DPI-Budgets neu statt „Bereits optimal“ zu melden.
+    @Test func customNiedrigeQualitaetKodiertJpegImBudgetNeu() throws {
+        let w = 600, h = 450
+        var raw = Data(count: w * h * 3)
+        raw.withUnsafeMutableBytes { ptr in
+            let p = ptr.bindMemory(to: UInt8.self)
+            var seed: UInt32 = 98765
+            for y in 0..<h {
+                for x in 0..<w {
+                    seed = seed &* 1664525 &+ 1013904223
+                    let n = Int(seed >> 26)
+                    let i = (y * w + x) * 3
+                    p[i] = UInt8(min(255, (x * 200 / w) + n))
+                    p[i + 1] = UInt8(min(255, (y * 200 / h) + n))
+                    p[i + 2] = UInt8(min(255, ((x + y) * 180 / (w + h)) + n))
+                }
+            }
+        }
+        let provider = try #require(CGDataProvider(data: raw as CFData))
+        let img = try #require(CGImage(
+            width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 24,
+            bytesPerRow: w * 3, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+        let jpeg = try #require(ImageResampler.encodeJPEG(img, quality: 0.95, backend: .mozjpeg))
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let stream = b.addStream(
+            dictionary: "/Type/XObject/Subtype/Image/Width \(w)/Height \(h)"
+                + "/ColorSpace/DeviceRGB/BitsPerComponent 8/Filter/DCTDecode",
+            data: jpeg)
+        // 600 px auf 400 pt = 108 DPI → im 150-DPI-Budget.
+        let content = b.addStream(dictionary: "", content: "q 400 0 0 300 100 300 cm /Im0 Do Q")
+        let page = b.addObject("<</Type/Page/Parent \(pages) 0 R/MediaBox[0 0 612 792]"
+            + "/Resources<</XObject<</Im0 \(stream) 0 R>>>>/Contents \(content) 0 R>>")
+        b.fill(pages, "<</Type/Pages/Kids[\(page) 0 R]/Count 1>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R>>")
+        let url = try b.write(rootObject: root, prefix: "custom-low-q")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let planned = try CompressionPipeline.plan(
+            inputURL: url, options: CompressionPresetFactory.custom(dpi: 150, quality: 0.50))
+        let set = try #require(planned.plan.candidateSets.first)
+        #expect(set.candidates.contains { if case .jpeg(_, let q, _, _) = $0.kind { return abs(q - 0.50) < 0.01 }; return false },
+                "Eigene Qualität 50 % hat JPEG im Budget nicht neu kodiert: \(set.candidates.map(\.kind))")
+    }
+
+    /// Eigene Einstellungen: Niedrige Qualität (< 75 %) greift auch auf
+    /// Graustufen-JPEGs im DPI-Budget statt bei `alreadyGrayscale` zu stoppen.
+    @Test func customNiedrigeQualitaetKodiertGrauesJpegImBudgetNeu() throws {
+        let w = 600, h = 450
+        var raw = Data(count: w * h)
+        raw.withUnsafeMutableBytes { ptr in
+            let p = ptr.bindMemory(to: UInt8.self)
+            var seed: UInt32 = 54321
+            for y in 0..<h {
+                for x in 0..<w {
+                    seed = seed &* 1664525 &+ 1013904223
+                    let n = Int(seed >> 26)
+                    p[y * w + x] = UInt8(min(255, ((x + y) * 180 / (w + h)) + n))
+                }
+            }
+        }
+        let provider = try #require(CGDataProvider(data: raw as CFData))
+        let img = try #require(CGImage(
+            width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 8,
+            bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+        let jpeg = try #require(ImageResampler.encodeJPEG(img, quality: 0.95, backend: .mozjpeg))
+        var b = RawPDFBuilder()
+        let pages = b.reserveNumber()
+        let stream = b.addStream(
+            dictionary: "/Type/XObject/Subtype/Image/Width \(w)/Height \(h)"
+                + "/ColorSpace/DeviceGray/BitsPerComponent 8/Filter/DCTDecode",
+            data: jpeg)
+        let content = b.addStream(dictionary: "", content: "q 400 0 0 300 100 300 cm /Im0 Do Q")
+        let page = b.addObject("<</Type/Page/Parent \(pages) 0 R/MediaBox[0 0 612 792]"
+            + "/Resources<</XObject<</Im0 \(stream) 0 R>>>>/Contents \(content) 0 R>>")
+        b.fill(pages, "<</Type/Pages/Kids[\(page) 0 R]/Count 1>>")
+        let root = b.addObject("<</Type/Catalog/Pages \(pages) 0 R>>")
+        let url = try b.write(rootObject: root, prefix: "custom-low-q-gray")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let planned = try CompressionPipeline.plan(
+            inputURL: url, options: CompressionPresetFactory.custom(dpi: 150, quality: 0.50))
+        let set = try #require(planned.plan.candidateSets.first)
+        #expect(set.candidates.contains { if case .jpeg(_, let q, _, _) = $0.kind { return abs(q - 0.50) < 0.01 }; return false },
+                "Eigene Qualität 50 % hat Graustufen-JPEG im Budget nicht neu kodiert: \(set.candidates.map(\.kind))")
+    }
 }

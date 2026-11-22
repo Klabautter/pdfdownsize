@@ -538,14 +538,31 @@ enum QualityGates {
     /// kostet ein weiterer Kandidat nur noch seine eigene Stichprobe.
     struct Evaluator {
         let reference: Sample
+        /// Vorberechnete Referenz-Daten (einmal je Bild statt je JPEG-Stufe).
+        private let refMagnitudes: [Float]
+        private let refEdgeDensities: [Double]
+        private let refTextTileFlags: [Bool]
 
         init(reference: CGImage) {
-            self.reference = QualityGates.sample(reference, census: ChromaCensus.of(reference))
+            let sample = QualityGates.sample(reference, census: ChromaCensus.of(reference))
                 ?? Sample(width: 0, height: 0, luma: [], rgba: [], census: .neutral)
+            self.init(reference: sample)
         }
 
         init(reference sample: Sample) {
             self.reference = sample
+            if sample.width >= 8, sample.height >= 8 {
+                let mags = QualityGates.sobelMagnitudes(sample.luma, width: sample.width, height: sample.height)
+                let dummy = [Float](repeating: 0, count: (sample.width / 8) * (sample.height / 8))
+                let layout = QualityGates.tileScores(windows: dummy, width: sample.width, height: sample.height)
+                self.refMagnitudes = mags
+                self.refEdgeDensities = QualityGates.edgeDensities(magnitudes: mags, width: sample.width, tiles: layout)
+                self.refTextTileFlags = QualityGates.textTileFlags(reference: sample, tiles: layout)
+            } else {
+                self.refMagnitudes = []
+                self.refEdgeDensities = []
+                self.refTextTileFlags = []
+            }
         }
 
         var isUsable: Bool { reference.width >= 8 && reference.height >= 8 }
@@ -565,17 +582,20 @@ enum QualityGates {
         }
 
         func measure(candidate sample: Sample) -> QualityGateMeasurement? {
-            QualityGates.measure(reference: reference, candidate: sample)
+            QualityGates.measure(reference: reference, candidate: sample,
+                                 edgeDensities: refEdgeDensities,
+                                 textTileFlags: refTextTileFlags)
         }
 
         /// Kanten-Einführung gegen einen Kandidaten (für `PerceptualScore`).
-        /// Teilt sich die Referenz-Stichprobe; der Kandidat wird einmal
-        /// gesampelt – dieselben Kosten wie `measure(candidate:)`.
+        /// Teilt sich die Referenz-Stichprobe und ihre Sobel-Magnituden.
         func edgeIntroduction(candidate: CGImage) -> Double? {
             guard isUsable, let candidateSample = QualityGates.sample(candidate, maxEdge: edge) else {
                 return nil
             }
-            return QualityGates.edgeIntroduction(reference: reference,
+            return QualityGates.edgeIntroduction(refMagnitudes: refMagnitudes,
+                                                 width: reference.width,
+                                                 height: reference.height,
                                                  candidate: candidateSample)
         }
     }
@@ -585,7 +605,9 @@ enum QualityGates {
         return Evaluator(reference: ref).measure(candidate: candidate)
     }
 
-    static func measure(reference: Sample, candidate: Sample) -> QualityGateMeasurement? {
+    static func measure(reference: Sample, candidate: Sample,
+                        edgeDensities precomputedDensities: [Double]? = nil,
+                        textTileFlags precomputedTextFlags: [Bool]? = nil) -> QualityGateMeasurement? {
         guard reference.width == candidate.width,
               reference.height == candidate.height,
               reference.width >= 8, reference.height >= 8 else { return nil }
@@ -600,9 +622,19 @@ enum QualityGates {
         let tileScoresAsDouble = tiles.map { Double($0.score) }
         let p05 = Self.percentile05(of: tileScoresAsDouble)
 
-        let edge = edgeWeightedScore(reference: reference, tiles: tiles,
-                                     global: Double(global))
-        let text = textRegionScore(reference: reference, tiles: tiles)
+        let densities = precomputedDensities ?? edgeDensities(reference: reference, tiles: tiles)
+        let edge = edgeWeightedScore(tiles: tiles, densities: densities, global: Double(global))
+        let text: Double? = {
+            if let flags = precomputedTextFlags, flags.count == tiles.count {
+                var minimum: Double?
+                for (tile, isText) in zip(tiles, flags) where isText {
+                    let score = Double(tile.score)
+                    if minimum == nil || score < minimum! { minimum = score }
+                }
+                return minimum
+            }
+            return textRegionScore(reference: reference, tiles: tiles)
+        }()
 
         let deltaE: Double? = reference.isColor
             ? meanDeltaE76(reference: reference, candidate: candidate)
@@ -682,11 +714,15 @@ enum QualityGates {
         let magnitudes = sobelMagnitudes(reference.luma,
                                          width: reference.width,
                                          height: reference.height)
-        return tiles.map { tile in
+        return edgeDensities(magnitudes: magnitudes, width: reference.width, tiles: tiles)
+    }
+
+    private static func edgeDensities(magnitudes: [Float], width: Int, tiles: [Tile]) -> [Double] {
+        tiles.map { tile in
             var edgePixels = 0
             var totalPixels = 0
             for y in tile.y..<(tile.y + tile.height) {
-                let row = y * reference.width
+                let row = y * width
                 for x in tile.x..<(tile.x + tile.width) {
                     totalPixels += 1
                     if magnitudes[row + x] >= edgeMagnitudeThreshold {
@@ -766,32 +802,34 @@ enum QualityGates {
         let refMag = sobelMagnitudes(reference.luma,
                                      width: reference.width,
                                      height: reference.height)
-        let candMag = sobelMagnitudes(candidate.luma,
-                                      width: candidate.width,
-                                      height: candidate.height)
-        guard refMag.count == candMag.count, !refMag.isEmpty else { return nil }
+        return edgeIntroduction(refMagnitudes: refMag, width: reference.width,
+                                height: reference.height, candidate: candidate)
+    }
+
+    static func edgeIntroduction(refMagnitudes: [Float], width: Int, height: Int,
+                                 candidate: Sample) -> Double? {
+        guard width == candidate.width, height == candidate.height,
+              width >= 3, height >= 3, !refMagnitudes.isEmpty else { return nil }
+        let candMag = sobelMagnitudes(candidate.luma, width: width, height: height)
+        guard refMagnitudes.count == candMag.count else { return nil }
         var sum = 0.0
-        for i in 0..<refMag.count {
-            let introduced = Double(candMag[i]) - Double(refMag[i])
+        for i in 0..<refMagnitudes.count {
+            let introduced = Double(candMag[i]) - Double(refMagnitudes[i])
             if introduced > 0 { sum += introduced }
         }
-        return sum / Double(refMag.count) / 255.0
+        return sum / Double(refMagnitudes.count) / 255.0
     }
 
     // MARK: Text-Kacheln
 
-    /// Kacheln mit hohem Schwarz-Weiß-Wechsel und Bimodalität sind Text-
-    /// Kacheln. `text_region_score` ist das Minimum ihrer Kachel-SSIMs –
-    /// dort darf eine Komprimierung am wenigsten verlieren.
-    private static func textRegionScore(reference: Sample,
-                                        tiles: [Tile]) -> Double? {
+    /// Welche Kacheln der Referenz Text tragen – hängt nur von der Referenz ab.
+    private static func textTileFlags(reference: Sample, tiles: [Tile]) -> [Bool] {
         let inkThreshold: Float = 128
-        var minimum: Double?
-        for tile in tiles {
+        let w = reference.width
+        return tiles.map { tile in
             var dark = 0
             var transitions = 0
             var minV: Float = 255, maxV: Float = 0
-            let w = reference.width
             for y in tile.y..<(tile.y + tile.height) {
                 let row = y * w
                 for x in tile.x..<(tile.x + tile.width) {
@@ -817,13 +855,21 @@ enum QualityGates {
             let darkFraction = Double(dark) / Double(n)
             let transitionDensity = Double(transitions) / Double(2 * n)
             let contrast = maxV - minV
-
-            let isTextTile = darkFraction >= 0.01 && darkFraction <= 0.92
+            return darkFraction >= 0.01 && darkFraction <= 0.92
                 && transitionDensity >= 0.02 && contrast >= 64
-            if isTextTile {
-                let score = Double(tile.score)
-                if minimum == nil || score < minimum! { minimum = score }
-            }
+        }
+    }
+
+    /// Kacheln mit hohem Schwarz-Weiß-Wechsel und Bimodalität sind Text-
+    /// Kacheln. `text_region_score` ist das Minimum ihrer Kachel-SSIMs –
+    /// dort darf eine Komprimierung am wenigsten verlieren.
+    private static func textRegionScore(reference: Sample,
+                                        tiles: [Tile]) -> Double? {
+        let flags = textTileFlags(reference: reference, tiles: tiles)
+        var minimum: Double?
+        for (tile, isText) in zip(tiles, flags) where isText {
+            let score = Double(tile.score)
+            if minimum == nil || score < minimum! { minimum = score }
         }
         return minimum
     }
