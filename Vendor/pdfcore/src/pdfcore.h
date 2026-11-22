@@ -316,6 +316,10 @@ int pdfcore_rewrite_single_source(const char *source_path, const char *password,
 /// Schreibt das (ggf. sanitisierte) Dokument neu. 0=ok.
 int pdfcore_save(pdfcore_document_t *doc, const char *path);
 
+/// Schreibt NUR die Seite `page_index` in eine 1-Seiten-PDF (ohne
+/// Neukomprimierung/Objektströme) – für schnelle MRC-Seiten-QA statt O(N²)-Write.
+int pdfcore_save_single_page(pdfcore_document_t *doc, int page_index, const char *path);
+
 /* Phase V2-9 (Masterplan §15.6) – finaler Write mit Writer-Optionen
  * (Single Final Write). Abbild der qpdf-CLI-Struktur-Pass-Flags:
  *   object_streams_generate  1 = generate, 0 = disable (Kompatibilität)
@@ -799,6 +803,18 @@ int pdfcore_jpeg_repack(const unsigned char *jpeg, size_t jpeg_len,
 int pdfcore_jpeg_encode(const unsigned char *pixels, size_t pixels_len,
                         int width, int height, int components,
                         int quality, unsigned char **out, size_t *out_len);
+
+/* Schnelle Kodierung (v1.2) mit denselben MozJPEG-Robidoux-Tabellen:
+ *   fast_mode = 1: Trellis + Deringing AN, nur ohne Progressive-Scan-Opt
+ *                  (dekodierte Pixel 100 % bitidentisch zu pdfcore_jpeg_encode;
+ *                  ~2× schneller – für Smart-Anker).
+ *   fast_mode = 2: Basis-Scan ohne Trellis/Progressive (~10× schneller – für
+ *                  die Qualitätssuche in BracketedJPEGSearch; der Gewinner wird
+ *                  danach mit vollem pdfcore_jpeg_encode erzeugt). */
+int pdfcore_jpeg_encode_fast(const unsigned char *pixels, size_t pixels_len,
+                             int width, int height, int components,
+                             int quality, int fast_mode,
+                             unsigned char **out, size_t *out_len);
 
 /* Phase 6C (Roadmap) – verlustbehafteter CMYK-Re-Encode über mozjpeg.
  *

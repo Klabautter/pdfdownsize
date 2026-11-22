@@ -266,6 +266,7 @@
 				"$(SRCROOT)/Vendor/libtiff/NOTICE-libtiff.md",
 				"$(SRCROOT)/Vendor/openjpeg/NOTICE-openjpeg.md",
 				"$(SRCROOT)/Vendor/harfbuzz/NOTICE-harfbuzz.md",
+				"$(SRCROOT)/Vendor/libdeflate/NOTICE-libdeflate.md",
 			);
 			name = EmbedVendorQPDF;
 			outputPaths = (
@@ -281,6 +282,7 @@
 				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/NOTICE-libtiff.md",
 				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/NOTICE-openjpeg.md",
 				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/NOTICE-harfbuzz.md",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/ReleaseEvidence/NOTICE-libdeflate.md",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;

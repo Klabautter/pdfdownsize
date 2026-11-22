@@ -80,17 +80,23 @@ struct ChromaCensus: Equatable, Sendable {
     /// Pixel mit Alpha ≤ 32 zählen nicht (wie in `ImageClassifier`).
     static func measure(rgba: [UInt8], width: Int, height: Int) -> ChromaCensus {
         guard width > 0, height > 0, rgba.count >= width * height * 4 else { return .neutral }
-        return rgba.withUnsafeBufferPointer { px -> ChromaCensus in
+        return rgba.withUnsafeBufferPointer { buf -> ChromaCensus in
+            guard let px = buf.baseAddress else { return .neutral }
+            let byteCount = width &* height &* 4
             var chromaSum = 0
             var opaque = 0
-            for i in stride(from: 0, to: width * height * 4, by: 4) where px[i + 3] > 32 {
-                let r = Int(px[i]), g = Int(px[i + 1]), b = Int(px[i + 2])
-                chromaSum += max(r, g, b) - min(r, g, b)
-                opaque += 1
+            var i = 0
+            while i < byteCount {
+                if px[i &+ 3] > 32 {
+                    let r = Int(px[i]), g = Int(px[i &+ 1]), b = Int(px[i &+ 2])
+                    chromaSum &+= max(r, max(g, b)) &- min(r, min(g, b))
+                    opaque &+= 1
+                }
+                i &+= 4
             }
             let mean = opaque > 0 ? Double(chromaSum) / Double(opaque) : 0
 
-            // Blöcke von blockEdge × blockEdge; ein Rest am Rand zählt nicht.
+            // Blöcke von blockEdge × blockEdge (4×4); ein Rest am Rand zählt nicht.
             let e = blockEdge
             let bw = width / e, bh = height / e
             guard bw > 0, bh > 0 else {
@@ -102,34 +108,40 @@ struct ChromaCensus: Equatable, Sendable {
             var tileTotal = [Int](repeating: 0, count: tilesX * tilesY)
             var strong = 0
             var blocks = 0
-            let threshold = strongChroma * e * e   // Summe statt Mittel
-            for by in 0..<bh {
-                let tileRow = (by / tileBlocks) * tilesX
-                for bx in 0..<bw {
-                    var r = 0, g = 0, b = 0
-                    var transparent = false
-                    for dy in 0..<e {
-                        var o = ((by * e + dy) * width + bx * e) * 4
-                        for _ in 0..<e {
-                            if px[o + 3] <= 32 { transparent = true }
-                            r += Int(px[o]); g += Int(px[o + 1]); b += Int(px[o + 2])
-                            o += 4
+            let threshold = strongChroma * e * e
+            let rowStride = width &* 4
+            tileStrong.withUnsafeMutableBufferPointer { tsBuf in
+                tileTotal.withUnsafeMutableBufferPointer { ttBuf in
+                    guard let ts = tsBuf.baseAddress, let tt = ttBuf.baseAddress else { return }
+                    for by in 0..<bh {
+                        let tileRow = (by / tileBlocks) &* tilesX
+                        let yBase = (by &* e) &* rowStride
+                        for bx in 0..<bw {
+                            var r = 0, g = 0, b = 0
+                            var transparent = false
+                            var rowOff = yBase &+ (bx &* e &* 4)
+                            for _ in 0..<e {
+                                var o = rowOff
+                                for _ in 0..<e {
+                                    if px[o &+ 3] <= 32 { transparent = true }
+                                    r &+= Int(px[o]); g &+= Int(px[o &+ 1]); b &+= Int(px[o &+ 2])
+                                    o &+= 4
+                                }
+                                rowOff &+= rowStride
+                            }
+                            if transparent { continue }
+                            let tile = tileRow &+ (bx / tileBlocks)
+                            blocks &+= 1
+                            tt[tile] &+= 1
+                            if max(r, max(g, b)) &- min(r, min(g, b)) > threshold {
+                                strong &+= 1
+                                ts[tile] &+= 1
+                            }
                         }
-                    }
-                    // Ein Block mit durchsichtigen Pixeln zählt nicht.
-                    if transparent { continue }
-                    let tile = tileRow + bx / tileBlocks
-                    blocks += 1
-                    tileTotal[tile] += 1
-                    if max(r, g, b) - min(r, g, b) > threshold {
-                        strong += 1
-                        tileStrong[tile] += 1
                     }
                 }
             }
             var peak = 0.0
-            // Randkacheln mit weniger als einem Viertel der Blöcke zählen
-            // nicht: Dort machte schon ein einzelner Farbblock 5 % aus.
             let minimumTileBlocks = tileBlocks * tileBlocks / 4
             for t in 0..<tileTotal.count where tileTotal[t] >= minimumTileBlocks {
                 peak = max(peak, Double(tileStrong[t]) / Double(tileTotal[t]))

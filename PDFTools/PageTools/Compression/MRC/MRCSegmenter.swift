@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import Accelerate
 
 // MARK: - Masterplan §13.5 – MRC-Segmentierung
 //
@@ -135,42 +136,59 @@ enum MRCSegmenter {
         let isGray = rgb == nil
         let pixels = rgb ?? gray!
 
-        // Luminanz + Chroma (max−min über RGB; Grauquellen: 0).
-        var luma = [UInt8](repeating: 0, count: width * height)
-        var chroma = [UInt8](repeating: 0, count: width * height)
+        // Luminanz + Chroma + Histogramm + Farbzählung in EINEM zeigerbasierten Durchlauf.
+        let pixelCount = width * height
+        var luma = [UInt8](repeating: 0, count: pixelCount)
+        var chroma = [UInt8](repeating: 0, count: pixelCount)
+        var histogram = [Int](repeating: 0, count: 256)
         var isGrayPixel = true
-        for i in 0..<(width * height) {
-            let r: Int, g: Int, b: Int
-            if isGray {
-                let v = Int(pixels[i])
-                r = v; g = v; b = v
-            } else {
-                let o = i * 3
-                r = Int(pixels[o]); g = Int(pixels[o + 1]); b = Int(pixels[o + 2])
+        var chromaHeavy = 0
+        let strongChromaInt = Int(strongChroma)
+        pixels.withUnsafeBytes { rawBuf in
+            luma.withUnsafeMutableBufferPointer { lumaPtr in
+                chroma.withUnsafeMutableBufferPointer { chromaPtr in
+                    guard let pBase = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                          let lBase = lumaPtr.baseAddress,
+                          let cBase = chromaPtr.baseAddress else { return }
+                    if isGray {
+                        for i in 0..<pixelCount {
+                            let v = pBase[i]
+                            lBase[i] = v
+                            histogram[Int(v)] &+= 1
+                        }
+                    } else {
+                        for i in 0..<pixelCount {
+                            let o = i &* 3
+                            let r = Int(pBase[o]), g = Int(pBase[o &+ 1]), b = Int(pBase[o &+ 2])
+                            let yv = (299 &* r &+ 587 &* g &+ 114 &* b) / 1000
+                            let maxRGB = max(r, max(g, b))
+                            let minRGB = min(r, min(g, b))
+                            let cv = maxRGB &- minRGB
+                            lBase[i] = UInt8(yv)
+                            cBase[i] = UInt8(cv)
+                            histogram[yv] &+= 1
+                            if cv > strongChromaInt { chromaHeavy &+= 1 }
+                            if r != g || g != b { isGrayPixel = false }
+                        }
+                    }
+                }
             }
-            luma[i] = UInt8(clamping: (299 * r + 587 * g + 114 * b) / 1000)
-            chroma[i] = UInt8(clamping: max(r, max(g, b)) - min(r, min(g, b)))
-            if !isGray, r != g || g != b { isGrayPixel = false }
         }
         // Grauerkannte RGB-Quellen (alle r==g==b) später grau kodieren.
         let effectivelyGray = isGray || isGrayPixel
 
         // --- §13.4-Gates vor jedem aufwendigen Schritt ---------------------
         // Papier-Luminanz über das Histogramm (Median).
-        var histogram = [Int](repeating: 0, count: 256)
-        for value in luma { histogram[Int(value)] += 1 }
         var paperLuma = 0
         var seen = 0
-        let half = width * height / 2
+        let half = pixelCount / 2
         for value in 0..<256 {
             seen += histogram[value]
             if seen > half { paperLuma = value; break }
         }
         guard Double(paperLuma) >= minimumPaperLuma else { return nil }
 
-        var chromaHeavy = 0
-        for value in chroma where Int(value) > Int(strongChroma) { chromaHeavy += 1 }
-        let chromaFraction = Double(chromaHeavy) / Double(width * height)
+        let chromaFraction = Double(chromaHeavy) / Double(pixelCount)
         guard chromaFraction <= maximumChromaFraction else { return nil }
 
         // --- Edge-Map (Sobel) ----------------------------------------------
@@ -194,14 +212,14 @@ enum MRCSegmenter {
         stripPhotoRects(from: &foreground, width: width, height: height,
                         rects: photoRects)
 
-        // Farbige Tinte bleibt im Hintergrund (Masterplan A2, Stufe 1): Die
-        // Maske wird im Kern immer schwarz gefüllt – eine blaue Unterschrift
-        // in der Maske wurde schwarz-blau gescheckt. Ist zu viel der Tinte
-        // farbig, ist die Seite kein MRC-Fall.
+        // Farbige Tinte bleibt im Hintergrund (Masterplan A2, Stufe 1): Bei
+        // rein grauen Quellen ist chroma überall 0 → 5×5-Prüfung entfällt.
         var coloredInk = [Bool]()
-        guard stripColoredInk(from: &foreground, chroma: chroma,
-                              width: width, height: height,
-                              colored: &coloredInk) else { return nil }
+        if !effectivelyGray {
+            guard stripColoredInk(from: &foreground, chroma: chroma,
+                                  width: width, height: height,
+                                  colored: &coloredInk) else { return nil }
+        }
 
         // --- Connected Components → text/line-art-Maske ----------------------
         guard let (mask, blobRects, inkCount) =
@@ -448,19 +466,26 @@ enum MRCSegmenter {
     /// Binäre Kantenkarte: Sobel-Magnitude ≥ `edgeThreshold`.
     static func edgeMap(luma: [UInt8], width: Int, height: Int) -> [Bool] {
         var out = [Bool](repeating: false, count: width * height)
-        guard width >= 3, height >= 3 else { return out }
-        for y in 1..<(height - 1) {
-            for x in 1..<(width - 1) {
-                let i = y * width + x
-                let tl = Int(luma[i - width - 1]), t = Int(luma[i - width])
-                let tr = Int(luma[i - width + 1])
-                let l = Int(luma[i - 1]), r = Int(luma[i + 1])
-                let bl = Int(luma[i + width - 1]), b = Int(luma[i + width])
-                let br = Int(luma[i + width + 1])
-                let gx = -tl - 2 * l - bl + tr + 2 * r + br
-                let gy = -tl - 2 * t - tr + bl + 2 * b + br
-                let magnitude = abs(gx) + abs(gy)
-                if Double(magnitude) >= edgeThreshold { out[i] = true }
+        guard width >= 3, height >= 3, luma.count >= width * height else { return out }
+        let threshold = Int(edgeThreshold)
+        luma.withUnsafeBufferPointer { lp in
+            out.withUnsafeMutableBufferPointer { op in
+                guard let src = lp.baseAddress, let dst = op.baseAddress else { return }
+                for y in 1..<(height - 1) {
+                    let row = y &* width
+                    let prev = row &- width
+                    let next = row &+ width
+                    for x in 1..<(width - 1) {
+                        let tl = Int(src[prev &+ x &- 1]), t = Int(src[prev &+ x])
+                        let tr = Int(src[prev &+ x &+ 1])
+                        let l = Int(src[row &+ x &- 1]), r = Int(src[row &+ x &+ 1])
+                        let bl = Int(src[next &+ x &- 1]), b = Int(src[next &+ x])
+                        let br = Int(src[next &+ x &+ 1])
+                        let gx = -tl &- (l &<< 1) &- bl &+ tr &+ (r &<< 1) &+ br
+                        let gy = -tl &- (t &<< 1) &- tr &+ bl &+ (b &<< 1) &+ br
+                        if abs(gx) &+ abs(gy) >= threshold { dst[row &+ x] = true }
+                    }
+                }
             }
         }
         return out
@@ -469,75 +494,106 @@ enum MRCSegmenter {
     // MARK: Sauvola-Schwelle (Integralbilder, Fenster ~25 px)
 
     /// Sauvola: T = m · (1 + k · (s/R − 1)), Vordergrund = Luminanz < T.
-    /// Integralbilder machen das Fenster O(1) je Pixel. Die Summenbilder
-    /// tragen (height+1)×(width+1) Zellen – der Abruf eines Fensters greift
-    /// auf x1+1/y1+1 zu, deshalb darf die Matrix nicht height×width bleiben.
+    /// Exakte `UInt64`-Integralbilder ohne Bounds-Checks.
     static func sauvolaForeground(luma: [UInt8], width: Int,
                                   height: Int) -> [Bool] {
         let count = width * height
+        guard count > 0, luma.count >= count else { return [] }
         let stride = width + 1
-        var sum = [Double](repeating: 0, count: (height + 1) * stride)
-        var sumSq = [Double](repeating: 0, count: (height + 1) * stride)
-        for y in 0..<height {
-            var rowSum = 0.0
-            var rowSumSq = 0.0
-            for x in 0..<width {
-                let v = Double(luma[y * width + x])
-                rowSum += v
-                rowSumSq += v * v
-                sum[(y + 1) * stride + x + 1] = sum[y * stride + x + 1] + rowSum
-                sumSq[(y + 1) * stride + x + 1]
-                    = sumSq[y * stride + x + 1] + rowSumSq
+        var sum = [UInt64](repeating: 0, count: (height + 1) * stride)
+        var sumSq = [UInt64](repeating: 0, count: (height + 1) * stride)
+        luma.withUnsafeBufferPointer { lp in
+            sum.withUnsafeMutableBufferPointer { sp in
+                sumSq.withUnsafeMutableBufferPointer { sqp in
+                    guard let src = lp.baseAddress,
+                          let sBase = sp.baseAddress,
+                          let sqBase = sqp.baseAddress else { return }
+                    for y in 0..<height {
+                        var rowSum: UInt64 = 0
+                        var rowSumSq: UInt64 = 0
+                        let srcRow = y &* width
+                        let prevInt = y &* stride
+                        let curInt = prevInt &+ stride
+                        for x in 0..<width {
+                            let v = UInt64(src[srcRow &+ x])
+                            rowSum &+= v
+                            rowSumSq &+= v &* v
+                            let col = x &+ 1
+                            sBase[curInt &+ col] = sBase[prevInt &+ col] &+ rowSum
+                            sqBase[curInt &+ col] = sqBase[prevInt &+ col] &+ rowSumSq
+                        }
+                    }
+                }
             }
         }
 
         let w = thresholdWindow
         let r = w / 2
         let k = thresholdSensitivity
-        let range = thresholdRange
+        let invRange = 1.0 / thresholdRange
         var out = [Bool](repeating: false, count: count)
-        for y in 0..<height {
-            let y0 = max(0, y - r), y1 = min(height - 1, y + r)
-            for x in 0..<width {
-                let x0 = max(0, x - r), x1 = min(width - 1, x + r)
-                let area = Double((y1 - y0 + 1) * (x1 - x0 + 1))
-                let a = y0 * stride + x0
-                let b = y0 * stride + x1 + 1
-                let c = (y1 + 1) * stride + x0
-                let d = (y1 + 1) * stride + x1 + 1
-                let s = sum[d] - sum[b] - sum[c] + sum[a]
-                let sSq = sumSq[d] - sumSq[b] - sumSq[c] + sumSq[a]
-                let mean = s / area
-                let variance = max(0, sSq / area - mean * mean)
-                let std = variance.squareRoot()
-                let threshold = mean * (1 + k * (std / range - 1))
-                if Double(luma[y * width + x]) < threshold { out[y * width + x] = true }
-            }
-        }
-        // Anti-Aliasing-Säume an scharfen Kanten aus der Maske halten: Sauvola
-        // legt T bei hohem Kantenkontrast oft um 190–205 und malt dadurch helle
-        // Randpixel (Luminanz 135–200) tiefschwarz – dünne Scanschrift wird
-        // sichtbar fetter und reißt inkDelta/p05. Wo im 5×5-Fenster echter
-        // Kantenkontrast (≥ 64) liegt, zählt ein Pixel nur dann als Tinte, wenn
-        // es näher am lokalen Tinten-Minimum als am lokalen Papier-Maximum liegt.
-        var refined = out
-        for y in 0..<height {
-            let y0 = max(0, y - 2), y1 = min(height - 1, y + 2)
-            for x in 0..<width where out[y * width + x] {
-                let x0 = max(0, x - 2), x1 = min(width - 1, x + 2)
-                var localMin = 255
-                var localMax = 0
-                for yy in y0...y1 {
-                    let row = yy * width
-                    for xx in x0...x1 {
-                        let v = Int(luma[row + xx])
-                        if v < localMin { localMin = v }
-                        if v > localMax { localMax = v }
+        luma.withUnsafeBufferPointer { lp in
+            sum.withUnsafeBufferPointer { sp in
+                sumSq.withUnsafeBufferPointer { sqp in
+                    out.withUnsafeMutableBufferPointer { op in
+                        guard let src = lp.baseAddress,
+                              let sBase = sp.baseAddress,
+                              let sqBase = sqp.baseAddress,
+                              let dst = op.baseAddress else { return }
+                        for y in 0..<height {
+                            let y0 = max(0, y - r), y1 = min(height - 1, y + r)
+                            let ySpan = y1 - y0 + 1
+                            let r0 = y0 &* stride
+                            let r1 = (y1 &+ 1) &* stride
+                            let srcRow = y &* width
+                            for x in 0..<width {
+                                let x0 = max(0, x - r), x1 = min(width - 1, x + r)
+                                let invArea = 1.0 / Double(ySpan &* (x1 - x0 + 1))
+                                let x1p = x1 &+ 1
+                                let s = Double(sBase[r1 &+ x1p] &- sBase[r0 &+ x1p] &- sBase[r1 &+ x0] &+ sBase[r0 &+ x0])
+                                let sSq = Double(sqBase[r1 &+ x1p] &- sqBase[r0 &+ x1p] &- sqBase[r1 &+ x0] &+ sqBase[r0 &+ x0])
+                                let mean = s * invArea
+                                let variance = max(0.0, sSq * invArea - mean * mean)
+                                let threshold = mean * (1.0 + k * (variance.squareRoot() * invRange - 1.0))
+                                if Double(src[srcRow &+ x]) < threshold {
+                                    dst[srcRow &+ x] = true
+                                }
+                            }
+                        }
                     }
                 }
-                if localMax - localMin >= 64,
-                   20 * (Int(luma[y * width + x]) - localMin) > 9 * (localMax - localMin) {
-                    refined[y * width + x] = false
+            }
+        }
+        // Anti-Aliasing-Säume an scharfen Kanten aus der Maske halten.
+        var refined = out
+        luma.withUnsafeBufferPointer { lp in
+            out.withUnsafeBufferPointer { op in
+                refined.withUnsafeMutableBufferPointer { rp in
+                    guard let src = lp.baseAddress,
+                          let orig = op.baseAddress,
+                          let dst = rp.baseAddress else { return }
+                    for y in 0..<height {
+                        let y0 = max(0, y - 2), y1 = min(height - 1, y + 2)
+                        let row = y &* width
+                        for x in 0..<width where orig[row &+ x] {
+                            let x0 = max(0, x - 2), x1 = min(width - 1, x + 2)
+                            var localMin = 255
+                            var localMax = 0
+                            for yy in y0...y1 {
+                                let rRow = yy &* width
+                                for xx in x0...x1 {
+                                    let v = Int(src[rRow &+ xx])
+                                    if v < localMin { localMin = v }
+                                    if v > localMax { localMax = v }
+                                }
+                            }
+                            let span = localMax &- localMin
+                            if span >= 64,
+                               20 &* (Int(src[row &+ x]) &- localMin) > 9 &* span {
+                                dst[row &+ x] = false
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -850,45 +906,70 @@ enum MRCSegmenter {
         }
 
         // Glättung NUR über die gefüllte Region (3×3-Mittelwert, 2 Pässe) –
-        // das Papier dort bleibt weich, der Rest unverändert.
-        // Nach der Dilatation ist `unknown` für Gefülltes bereits false;
-        // Inseln, die den Mittelwert bekamen, bleiben ungeglättet.
+        // ohne den gesamten 25-MB-Hintergrundpuffer je Pass zu kopieren.
         let filledRegion = inkIndices.filter { !unknown[$0] }
+        var smoothedValues = [UInt8](repeating: 0, count: filledRegion.count * channels)
         for _ in 0..<inpaintSmoothPasses {
-            var smoothed = buffer
-            for i in filledRegion {
-                let x = i % width, y = i / width
-                for c in 0..<channels {
-                    var sum = 0
-                    for dy in -1...1 {
-                        let ny = y + dy
-                        guard ny >= 0, ny < height else { continue }
-                        for dx in -1...1 {
-                            let nx = x + dx
-                            guard nx >= 0, nx < width else { continue }
-                            sum += Int(buffer[(ny * width + nx) * channels + c])
+            buffer.withUnsafeBufferPointer { bp in
+                smoothedValues.withUnsafeMutableBufferPointer { sp in
+                    guard let src = bp.baseAddress, let dst = sp.baseAddress else { return }
+                    for (pos, i) in filledRegion.enumerated() {
+                        let x = i % width, y = i / width
+                        let outBase = pos &* channels
+                        for c in 0..<channels {
+                            var s = 0
+                            let y0 = max(0, y - 1), y1 = min(height - 1, y + 1)
+                            let x0 = max(0, x - 1), x1 = min(width - 1, x + 1)
+                            for ny in y0...y1 {
+                                let row = ny &* width
+                                for nx in x0...x1 {
+                                    s &+= Int(src[(row &+ nx) &* channels &+ c])
+                                }
+                            }
+                            dst[outBase &+ c] = UInt8(s / 9)
                         }
                     }
-                    smoothed[i * channels + c] = UInt8(clamping: sum / 9)
                 }
             }
-            buffer = smoothed
+            buffer.withUnsafeMutableBufferPointer { bp in
+                smoothedValues.withUnsafeBufferPointer { sp in
+                    guard let dst = bp.baseAddress, let src = sp.baseAddress else { return }
+                    for (pos, i) in filledRegion.enumerated() {
+                        let outBase = i &* channels
+                        let inBase = pos &* channels
+                        for c in 0..<channels {
+                            dst[outBase &+ c] = src[inBase &+ c]
+                        }
+                    }
+                }
+            }
         }
 
-        // CGImage je Kanalzahl (RGB als 4-Byte-Layout, wie rawBitmap).
+        // CGImage je Kanalzahl (RGB als 4-Byte-Layout via vImage).
         let colorSpace: CGColorSpace = channels == 1
             ? CGColorSpaceCreateDeviceGray() : CGColorSpaceCreateDeviceRGB()
         let bitmapInfo: UInt32 = channels == 1
             ? CGImageAlphaInfo.none.rawValue
             : CGImageAlphaInfo.noneSkipLast.rawValue
         if channels == 3 {
-            var padded = [UInt8](repeating: 255, count: width * 4 * height)
-            for i in 0..<(width * height) {
-                padded[i * 4] = buffer[i * 3]
-                padded[i * 4 + 1] = buffer[i * 3 + 1]
-                padded[i * 4 + 2] = buffer[i * 3 + 2]
+            var padded = Data(count: width * 4 * height)
+            let converted: Bool = buffer.withUnsafeMutableBytes { srcRaw in
+                padded.withUnsafeMutableBytes { dstRaw in
+                    guard let sPtr = srcRaw.baseAddress, let dPtr = dstRaw.baseAddress else {
+                        return false
+                    }
+                    var srcBuf = vImage_Buffer(
+                        data: sPtr, height: vImagePixelCount(height),
+                        width: vImagePixelCount(width), rowBytes: width * 3)
+                    var dstBuf = vImage_Buffer(
+                        data: dPtr, height: vImagePixelCount(height),
+                        width: vImagePixelCount(width), rowBytes: width * 4)
+                    return vImageConvert_RGB888toRGBA8888(
+                        &srcBuf, nil, 255, &dstBuf, false, vImage_Flags(kvImageNoFlags)) == kvImageNoError
+                }
             }
-            guard let provider = CGDataProvider(data: Data(padded) as CFData),
+            guard converted,
+                  let provider = CGDataProvider(data: padded as CFData),
                   let image = CGImage(width: width, height: height,
                                       bitsPerComponent: 8, bitsPerPixel: 32,
                                       bytesPerRow: width * 4,

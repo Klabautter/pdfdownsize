@@ -27,13 +27,23 @@ enum JPEGEncoder {
         case keepOriginal
     }
 
+    enum MozjpegMode: Int32, Sendable {
+        /// Volles `JCP_MAX_COMPRESSION` (Trellis + Progressive + Optimal Huffman).
+        case full = 0
+        /// Trellis AN, ohne Progressive-Scan-Opt (100 % bitidentische dekodierte Pixel, ~2× schneller).
+        case exactPixelsNoProgressive = 1
+        /// Basis-Scan ohne Trellis/Progressive (~10× schneller für Qualitätssuche).
+        case fastSearch = 2
+    }
+
     /// Kodiert ein CGImage über das gewählte Backend.
     /// `.mozjpeg` fällt bei Shim-Fehlern automatisch auf ImageIO zurück.
     static func encode(_ image: CGImage, quality: Double,
-                       backend: JPEGBackend) -> Data? {
+                       backend: JPEGBackend,
+                       mozjpegMode: MozjpegMode = .full) -> Data? {
         switch backend {
         case .mozjpeg:
-            if let data = encodeMozjpeg(image, quality: quality) { return data }
+            if let data = encodeMozjpeg(image, quality: quality, mode: mozjpegMode) { return data }
             return encodeImageIO(image, quality: quality)
         case .imageIO:
             return encodeImageIO(image, quality: quality)
@@ -77,27 +87,38 @@ enum JPEGEncoder {
 
     /// Encode gegen einen vorbereiteten Pixelbuffer – derselbe Shim-Aufruf
     /// wie `encodeMozjpeg`, derselbe ImageIO-Fallback bei Shim-Fehlern.
+    /// `fastSearch` nutzt `pdfcore_jpeg_encode_fast` (gleiche Robidoux-Tabellen,
+    /// ohne Trellis/Progressive) für die schnelle Qualitätssuche.
     static func encode(_ image: CGImage, quality: Double, backend: JPEGBackend,
-                       prepared: PreparedPixels?) -> Data? {
-        guard let prepared else {
-            return encode(image, quality: quality, backend: backend)
+                       prepared: PreparedPixels?,
+                       mozjpegMode: MozjpegMode = .full) -> Data? {
+        guard backend == .mozjpeg, let prepared else {
+            return encode(image, quality: quality, backend: backend, mozjpegMode: mozjpegMode)
         }
         let data = encode(pixels: prepared.pixels, width: prepared.width,
                           height: prepared.height,
-                          components: prepared.components, quality: quality)
+                          components: prepared.components, quality: quality,
+                          mode: mozjpegMode)
         if let data { return data }
         return encodeImageIO(image, quality: quality)
     }
 
     /// Shim-Aufruf mit fertigem Pixelbuffer (8 Bit, Zeilen ohne Padding).
     private static func encode(pixels: Data, width: Int, height: Int,
-                               components: Int, quality: Double) -> Data? {
+                               components: Int, quality: Double,
+                               mode: MozjpegMode = .full) -> Data? {
         let q = max(1, min(100, Int((quality * 100).rounded())))
         var out: UnsafeMutablePointer<UInt8>?
         var outLen = 0
         let status: Int32 = pixels.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Int32 in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return Int32(PDFCORE_ERR_INTERNAL.rawValue)
+            }
+            if mode != .full {
+                return pdfcore_jpeg_encode_fast(base, raw.count,
+                                                Int32(width), Int32(height),
+                                                Int32(components), Int32(q),
+                                                mode.rawValue, &out, &outLen)
             }
             return pdfcore_jpeg_encode(base, raw.count,
                                        Int32(width), Int32(height),
@@ -149,7 +170,8 @@ enum JPEGEncoder {
         return out as Data
     }
 
-    private static func encodeMozjpeg(_ image: CGImage, quality: Double) -> Data? {
+    private static func encodeMozjpeg(_ image: CGImage, quality: Double,
+                                      mode: MozjpegMode = .full) -> Data? {
         let components: Int
         switch image.colorSpace?.model {
         case .monochrome: components = 1
@@ -160,7 +182,7 @@ enum JPEGEncoder {
             return nil
         }
         return encode(pixels: pixels, width: image.width, height: image.height,
-                      components: components, quality: quality)
+                      components: components, quality: quality, mode: mode)
     }
 
     /// Phase 6C – verlustbehafteter CMYK-Encode über den mozjpeg-Shim.

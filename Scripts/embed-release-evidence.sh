@@ -10,7 +10,8 @@ for path in \
     Vendor/qpdf/LICENSE-zopfli.txt \
     Vendor/mozjpeg/LICENSE-mozjpeg.md Vendor/mozjpeg/NOTICE-mozjpeg.md \
     Vendor/jbig2enc/NOTICE-jbig2enc.md Vendor/libtiff/NOTICE-libtiff.md \
-    Vendor/openjpeg/NOTICE-openjpeg.md Vendor/harfbuzz/NOTICE-harfbuzz.md; do
+    Vendor/openjpeg/NOTICE-openjpeg.md Vendor/harfbuzz/NOTICE-harfbuzz.md \
+    Vendor/libdeflate/NOTICE-libdeflate.md; do
     test -s "$ROOT/$path"
     cp -f "$ROOT/$path" "$DEST/"
 done

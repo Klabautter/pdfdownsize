@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import Accelerate
 
 // MARK: - Phase 7 (Roadmap) – SSIM-Multi-Gate statt globaler SSIM
 //
@@ -448,6 +449,47 @@ enum QualityGates {
                                     maxEdge: maxEdge) else { return nil }
         let w = size.width, h = size.height
         _ = window
+        let pixelCount = w * h
+
+        // Schnellpfad: Liegt bereits ein flaches 8-Bit-RGBA-Bitmap exakt in
+        // Zielgröße (w×h) vor (z. B. aus `ImageResampler.resize`), lesen wir
+        // die Pixel direkt ohne einen zweiten CGContext-Draw.
+        let alphaInfo = CGImageAlphaInfo(
+            rawValue: image.bitmapInfo.rawValue & CGBitmapInfo.alphaInfoMask.rawValue)
+        let byteOrder = image.bitmapInfo.intersection(.byteOrderMask)
+        if image.width == w, image.height == h,
+           image.bitsPerComponent == 8, image.bitsPerPixel == 32,
+           image.bytesPerRow >= w * 4,
+           image.colorSpace == CGColorSpaceCreateDeviceRGB(),
+           (alphaInfo == .noneSkipLast || alphaInfo == .premultipliedLast),
+           (byteOrder == CGBitmapInfo(rawValue: 0) || byteOrder == .byteOrder32Big),
+           let cfData = image.dataProvider?.data,
+           let rawPtr = CFDataGetBytePtr(cfData),
+           CFDataGetLength(cfData) >= image.bytesPerRow * (h - 1) + w * 4 {
+            let rowStride = image.bytesPerRow
+            var rgba = [UInt8](repeating: 0, count: pixelCount * 4)
+            var luma = [Float](repeating: 0, count: pixelCount)
+            rgba.withUnsafeMutableBufferPointer { rgbaPtr in
+                luma.withUnsafeMutableBufferPointer { lumaPtr in
+                    guard let dstRGBA = rgbaPtr.baseAddress,
+                          let dstLuma = lumaPtr.baseAddress else { return }
+                    let rowBytes = w &* 4
+                    for y in 0..<h {
+                        let srcRow = rawPtr + y &* rowStride
+                        let dstRowOffset = y &* rowBytes
+                        memcpy(dstRGBA + dstRowOffset, srcRow, rowBytes)
+                        let lumaRow = y &* w
+                        for x in 0..<w {
+                            let o = x &* 4
+                            let r = Int(srcRow[o]), g = Int(srcRow[o &+ 1]), b = Int(srcRow[o &+ 2])
+                            dstLuma[lumaRow &+ x] = Float((299 &* r &+ 587 &* g &+ 114 &* b) / 1000)
+                        }
+                    }
+                }
+            }
+            return Sample(width: w, height: h, luma: luma, rgba: rgba,
+                          census: census ?? ChromaCensus.measure(rgba: rgba, width: w, height: h))
+        }
 
         guard let ctx = CGContext(
             data: nil,
@@ -463,15 +505,16 @@ enum QualityGates {
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         guard let data = ctx.data else { return nil }
 
-        let pixelCount = w * h
         let px = data.bindMemory(to: UInt8.self, capacity: pixelCount * 4)
         let rgba = Array(UnsafeBufferPointer(start: px, count: pixelCount * 4))
 
         var luma = [Float](repeating: 0, count: pixelCount)
-        for i in 0..<pixelCount {
-            let o = i * 4
-            let r = Int(rgba[o]), g = Int(rgba[o + 1]), b = Int(rgba[o + 2])
-            luma[i] = Float((299 * r + 587 * g + 114 * b) / 1000)
+        luma.withUnsafeMutableBufferPointer { lumaPtr in
+            for i in 0..<pixelCount {
+                let o = i &* 4
+                let r = Int(px[o]), g = Int(px[o &+ 1]), b = Int(px[o &+ 2])
+                lumaPtr[i] = Float((299 &* r &+ 587 &* g &+ 114 &* b) / 1000)
+            }
         }
 
         return Sample(width: w, height: h, luma: luma, rgba: rgba,
@@ -481,57 +524,106 @@ enum QualityGates {
     // MARK: SSIM-Kern
 
     /// Per-Fenster-SSIM über nicht überlappende 8×8-Fenster – dieselbe
-    /// Mathematik und dieselben Konstanten wie `QualityMetrics.ssim`, aber
-    /// mit Einzelergebnissen, damit Kacheln daraus aggregiert werden können.
+    /// Mathematik und dieselben Konstanten wie `QualityMetrics.ssim`,
+    /// vektorisiert über `SIMD8<Float>` (8 Pixel pro Zeile in einem Register).
     static func windowSSIMs(_ a: [Float], _ b: [Float],
                             width: Int, height: Int) -> [Float] {
         let c1: Float = 6.5025    // (0.01 * 255)^2
         let c2: Float = 58.5225   // (0.03 * 255)^2
         let window = 8
-        var scores: [Float] = []
+        let blocksX = width / window
+        let blocksY = height / window
+        guard blocksX > 0, blocksY > 0,
+              a.count >= width * height, b.count >= width * height else { return [] }
+        var scores = [Float](repeating: 0, count: blocksX * blocksY)
+        let n: Float = 64.0
+        let invN: Float = 1.0 / 64.0
+        let invNm1: Float = 1.0 / 63.0
 
-        var by = 0
-        while by + window <= height {
-            var bx = 0
-            while bx + window <= width {
-                var sumA: Float = 0, sumB: Float = 0
-                for y in by..<(by + window) {
-                    let row = y * width + bx
-                    for i in 0..<window {
-                        sumA += a[row + i]
-                        sumB += b[row + i]
+        a.withUnsafeBufferPointer { ap in
+            b.withUnsafeBufferPointer { bp in
+                scores.withUnsafeMutableBufferPointer { sp in
+                    guard let aBase = ap.baseAddress,
+                          let bBase = bp.baseAddress,
+                          let sBase = sp.baseAddress else { return }
+                    var outIdx = 0
+                    for byIdx in 0..<blocksY {
+                        let by = byIdx &* window
+                        for bxIdx in 0..<blocksX {
+                            let bx = bxIdx &* window
+                            var vSumA = SIMD8<Float>.zero
+                            var vSumB = SIMD8<Float>.zero
+                            for dy in 0..<8 {
+                                let off = (by &+ dy) &* width &+ bx
+                                let va = SIMD8<Float>(
+                                    aBase[off], aBase[off &+ 1], aBase[off &+ 2], aBase[off &+ 3],
+                                    aBase[off &+ 4], aBase[off &+ 5], aBase[off &+ 6], aBase[off &+ 7])
+                                let vb = SIMD8<Float>(
+                                    bBase[off], bBase[off &+ 1], bBase[off &+ 2], bBase[off &+ 3],
+                                    bBase[off &+ 4], bBase[off &+ 5], bBase[off &+ 6], bBase[off &+ 7])
+                                vSumA += va
+                                vSumB += vb
+                            }
+                            let muA = vSumA.sum() * invN
+                            let muB = vSumB.sum() * invN
+                            let vMuA = SIMD8<Float>(repeating: muA)
+                            let vMuB = SIMD8<Float>(repeating: muB)
+
+                            var vVarA = SIMD8<Float>.zero
+                            var vVarB = SIMD8<Float>.zero
+                            var vCov = SIMD8<Float>.zero
+                            for dy in 0..<8 {
+                                let off = (by &+ dy) &* width &+ bx
+                                let va = SIMD8<Float>(
+                                    aBase[off], aBase[off &+ 1], aBase[off &+ 2], aBase[off &+ 3],
+                                    aBase[off &+ 4], aBase[off &+ 5], aBase[off &+ 6], aBase[off &+ 7]) - vMuA
+                                let vb = SIMD8<Float>(
+                                    bBase[off], bBase[off &+ 1], bBase[off &+ 2], bBase[off &+ 3],
+                                    bBase[off &+ 4], bBase[off &+ 5], bBase[off &+ 6], bBase[off &+ 7]) - vMuB
+                                vVarA += va * va
+                                vVarB += vb * vb
+                                vCov += va * vb
+                            }
+                            let varA = vVarA.sum() * invNm1
+                            let varB = vVarB.sum() * invNm1
+                            let cov = vCov.sum() * invNm1
+
+                            let num = (2 * muA * muB + c1) * (2 * cov + c2)
+                            let den = (muA * muA + muB * muB + c1) * (varA + varB + c2)
+                            sBase[outIdx] = num / den
+                            outIdx &+= 1
+                        }
                     }
                 }
-                let n = Float(window * window)
-                let muA = sumA / n
-                let muB = sumB / n
-
-                var varA: Float = 0, varB: Float = 0, cov: Float = 0
-                for y in by..<(by + window) {
-                    let row = y * width + bx
-                    for i in 0..<window {
-                        let da = a[row + i] - muA
-                        let db = b[row + i] - muB
-                        varA += da * da
-                        varB += db * db
-                        cov += da * db
-                    }
-                }
-                varA /= n - 1
-                varB /= n - 1
-                cov /= n - 1
-
-                let num = (2 * muA * muB + c1) * (2 * cov + c2)
-                let den = (muA * muA + muB * muB + c1) * (varA + varB + c2)
-                scores.append(num / den)
-                bx += window
             }
-            by += window
         }
+        _ = n
         return scores
     }
 
     // MARK: Referenz-Cache
+
+    /// Vorberechnete Farbdaten der Referenz (einmal je Bild statt je Kandidat).
+    fileprivate struct ColorReferenceCache {
+        struct PeakPixel {
+            let x: Int
+            let y: Int
+            let index: Int
+            let l: Double
+            let a: Double
+            let b: Double
+            let energy: Double
+            let strength: Double
+        }
+
+        let peakThreshold: Int
+        /// CIELAB für alle 2×2-abgetasteten Referenzpixel (`meanDeltaE76`).
+        let meanLabs: [(Double, Double, Double)]
+        /// CIELAB + Energie für alle Referenzpixel mit `chroma >= peakThreshold`.
+        let peakPixels: [PeakPixel]
+        /// Chroma je Referenzpixel (spart erneutes min/max bei `addedColor`).
+        let sourceChroma: [UInt8]
+    }
 
     /// Hält die Referenz-Stichprobe für alle Qualitätsstufen einer Leiter.
     /// Bisher wurde die Referenz PRO Stufe neu gezeichnet; mit dem Multi-Gate
@@ -542,6 +634,7 @@ enum QualityGates {
         private let refMagnitudes: [Float]
         private let refEdgeDensities: [Double]
         private let refTextTileFlags: [Bool]
+        private let refColorCache: ColorReferenceCache?
 
         init(reference: CGImage) {
             let sample = QualityGates.sample(reference, census: ChromaCensus.of(reference))
@@ -558,10 +651,14 @@ enum QualityGates {
                 self.refMagnitudes = mags
                 self.refEdgeDensities = QualityGates.edgeDensities(magnitudes: mags, width: sample.width, tiles: layout)
                 self.refTextTileFlags = QualityGates.textTileFlags(reference: sample, tiles: layout)
+                self.refColorCache = sample.isColor
+                    ? QualityGates.buildColorReferenceCache(for: sample)
+                    : nil
             } else {
                 self.refMagnitudes = []
                 self.refEdgeDensities = []
                 self.refTextTileFlags = []
+                self.refColorCache = nil
             }
         }
 
@@ -575,7 +672,9 @@ enum QualityGates {
         }
 
         func measure(candidate: CGImage) -> QualityGateMeasurement? {
-            guard isUsable, let candidateSample = QualityGates.sample(candidate, maxEdge: edge) else {
+            // Kandidaten-Census wird nie gelesen (`reference.isColor` entscheidet) –
+            // `.neutral` spart die komplette 4×4-ChromaCensus-Messung je Kandidat.
+            guard isUsable, let candidateSample = QualityGates.sample(candidate, maxEdge: edge, census: .neutral) else {
                 return nil
             }
             return measure(candidate: candidateSample)
@@ -584,13 +683,31 @@ enum QualityGates {
         func measure(candidate sample: Sample) -> QualityGateMeasurement? {
             QualityGates.measure(reference: reference, candidate: sample,
                                  edgeDensities: refEdgeDensities,
-                                 textTileFlags: refTextTileFlags)
+                                 textTileFlags: refTextTileFlags,
+                                 colorCache: refColorCache)
+        }
+
+        /// Misst Quality-Gate + Kanten-Einführung auf EINER gemeinsamen
+        /// Kandidaten-Stichprobe (spart einen kompletten CGContext-Draw +
+        /// ChromaCensus je JPEG-Stufe).
+        func measureWithEdgeIntroduction(candidate: CGImage)
+            -> (measurement: QualityGateMeasurement?, edgeIntroduction: Double?) {
+            guard isUsable, let candidateSample = QualityGates.sample(candidate, maxEdge: edge, census: .neutral) else {
+                return (nil, nil)
+            }
+            let m = measure(candidate: candidateSample)
+            let edgeIntro = QualityGates.edgeIntroduction(
+                refMagnitudes: refMagnitudes,
+                width: reference.width,
+                height: reference.height,
+                candidate: candidateSample)
+            return (m, edgeIntro)
         }
 
         /// Kanten-Einführung gegen einen Kandidaten (für `PerceptualScore`).
         /// Teilt sich die Referenz-Stichprobe und ihre Sobel-Magnituden.
         func edgeIntroduction(candidate: CGImage) -> Double? {
-            guard isUsable, let candidateSample = QualityGates.sample(candidate, maxEdge: edge) else {
+            guard isUsable, let candidateSample = QualityGates.sample(candidate, maxEdge: edge, census: .neutral) else {
                 return nil
             }
             return QualityGates.edgeIntroduction(refMagnitudes: refMagnitudes,
@@ -605,9 +722,10 @@ enum QualityGates {
         return Evaluator(reference: ref).measure(candidate: candidate)
     }
 
-    static func measure(reference: Sample, candidate: Sample,
-                        edgeDensities precomputedDensities: [Double]? = nil,
-                        textTileFlags precomputedTextFlags: [Bool]? = nil) -> QualityGateMeasurement? {
+    fileprivate static func measure(reference: Sample, candidate: Sample,
+                                    edgeDensities precomputedDensities: [Double]? = nil,
+                                    textTileFlags precomputedTextFlags: [Bool]? = nil,
+                                    colorCache: ColorReferenceCache? = nil) -> QualityGateMeasurement? {
         guard reference.width == candidate.width,
               reference.height == candidate.height,
               reference.width >= 8, reference.height >= 8 else { return nil }
@@ -615,7 +733,9 @@ enum QualityGates {
         let windows = windowSSIMs(reference.luma, candidate.luma,
                                   width: reference.width, height: reference.height)
         guard !windows.isEmpty else { return nil }
-        let global = windows.reduce(Float(0), +) / Float(windows.count)
+        var globalSum: Float = 0
+        vDSP_sve(windows, 1, &globalSum, vDSP_Length(windows.count))
+        let global = globalSum / Float(windows.count)
 
         let tiles = tileScores(windows: windows, width: reference.width,
                                height: reference.height)
@@ -636,15 +756,24 @@ enum QualityGates {
             return textRegionScore(reference: reference, tiles: tiles)
         }()
 
-        let deltaE: Double? = reference.isColor
-            ? meanDeltaE76(reference: reference, candidate: candidate)
-            : nil
-        let peakDeltaE: Double? = reference.isColor
-            ? peakDeltaE76(reference: reference, candidate: candidate)
-            : nil
-        let retention: Double? = reference.isColor
-            ? peakChromaRetention(reference: reference, candidate: candidate)
-            : nil
+        let deltaE: Double?
+        let peakDeltaE: Double?
+        let retention: Double?
+        if reference.isColor {
+            if let cache = colorCache {
+                deltaE = meanDeltaE76(reference: reference, candidate: candidate, cache: cache)
+                peakDeltaE = peakDeltaE76(reference: reference, candidate: candidate, cache: cache)
+                retention = peakChromaRetention(reference: reference, candidate: candidate, cache: cache)
+            } else {
+                deltaE = meanDeltaE76(reference: reference, candidate: candidate)
+                peakDeltaE = peakDeltaE76(reference: reference, candidate: candidate)
+                retention = peakChromaRetention(reference: reference, candidate: candidate)
+            }
+        } else {
+            deltaE = nil
+            peakDeltaE = nil
+            retention = nil
+        }
 
         return QualityGateMeasurement(
             globalSSIM: Double(global),
@@ -660,6 +789,11 @@ enum QualityGates {
             isColor: reference.isColor)
     }
 
+    static func measure(reference: Sample, candidate: Sample) -> QualityGateMeasurement? {
+        measure(reference: reference, candidate: candidate,
+                edgeDensities: nil, textTileFlags: nil, colorCache: nil)
+    }
+
     // MARK: Kacheln
 
     /// 5.-Perzentil (nearest rank) der Kachel-SSIMs.
@@ -673,26 +807,55 @@ enum QualityGates {
     // MARK: Kanten
 
     /// Sobel-Gradientmagnitude der Referenz (normalisiert auf 0…255).
-    /// Internal für die perzeptuelle Metrik (Kanten-Einführung braucht die
-    /// Magnituden beider Seiten).
+    /// Vektorisiert über `SIMD4<Float>` ohne Bounds-Checks.
     static func sobelMagnitudes(_ luma: [Float], width: Int, height: Int)
         -> [Float] {
         var magnitudes = [Float](repeating: 0, count: width * height)
-        guard width >= 3, height >= 3 else { return magnitudes }
-        for y in 1..<(height - 1) {
-            let row = y * width
-            for x in 1..<(width - 1) {
-                let tl = luma[row - width + x - 1]
-                let t  = luma[row - width + x]
-                let tr = luma[row - width + x + 1]
-                let l  = luma[row + x - 1]
-                let r  = luma[row + x + 1]
-                let bl = luma[row + width + x - 1]
-                let b  = luma[row + width + x]
-                let br = luma[row + width + x + 1]
-                let gx = (tr + 2 * r + br) - (tl + 2 * l + bl)
-                let gy = (bl + 2 * b + br) - (tl + 2 * t + tr)
-                magnitudes[row + x] = sqrt(gx * gx + gy * gy) / 4
+        guard width >= 3, height >= 3, luma.count >= width * height else { return magnitudes }
+        let two = SIMD4<Float>(repeating: 2)
+        let quarter = SIMD4<Float>(repeating: 0.25)
+        luma.withUnsafeBufferPointer { lp in
+            magnitudes.withUnsafeMutableBufferPointer { mp in
+                guard let src = lp.baseAddress, let dst = mp.baseAddress else { return }
+                let simdEnd = width - 4
+                for y in 1..<(height - 1) {
+                    let row = y &* width
+                    let prev = row &- width
+                    let next = row &+ width
+                    var x = 1
+                    while x < simdEnd {
+                        let tl = SIMD4<Float>(src[prev &+ x &- 1], src[prev &+ x], src[prev &+ x &+ 1], src[prev &+ x &+ 2])
+                        let t  = SIMD4<Float>(src[prev &+ x], src[prev &+ x &+ 1], src[prev &+ x &+ 2], src[prev &+ x &+ 3])
+                        let tr = SIMD4<Float>(src[prev &+ x &+ 1], src[prev &+ x &+ 2], src[prev &+ x &+ 3], src[prev &+ x &+ 4])
+                        let l  = SIMD4<Float>(src[row &+ x &- 1], src[row &+ x], src[row &+ x &+ 1], src[row &+ x &+ 2])
+                        let r  = SIMD4<Float>(src[row &+ x &+ 1], src[row &+ x &+ 2], src[row &+ x &+ 3], src[row &+ x &+ 4])
+                        let bl = SIMD4<Float>(src[next &+ x &- 1], src[next &+ x], src[next &+ x &+ 1], src[next &+ x &+ 2])
+                        let b  = SIMD4<Float>(src[next &+ x], src[next &+ x &+ 1], src[next &+ x &+ 2], src[next &+ x &+ 3])
+                        let br = SIMD4<Float>(src[next &+ x &+ 1], src[next &+ x &+ 2], src[next &+ x &+ 3], src[next &+ x &+ 4])
+                        let gx = (tr + two * r + br) - (tl + two * l + bl)
+                        let gy = (bl + two * b + br) - (tl + two * t + tr)
+                        let mag = (gx * gx + gy * gy).squareRoot() * quarter
+                        dst[row &+ x] = mag[0]
+                        dst[row &+ x &+ 1] = mag[1]
+                        dst[row &+ x &+ 2] = mag[2]
+                        dst[row &+ x &+ 3] = mag[3]
+                        x &+= 4
+                    }
+                    while x < width - 1 {
+                        let tl = src[prev &+ x &- 1]
+                        let t  = src[prev &+ x]
+                        let tr = src[prev &+ x &+ 1]
+                        let l  = src[row &+ x &- 1]
+                        let r  = src[row &+ x &+ 1]
+                        let bl = src[next &+ x &- 1]
+                        let b  = src[next &+ x]
+                        let br = src[next &+ x &+ 1]
+                        let gx = (tr + 2 * r + br) - (tl + 2 * l + bl)
+                        let gy = (bl + 2 * b + br) - (tl + 2 * t + tr)
+                        dst[row &+ x] = (gx * gx + gy * gy).squareRoot() * 0.25
+                        x &+= 1
+                    }
+                }
             }
         }
         return magnitudes
@@ -811,13 +974,19 @@ enum QualityGates {
         guard width == candidate.width, height == candidate.height,
               width >= 3, height >= 3, !refMagnitudes.isEmpty else { return nil }
         let candMag = sobelMagnitudes(candidate.luma, width: width, height: height)
-        guard refMagnitudes.count == candMag.count else { return nil }
+        let n = refMagnitudes.count
+        guard n == candMag.count else { return nil }
         var sum = 0.0
-        for i in 0..<refMagnitudes.count {
-            let introduced = Double(candMag[i]) - Double(refMagnitudes[i])
-            if introduced > 0 { sum += introduced }
+        refMagnitudes.withUnsafeBufferPointer { rp in
+            candMag.withUnsafeBufferPointer { cp in
+                guard let r = rp.baseAddress, let c = cp.baseAddress else { return }
+                for i in 0..<n {
+                    let introduced = Double(c[i]) - Double(r[i])
+                    if introduced > 0 { sum += introduced }
+                }
+            }
         }
-        return sum / Double(refMagnitudes.count) / 255.0
+        return sum / Double(n) / 255.0
     }
 
     // MARK: Text-Kacheln
@@ -1029,13 +1198,185 @@ enum QualityGates {
         return count > 0 ? sum / Double(count) : 0
     }
 
+    /// Baut den Referenz-Farbcache EINMAL pro Bild für alle JPEG-Kandidaten.
+    private static func buildColorReferenceCache(for reference: Sample) -> ColorReferenceCache {
+        let w = reference.width, h = reference.height
+        let pixels = w * h
+        let rgbaA = reference.rgba
+        var histogram = [Int](repeating: 0, count: 256)
+        var sourceChroma = [UInt8](repeating: 0, count: pixels)
+        rgbaA.withUnsafeBufferPointer { rp in
+            sourceChroma.withUnsafeMutableBufferPointer { cp in
+                guard let base = rp.baseAddress, let cBase = cp.baseAddress else { return }
+                for i in 0..<pixels {
+                    let o = i &* 4
+                    let r = base[o], g = base[o &+ 1], b = base[o &+ 2]
+                    let c = max(r, max(g, b)) &- min(r, min(g, b))
+                    cBase[i] = c
+                    histogram[Int(c)] &+= 1
+                }
+            }
+        }
+        let wanted = max(1, pixels / 100)
+        var threshold = 255
+        var covered = 0
+        while threshold > peakMinimumChroma {
+            covered += histogram[threshold]
+            if covered >= wanted { break }
+            threshold -= 1
+        }
+        var meanLabs: [(Double, Double, Double)] = []
+        meanLabs.reserveCapacity(((w + 1) / 2) * ((h + 1) / 2))
+        var peakPixels: [ColorReferenceCache.PeakPixel] = []
+        peakPixels.reserveCapacity(max(64, covered))
+        rgbaA.withUnsafeBufferPointer { rp in
+            sourceChroma.withUnsafeBufferPointer { cp in
+                guard let base = rp.baseAddress, let cBase = cp.baseAddress else { return }
+                var y = 0
+                while y < h {
+                    var x = 0
+                    while x < w {
+                        let o = (y &* w &+ x) &* 4
+                        meanLabs.append(lab(r: base[o], g: base[o &+ 1], b: base[o &+ 2]))
+                        x &+= 2
+                    }
+                    y &+= 2
+                }
+                for y in 0..<h {
+                    let row = y &* w
+                    for x in 0..<w {
+                        let i = row &+ x
+                        guard Int(cBase[i]) >= threshold else { continue }
+                        let o = i &* 4
+                        let l = lab(r: base[o], g: base[o &+ 1], b: base[o &+ 2])
+                        let energy = l.1 * l.1 + l.2 * l.2
+                        peakPixels.append(.init(
+                            x: x, y: y, index: i,
+                            l: l.0, a: l.1, b: l.2,
+                            energy: energy, strength: energy.squareRoot()))
+                    }
+                }
+            }
+        }
+        return ColorReferenceCache(peakThreshold: threshold,
+                                   meanLabs: meanLabs,
+                                   peakPixels: peakPixels,
+                                   sourceChroma: sourceChroma)
+    }
+
+    private static func meanDeltaE76(reference: Sample, candidate: Sample,
+                                     cache: ColorReferenceCache) -> Double {
+        let w = reference.width, h = reference.height
+        let labs = cache.meanLabs
+        var sum = 0.0
+        var idx = 0
+        candidate.rgba.withUnsafeBufferPointer { bp in
+            guard let base = bp.baseAddress else { return }
+            var y = 0
+            while y < h {
+                var x = 0
+                while x < w {
+                    let o = (y &* w &+ x) &* 4
+                    let labA = labs[idx]
+                    let labB = lab(r: base[o], g: base[o &+ 1], b: base[o &+ 2])
+                    let dl = labA.0 - labB.0
+                    let da = labA.1 - labB.1
+                    let db = labA.2 - labB.2
+                    sum += (dl * dl + da * da + db * db).squareRoot()
+                    idx &+= 1
+                    x &+= 2
+                }
+                y &+= 2
+            }
+        }
+        guard idx > 0 else { return 0 }
+        return sum / Double(idx)
+    }
+
+    private static func peakDeltaE76(reference: Sample, candidate: Sample,
+                                     cache: ColorReferenceCache) -> Double {
+        let pixels = reference.width * reference.height
+        guard pixels > 0, reference.rgba.count >= pixels * 4,
+              candidate.rgba.count >= pixels * 4 else { return 0 }
+        let threshold = cache.peakThreshold
+        var sum = 0.0
+        var count = 0
+        reference.rgba.withUnsafeBufferPointer { ap in
+            candidate.rgba.withUnsafeBufferPointer { bp in
+                cache.sourceChroma.withUnsafeBufferPointer { cp in
+                    guard let aBase = ap.baseAddress,
+                          let bBase = bp.baseAddress,
+                          let cBase = cp.baseAddress else { return }
+                    for p in cache.peakPixels {
+                        let o = p.index &* 4
+                        let labB = lab(r: bBase[o], g: bBase[o &+ 1], b: bBase[o &+ 2])
+                        let dl = p.l - labB.0, da = p.a - labB.1, db = p.b - labB.2
+                        sum += (dl * dl + da * da + db * db).squareRoot()
+                        count &+= 1
+                    }
+                    // N26/N32: Neu entstandene Farbe im Kandidaten ebenfalls prüfen.
+                    for i in 0..<pixels {
+                        let sc = Int(cBase[i])
+                        guard sc < peakMinimumChroma else { continue }
+                        let o = i &* 4
+                        let rb = bBase[o], gb = bBase[o &+ 1], bb = bBase[o &+ 2]
+                        let cc = Int(max(rb, max(gb, bb)) &- min(rb, min(gb, bb)))
+                        guard cc >= threshold, cc - sc >= peakMinimumChroma else { continue }
+                        let labA = lab(r: aBase[o], g: aBase[o &+ 1], b: aBase[o &+ 2])
+                        let labB = lab(r: rb, g: gb, b: bb)
+                        let dl = labA.0 - labB.0, da = labA.1 - labB.1, db = labA.2 - labB.2
+                        sum += (dl * dl + da * da + db * db).squareRoot()
+                        count &+= 1
+                    }
+                }
+            }
+        }
+        return count > 0 ? sum / Double(count) : 0
+    }
+
+    private static func peakChromaRetention(reference: Sample, candidate: Sample,
+                                            cache: ColorReferenceCache) -> Double? {
+        let w = reference.width, h = reference.height
+        let pixels = w * h
+        guard pixels > 0, candidate.width == w, candidate.height == h,
+              candidate.rgba.count >= pixels * 4 else { return nil }
+        var kept = 0.0
+        var total = 0.0
+        candidate.rgba.withUnsafeBufferPointer { bp in
+            guard let bBase = bp.baseAddress else { return }
+            for p in cache.peakPixels {
+                guard p.energy > 0 else { continue }
+                var best = 0.0
+                let y0 = max(0, p.y - 1), y1 = min(h - 1, p.y + 1)
+                let x0 = max(0, p.x - 1), x1 = min(w - 1, p.x + 1)
+                for ny in y0...y1 {
+                    let row = ny &* w
+                    for nx in x0...x1 {
+                        let n = (row &+ nx) &* 4
+                        let labB = lab(r: bBase[n], g: bBase[n &+ 1], b: bBase[n &+ 2])
+                        let da = p.a - labB.1, db = p.b - labB.2
+                        let score = 1 - (da * da + db * db).squareRoot() / p.strength
+                        if score > best { best = score }
+                    }
+                }
+                kept += best * p.energy
+                total += p.energy
+            }
+        }
+        return total > 0 ? kept / total : nil
+    }
+
+    /// 256-Werte-LUT für sRGB → Linear (spart 3× `pow(..., 2.4)` pro Pixel).
+    private static let sRGBToLinear: [Double] = (0..<256).map { v in
+        let c = Double(v) / 255.0
+        return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+    }
+
     /// sRGB-Byte-Tripel → CIELAB (D65, 2°).
     private static func lab(r: UInt8, g: UInt8, b: UInt8) -> (Double, Double, Double) {
-        func linear(_ v: UInt8) -> Double {
-            let c = Double(v) / 255.0
-            return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
-        }
-        let rl = linear(r), gl = linear(g), bl = linear(b)
+        let rl = sRGBToLinear[Int(r)]
+        let gl = sRGBToLinear[Int(g)]
+        let bl = sRGBToLinear[Int(b)]
         var x = (0.4124564 * rl + 0.3575761 * gl + 0.1804375 * bl) / 0.95047
         var y = 0.2126729 * rl + 0.7151522 * gl + 0.0721750 * bl
         var z = (0.0193339 * rl + 0.1191920 * gl + 0.9503041 * bl) / 1.08883
@@ -1045,20 +1386,17 @@ enum QualityGates {
     }
 
     private static func labF(_ t: Double) -> Double {
-        // Epsilon/Kappa der CIE-Definition.
-        t > 0.008856 ? pow(t, 1.0 / 3.0) : (7.787 * t) + (16.0 / 116.0)
+        // Epsilon/Kappa der CIE-Definition (`cbrt` ist ~6× schneller als `pow(_, 1/3)`).
+        t > 0.008856 ? cbrt(t) : (7.787 * t) + (16.0 / 116.0)
     }
 
     /// PSNR auf der Luminanz-Stichprobe (Debug-Metrik). Identische Bilder
     /// werden bei 96 dB gekappt.
     static func psnr(reference a: [Float], candidate b: [Float]) -> Double {
         guard a.count == b.count, !a.isEmpty else { return 0 }
-        var mse = 0.0
-        for i in 0..<a.count {
-            let d = Double(a[i] - b[i])
-            mse += d * d
-        }
-        mse /= Double(a.count)
+        var sumSq: Float = 0
+        vDSP_distancesq(a, 1, b, 1, &sumSq, vDSP_Length(a.count))
+        let mse = Double(sumSq) / Double(a.count)
         guard mse > 0 else { return 96.0 }
         return min(96.0, 10 * log10(255 * 255 / mse))
     }

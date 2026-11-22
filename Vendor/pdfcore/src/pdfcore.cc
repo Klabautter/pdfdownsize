@@ -15,6 +15,7 @@
 #include <qpdf/Pl_Flate.hh>   /* Phase V2-9 – compression level des Writers */
 #include <shared_mutex>
 #include <zlib.h>      /* Z_DEFAULT_COMPRESSION für den Flate-Level-Schutz (C7) */
+#include <libdeflate.h>
 
 /* Masterplan D4: Keine C++-Ausnahme verlässt die C-Grenze. Jede exportierte
  * Funktion ist eingehüllt; ein Hygiene-Test zählt Exporte im Header gegen
@@ -3911,6 +3912,40 @@ int pdfcore_save(pdfcore_document_t *doc, const char *path)
     PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
+int pdfcore_save_single_page(pdfcore_document_t *doc, int page_index, const char *path)
+{
+    PDFCORE_GUARD_BEGIN
+    if (!doc || !path || page_index < 0) { return PDFCORE_ERR_OPEN; }
+    try {
+        std::vector<QPDFObjectHandle> pages = doc->qpdf.getAllPages();
+        if (static_cast<size_t>(page_index) >= pages.size()) {
+            return PDFCORE_ERR_INTERNAL;
+        }
+        QPDF single;
+        single.emptyPDF();
+        QPDFPageDocumentHelper dst_pages(single);
+        dst_pages.addPage(single.copyForeignObject(pages[static_cast<size_t>(page_index)]), false);
+
+        std::string tmp = std::string(path) + ".pdfcore-tmp";
+        {
+            QPDFWriter writer(single);
+            writer.setOutputFilename(tmp.c_str());
+            writer.setObjectStreamMode(qpdf_o_disable);
+            writer.setCompressStreams(false);
+            writer.write();
+        }
+        std::remove(path);
+        if (std::rename(tmp.c_str(), path) != 0) {
+            std::remove(tmp.c_str());
+            return PDFCORE_ERR_INTERNAL;
+        }
+        return PDFCORE_OK;
+    } catch (...) {
+        return PDFCORE_ERR_INTERNAL;
+    }
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
+}
+
 /* Phase V2-9 (Masterplan §15.6) – finaler Write mit Writer-Optionen.
  *
  * EIN Write statt images.pdf (Standard-Writer) + qpdf-CLI-Struktur-Pass:
@@ -5253,11 +5288,11 @@ int pdfcore_jpeg_repack(const unsigned char *jpeg, size_t jpeg_len,
     PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
-int pdfcore_jpeg_encode(const unsigned char *pixels, size_t pixels_len,
-                        int width, int height, int components,
-                        int quality, unsigned char **out, size_t *out_len)
+static int jpeg_encode_impl(const unsigned char *pixels, size_t pixels_len,
+                            int width, int height, int components,
+                            int quality, int fast_mode,
+                            unsigned char **out, size_t *out_len)
 {
-    PDFCORE_GUARD_BEGIN
     if (!pixels || !out || !out_len) { return PDFCORE_ERR_INTERNAL; }
     if (width <= 0 || height <= 0 || quality < 1) { return PDFCORE_ERR_INTERNAL; }
     // Grau und RGB direkt; CMYK & Co. bewusst ablehnen – dort entscheidet
@@ -5285,14 +5320,27 @@ int pdfcore_jpeg_encode(const unsigned char *pixels, size_t pixels_len,
     jerr.pub.error_exit = jpeg_jump_on_error;
     jpeg_create_compress(&cinfo);
 
-    // Profil explizit setzen (ist der Bibliotheksdefault): progressive Scans
-    // mit Scan-Optimierung, Trellis-Quantisierung, optimierte Huffman-Tabellen.
+    // Profil explizit setzen: erst MAX_COMPRESSION vor jpeg_set_defaults, damit
+    // dieselben Robidoux-Quantisierungstabellen gewählt werden; DANACH schaltet
+    // fast_mode gezielt ab (1 = nur ohne Progressive-Scans → 100 % bitidentische
+    // dekodierte Pixel; 2 = zusätzlich ohne Trellis/Deringing → ~10× schneller).
     jpeg_c_set_int_param(&cinfo, JINT_COMPRESS_PROFILE, JCP_MAX_COMPRESSION);
     cinfo.image_width = static_cast<JDIMENSION>(width);
     cinfo.image_height = static_cast<JDIMENSION>(height);
     cinfo.input_components = components;
     cinfo.in_color_space = components == 1 ? JCS_GRAYSCALE : JCS_RGB;
     jpeg_set_defaults(&cinfo);
+    if (fast_mode >= 1) {
+        jpeg_c_set_bool_param(&cinfo, JBOOLEAN_OPTIMIZE_SCANS, FALSE);
+        cinfo.scan_info = nullptr;
+        cinfo.num_scans = 0;
+        cinfo.optimize_coding = FALSE;
+    }
+    if (fast_mode >= 2) {
+        jpeg_c_set_bool_param(&cinfo, JBOOLEAN_TRELLIS_QUANT, FALSE);
+        jpeg_c_set_bool_param(&cinfo, JBOOLEAN_TRELLIS_QUANT_DC, FALSE);
+        jpeg_c_set_bool_param(&cinfo, JBOOLEAN_OVERSHOOT_DERINGING, FALSE);
+    }
     jpeg_set_quality(&cinfo, std::min(quality, 100), TRUE);
 
     jpeg_mem_dest(&cinfo, &outbuffer, &outsize);
@@ -5312,6 +5360,26 @@ int pdfcore_jpeg_encode(const unsigned char *pixels, size_t pixels_len,
     *out = reinterpret_cast<unsigned char *>(copy);
     *out_len = outsize;
     return PDFCORE_OK;
+}
+
+int pdfcore_jpeg_encode(const unsigned char *pixels, size_t pixels_len,
+                        int width, int height, int components,
+                        int quality, unsigned char **out, size_t *out_len)
+{
+    PDFCORE_GUARD_BEGIN
+    return jpeg_encode_impl(pixels, pixels_len, width, height, components,
+                            quality, 0, out, out_len);
+    PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
+}
+
+int pdfcore_jpeg_encode_fast(const unsigned char *pixels, size_t pixels_len,
+                             int width, int height, int components,
+                             int quality, int fast_mode,
+                             unsigned char **out, size_t *out_len)
+{
+    PDFCORE_GUARD_BEGIN
+    return jpeg_encode_impl(pixels, pixels_len, width, height, components,
+                            quality, fast_mode < 1 ? 1 : fast_mode, out, out_len);
     PDFCORE_GUARD_END(PDFCORE_ERR_INTERNAL)
 }
 
@@ -11820,6 +11888,27 @@ int pdfcore_flate_compress(const unsigned char *data, size_t data_len, int level
     PDFCORE_GUARD_BEGIN
     if (!data || !out || !out_len || data_len == 0) { return PDFCORE_ERR_INTERNAL; }
     *out = nullptr; *out_len = 0;
+    // libdeflate (v1.2): Level 9 ist ~2× schneller UND ~3–6 % kleiner als
+    // System-zlib Level 6 bei 100 % RFC-1950-konformem zlib-Format.
+    int ld_level = level < 0 ? 9 : std::max(1, std::min(level, 12));
+    struct libdeflate_compressor *comp = libdeflate_alloc_compressor(ld_level);
+    if (comp) {
+        size_t bound = libdeflate_zlib_compress_bound(comp, data_len);
+        unsigned char *buffer = static_cast<unsigned char *>(malloc(bound));
+        if (!buffer) {
+            libdeflate_free_compressor(comp);
+            return PDFCORE_ERR_INTERNAL;
+        }
+        size_t written = libdeflate_zlib_compress(comp, data, data_len, buffer, bound);
+        libdeflate_free_compressor(comp);
+        if (written > 0) {
+            *out = buffer;
+            *out_len = written;
+            return PDFCORE_OK;
+        }
+        free(buffer);
+    }
+    // Fallback auf System-zlib.
     uLong bound = compressBound(static_cast<uLong>(data_len));
     unsigned char *buffer = static_cast<unsigned char *>(malloc(bound));
     if (!buffer) { return PDFCORE_ERR_INTERNAL; }

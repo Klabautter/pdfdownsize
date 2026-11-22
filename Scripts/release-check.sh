@@ -51,7 +51,7 @@ fi
 for f in LICENSE-qpdf.txt NOTICE-qpdf.md \
     LICENSE-libjpeg-mozjpeg.md LICENSE-zopfli.txt LICENSE-mozjpeg.md \
     NOTICE-mozjpeg.md NOTICE-jbig2enc.md NOTICE-libtiff.md \
-    NOTICE-openjpeg.md NOTICE-harfbuzz.md; do
+    NOTICE-openjpeg.md NOTICE-harfbuzz.md NOTICE-libdeflate.md; do
     check "Lizenz gebündelt: $f" test -s "$APP/Contents/Resources/ReleaseEvidence/$f"
 done
 

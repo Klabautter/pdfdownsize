@@ -39,6 +39,7 @@ vendor_source() {
         jbig2enc-23f992c92b10048064602b4d8ea29bb434752634.tar.gz) echo "https://github.com/agl/jbig2enc/archive/23f992c92b10048064602b4d8ea29bb434752634.tar.gz 5c4c9d929009e17fe31f884b179598096acde6f81462c7a1a5c0a5daeddf709f" ;;
         openjpeg-2.5.4.tar.gz) echo "https://github.com/uclouvain/openjpeg/archive/refs/tags/v2.5.4.tar.gz a695fbe19c0165f295a8531b1e4e855cd94d0875d2f88ec4b61080677e27188a" ;;
         harfbuzz-11.5.1.tar.xz) echo "https://github.com/harfbuzz/harfbuzz/releases/download/11.5.1/harfbuzz-11.5.1.tar.xz 972a60a8d274d49e70361da6920c3a73dfb0fb4387f6c6811906a47ba634d8a1" ;;
+        libdeflate-1.25.tar.gz) echo "https://github.com/ebiggers/libdeflate/archive/refs/tags/v1.25.tar.gz d11473c1ad4c57d874695e8026865e38b47116bbcb872bfc622ec8f37a86017d" ;;
         *) return 1 ;;
     esac
 }

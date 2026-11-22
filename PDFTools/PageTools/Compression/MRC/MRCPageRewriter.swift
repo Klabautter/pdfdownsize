@@ -78,14 +78,15 @@ enum MRCPageQA {
 
     /// Rendert Quelle und MRC-Ausgabe je Seite einmal und misst Seiten-QA.
     /// nil heißt: nicht messbar (Renderfehler) – der Kandidat gilt als
-    /// durchgefallen.
+    /// durchgefallen. `outputPageIndex` erlaubt 1-Seiten-Scratch-PDFs (Seite 0).
     static func measure(sourceURL: URL, outputURL: URL,
-                        pageIndex: Int) -> MRCPageQuality? {
+                        pageIndex: Int,
+                        outputPageIndex: Int? = nil) -> MRCPageQuality? {
         autoreleasepool {
             guard let source = PDFDocument(url: sourceURL),
                   let output = PDFDocument(url: outputURL),
                   let sourcePage = source.page(at: pageIndex),
-                  let outputPage = output.page(at: pageIndex) else {
+                  let outputPage = output.page(at: outputPageIndex ?? pageIndex) else {
                 return nil
             }
 
@@ -131,7 +132,7 @@ enum MRCPageQA {
             if let census = ChromaCensus.of(sourceImage), !census.isNeutral,
                let fineSource = QualityGates.sample(sourceImage, maxEdge: colorMeasurementEdge,
                                                     census: census),
-               let fineOutput = QualityGates.sample(outputImage, maxEdge: colorMeasurementEdge),
+               let fineOutput = QualityGates.sample(outputImage, maxEdge: colorMeasurementEdge, census: .neutral),
                fineSource.width == fineOutput.width, fineSource.height == fineOutput.height {
                 peakDeltaE = QualityGates.peakDeltaE76(reference: fineSource, candidate: fineOutput)
             }
@@ -140,15 +141,22 @@ enum MRCPageQA {
             var totalDiff = 0
             var inkSource = 0
             var inkOutput = 0
-            for i in 0..<lumaSource.count {
-                let a = Int(lumaSource[i])
-                let b = Int(lumaOutput[i])
-                if abs(a - b) > 15 { changed += 1 }   // Anti-Aliasing-Toleranz
-                totalDiff += abs(a - b)
-                if a < 128 { inkSource += 1 }
-                if b < 128 { inkOutput += 1 }
+            let n = lumaSource.count
+            lumaSource.withUnsafeBufferPointer { sp in
+                lumaOutput.withUnsafeBufferPointer { op in
+                    guard let sBase = sp.baseAddress, let oBase = op.baseAddress else { return }
+                    for i in 0..<n {
+                        let a = Int(sBase[i])
+                        let b = Int(oBase[i])
+                        let d = abs(a &- b)
+                        if d > 15 { changed &+= 1 }
+                        totalDiff &+= d
+                        if a < 128 { inkSource &+= 1 }
+                        if b < 128 { inkOutput &+= 1 }
+                    }
+                }
             }
-            let total = max(lumaSource.count, 1)
+            let total = max(n, 1)
             return MRCPageQuality(
                 globalSSIM: measurement.globalSSIM,
                 p05TileSSIM: measurement.p05TileSSIM,
@@ -177,12 +185,16 @@ enum MRCPageQA {
         else { return nil }
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         guard let data = ctx.data else { return nil }
-        let px = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
-        var luma = [UInt8](repeating: 0, count: w * h)
-        for i in 0..<(w * h) {
-            let o = i * 4
-            luma[i] = UInt8(clamping: (299 * Int(px[o]) + 587 * Int(px[o + 1])
-                                       + 114 * Int(px[o + 2])) / 1000)
+        let count = w * h
+        let px = data.bindMemory(to: UInt8.self, capacity: count * 4)
+        var luma = [UInt8](repeating: 0, count: count)
+        luma.withUnsafeMutableBufferPointer { lp in
+            guard let dst = lp.baseAddress else { return }
+            for i in 0..<count {
+                let o = i &* 4
+                dst[i] = UInt8((299 &* Int(px[o]) &+ 587 &* Int(px[o &+ 1])
+                                &+ 114 &* Int(px[o &+ 2])) / 1000)
+            }
         }
         return luma
     }
@@ -228,7 +240,9 @@ enum MRCPageRewriter {
     /// parallel läuft reine Pixel-/Renderarbeit – Muster wie der
     /// Pixel-Budget-Scheduler des Planners (dort Cap 8, hier 4: Die
     /// Scratch-QA rendert je Stufe zweimal via PDFKit).
-    static let provisionConcurrency = 4
+    static var provisionConcurrency: Int {
+        max(4, min(6, ProcessInfo.processInfo.activeProcessorCount - 2))
+    }
     /// Masterplan C5: Arbeitsspeicher der Segmentierung je Rasterpixel
     /// (Luminanz, Chroma, Kanten, Sauvola-Integrale, Maske, Hintergrund).
     static let segmentationBytesPerPixel: Int64 = 26
@@ -583,7 +597,8 @@ enum MRCPageRewriter {
                                  candidates: candidates)
     }
 
-    /// Seiten-QA anhand eines temporär rekonstruierten Dokuments.
+    /// Seiten-QA anhand einer temporär rekonstruierten 1-Seiten-PDF (vermeidet
+    /// O(N²)-I/O auf mehrseitigen Scans, indem nur die geprüfte Seite geschrieben wird).
     static func renderQuality(inputURL: URL,
                                       pageIndex: Int,
                                       objectID: PDFObjectID,
@@ -598,12 +613,12 @@ enum MRCPageRewriter {
             let scratch = try PDFCoreDocument(path: inputURL.path)
             try applyBundle(scratch, pageIndex: pageIndex, descriptor: descriptor,
                             bundle: bundle)
-            try scratch.save(to: outputURL)
+            try scratch.saveSinglePage(pageIndex: pageIndex, to: outputURL)
         } catch {
             return nil   // Rekonstruktion verweigert → kein MRC-Kandidat
         }
         return MRCPageQA.measure(sourceURL: inputURL, outputURL: outputURL,
-                                 pageIndex: pageIndex)
+                                 pageIndex: pageIndex, outputPageIndex: 0)
     }
 
     /// §13.8-Deskriptor inkl. aller Ausführungsfelder.

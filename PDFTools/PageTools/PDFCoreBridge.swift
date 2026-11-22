@@ -331,6 +331,14 @@ final class PDFCoreDocument: @unchecked Sendable {
         guard rc == PDFCORE_OK.rawValue else { throw PDFCoreError.internalError }
     }
 
+    /// Schreibt NUR eine einzelne Seite in eine temporäre 1-Seiten-PDF
+    /// (ohne Neukomprimierung) – vermeidet O(N²)-I/O in der MRC-Seiten-QA.
+    func saveSinglePage(pageIndex: Int, to url: URL) throws {
+        gate.lock(); defer { gate.unlock() }
+        let rc = pdfcore_save_single_page(handle, Int32(pageIndex), url.path)
+        guard rc == PDFCORE_OK.rawValue else { throw PDFCoreError.internalError }
+    }
+
     /// OCR-Textebene als eigenen Content-Stream an die Seite hängen
     /// (`pdfcore_append_ocr_layer`: bestehender Inhalt in q … Q, Font
     /// /PDFToolsOCR = Helvetica/WinAnsi).

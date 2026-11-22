@@ -141,15 +141,28 @@ enum BracketedJPEGSearch {
                     perceptualLimitIsGate: Bool = false) -> [JPEGSearchRung] {
         let evaluator = makeEvaluator(reference: reference, sourceSample: sourceSample)
         let prepared = JPEGEncoder.preparePixels(reference)
-        let evaluateOne: @Sendable (Double) -> JPEGSearchRung? = { quality in
+        // Zweistufige MozJPEG-Suche (v1.2): Ab 0,5 MP dominiert MozJPEG-Trellis
+        // die Laufzeit. Die Bisektion fährt schnelle Basis-Scans mit identischen
+        // Robidoux-Tabellen (`.fastSearch`, ~10× schneller); nur der gefundene
+        // Gewinner wird mit vollem Trellis + Progressive endkodiert und echt
+        // gegen Gate + Anker verifiziert. Unter 0,5 MP ist der direkte Volllauf
+        // schneller und vermeidet knappe Bisektionsabweichungen an Kleingrafiken.
+        let useFastSearch: Bool = {
+            guard backend == .mozjpeg, prepared != nil,
+                  reference.width * reference.height >= 500_000,
+                  case .bracketed(let low, let high, _, _, _) = policy,
+                  max(low, high) > min(low, high) else { return false }
+            return true
+        }()
+        let evaluateWithMode: @Sendable (Double, JPEGEncoder.MozjpegMode) -> JPEGSearchRung? = { quality, mode in
             let start = ContinuousClock.now
             guard let (data, decoded, comparison) = encodeAndCompare(
                 reference, quality: quality, backend: backend,
-                prepared: prepared, evaluator: evaluator) else { return nil }
-            let measurement = comparison.flatMap { evaluator.measure(candidate: $0) }
-            // Perzeptueller Score aus derselben Messung + Kanten-Einführung
-            // (eine zusätzliche Kandidaten-Stichprobe je Rung).
-            let edgeIntro = comparison.flatMap { evaluator.edgeIntroduction(candidate: $0) }
+                prepared: prepared, evaluator: evaluator,
+                mozjpegMode: mode) else { return nil }
+            let evaluated = comparison.map { evaluator.measureWithEdgeIntroduction(candidate: $0) }
+            let measurement = evaluated?.measurement
+            let edgeIntro = evaluated?.edgeIntroduction
             let perceptual = measurement.map {
                 PerceptualScore.score(measurement: $0,
                                       edgeIntroduction: edgeIntro)
@@ -184,13 +197,14 @@ enum BracketedJPEGSearch {
                                   runtimeMs: stageMs(since: start))
         }
 
+        let evaluateOne: @Sendable (Double) -> JPEGSearchRung? = { quality in
+            evaluateWithMode(quality, useFastSearch ? .fastSearch : .full)
+        }
+
         // Vorausrechnen (2026-10-13): Die Suche fragt ihre Qualitätsstufen
         // nacheinander ab. Sind Kerne frei (`ParallelWork.Slots`), werden
         // die Stufen, die sie als Nächstes brauchen KANN, gleichzeitig
-        // gerechnet und bereitgelegt. Welche Stufen in die Suche eingehen
-        // und in welcher Reihenfolge, entscheidet weiter allein
-        // `run(policy:evaluate:)` – das Ergebnis ist dasselbe wie ohne
-        // Vorausrechnen; nicht gebrauchte Stufen werden verworfen.
+        // gerechnet und bereitgelegt.
         guard case .bracketed(let low, let high, _, _, _) = policy,
               max(low, high) > min(low, high) else {
             return run(policy: policy, evaluate: evaluateOne)
@@ -207,7 +221,7 @@ enum BracketedJPEGSearch {
             for (quality, result) in zip(missing, results) { ready[quality.bitPattern] = result }
         }
         let firstMid = (qLow + qHigh) / 2
-        return run(policy: policy) { quality in
+        let searched = run(policy: policy) { quality in
             if ready[quality.bitPattern] == nil {
                 if quality == qHigh {
                     precompute([qHigh, qLow])
@@ -219,6 +233,45 @@ enum BracketedJPEGSearch {
             if let known = ready[quality.bitPattern] { return known }
             return evaluateOne(quality)
         }
+        guard useFastSearch else { return searched }
+        // Gewinner mit vollem Trellis + Progressive kodieren und echt am Gate
+        // prüfen. Scheitert ein knapper Grenzfall unter Trellis, nähern wir uns
+        // gezielt in kleinen Schritten (+0,015, Mittelpunkt, qHigh) statt direkt
+        // auf qHigh zu springen – so bleibt die Dateigröße auf v1.1.0-Niveau.
+        let safePassed = searched.filter {
+            $0.passed && ($0.perceptualScore ?? 0) <= PerceptualScore.catastrophicLimit
+        }
+        guard let bestFast = winner(in: safePassed) ?? winner(in: searched) else {
+            return searched
+        }
+        let needsSafeScore = !safePassed.isEmpty
+        func isAcceptable(_ rung: JPEGSearchRung) -> Bool {
+            rung.passed && (!needsSafeScore || (rung.perceptualScore ?? 0) <= PerceptualScore.catastrophicLimit)
+        }
+        let failedSearched = searched.filter { !$0.passed }
+        var finalized: [JPEGSearchRung] = []
+        if let finalWinner = evaluateWithMode(bestFast.quality, .full) {
+            finalized.append(finalWinner)
+            if isAcceptable(finalWinner) { return failedSearched + finalized }
+        }
+        var probeQ = min(qHigh, bestFast.quality + 0.015)
+        if probeQ > bestFast.quality + 0.001,
+           let step1 = evaluateWithMode(probeQ, .full) {
+            finalized.append(step1)
+            if isAcceptable(step1) { return failedSearched + finalized }
+        }
+        let midQ = (probeQ + qHigh) / 2
+        if midQ > probeQ + 0.005, midQ < qHigh - 0.005,
+           let step2 = evaluateWithMode(midQ, .full) {
+            finalized.append(step2)
+            if isAcceptable(step2) { return failedSearched + finalized }
+            probeQ = midQ
+        }
+        if qHigh > probeQ + 0.001,
+           let top = evaluateWithMode(qHigh, .full) {
+            finalized.append(top)
+        }
+        return failedSearched + finalized
     }
 
     /// Smart-Anker (Vertrag 2026-09-29): Jede Stufe muss bei normaler
@@ -270,7 +323,7 @@ enum BracketedJPEGSearch {
                 ? decoded
                 : ImageResampler.resize(decoded, to: size, components: 3)
             return onRaster
-                .flatMap { QualityGates.sample($0, maxEdge: max(size.width, size.height)) }
+                .flatMap { QualityGates.sample($0, maxEdge: max(size.width, size.height), census: .neutral) }
                 .flatMap { QualityGates.structuralScores(reference: reference, candidate: $0) }
         }
     }
@@ -289,10 +342,12 @@ enum BracketedJPEGSearch {
     private static func encodeAndCompare(_ reference: CGImage, quality: Double,
                                          backend: JPEGBackend,
                                          prepared: JPEGEncoder.PreparedPixels?,
-                                         evaluator: QualityGates.Evaluator)
+                                         evaluator: QualityGates.Evaluator,
+                                         mozjpegMode: JPEGEncoder.MozjpegMode = .full)
         -> (data: Data, decoded: CGImage, comparison: CGImage?)? {
         guard let data = ImageResampler.encodeJPEG(reference, quality: quality,
-                                                   backend: backend, prepared: prepared),
+                                                   backend: backend, prepared: prepared,
+                                                   mozjpegMode: mozjpegMode),
               let decoded = ImageResampler.decodeJPEG(data) else { return nil }
         let comparison = ImageResampler.resize(decoded,
             to: PixelSize(width: evaluator.reference.width,
@@ -1972,8 +2027,10 @@ enum CandidateGenerator {
             let maxEdge = min(BracketedJPEGSearch.AnchorCheck.sampleEdge,
                               targetEdge,
                               viewingEdge ?? targetEdge)
+            // StructuralReference nutzt nur Luminanz – ChromaCensus entfällt hier.
             guard let fineSample = CandidateGenerator.referenceSample(
-                      original: source, target: target, maxEdge: maxEdge),
+                      original: source, target: target, maxEdge: maxEdge,
+                      includeCensus: false),
                   let reference = ImageResampler.resize(targetImage, to: target,
                                                         grayscale: grayscale)
             else { return nil }
@@ -2483,7 +2540,8 @@ extension CandidateGenerator {
     /// Kacheln blieben im Original). So unterscheidet beide nur die Kodierung.
     static func referenceSample(original: CGImage, target: PixelSize?,
                                 maxEdge: Int? = nil,
-                                fine: Bool = false) -> QualityGates.Sample? {
+                                fine: Bool = false,
+                                includeCensus: Bool = true) -> QualityGates.Sample? {
         let edge = maxEdge ?? measurementEdge(target: target, fine: fine)
         var base = original
         if let target, target.width < original.width || target.height < original.height,
@@ -2496,7 +2554,8 @@ extension CandidateGenerator {
         else { return nil }
         // Grau/Farbe zählt auf dem Original (bis 1024 px), nicht auf dem
         // Messraster – dort verschwindet eine Unterschrift (Masterplan A1).
-        return QualityGates.sample(reduced, maxEdge: edge, census: ChromaCensus.of(original))
+        let census = includeCensus ? ChromaCensus.of(original) : ChromaCensus.neutral
+        return QualityGates.sample(reduced, maxEdge: edge, census: census)
     }
 }
 

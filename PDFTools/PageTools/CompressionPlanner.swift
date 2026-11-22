@@ -1256,9 +1256,8 @@ enum ImageResampler {
                           components: components)
     }
 
-    /// Flächenfilter: halbiert schrittweise (2×2-Mittelung über CoreGraphics
-    /// bei exakt halber Größe), der letzte Schritt ist kleiner als Faktor 2.
-    /// Box-Vorfilterung ohne Aliasing und ohne Überschwinger.
+    /// Flächenfilter: halbiert schrittweise, bis der letzte Schritt unter
+    /// Faktor 2 bleibt.
     private static func areaDownscale(_ image: CGImage, to size: PixelSize,
                                       components: Int) -> CGImage? {
         var current = image
@@ -1306,7 +1305,8 @@ enum ImageResampler {
 
     /// Zeichnet per CoreGraphics in einen frischen Kontext (weißer Grund).
     private static func drawResize(_ image: CGImage, to size: PixelSize,
-                                   components: Int) -> CGImage? {
+                                   components: Int,
+                                   interpolation: CGInterpolationQuality = .high) -> CGImage? {
         // N20: nach Grau über das Quellprofil; RGB-Ergebnisse tragen es weiter.
         let profile = sourceProfile(of: image)
         let image = components == 1 ? grayReady(image) : image
@@ -1330,7 +1330,7 @@ enum ImageResampler {
                                   bitsPerComponent: 8, bytesPerRow: 0,
                                   space: colorSpace,
                                   bitmapInfo: bitmapInfo) else { return nil }
-        ctx.interpolationQuality = .high
+        ctx.interpolationQuality = interpolation
         // Weißer Grund: Bilder ohne Alpha bleiben unverändert, Bilder mit
         // Alpha bekommen einen definierten Hintergrund statt Schwarz.
         // Bei CMYK ist Weiss (0,0,0,0) – der Kontext ist bereits genullt,
@@ -1353,8 +1353,9 @@ enum ImageResampler {
 
     /// Explizites Backend – für Presets und Tests, die ImageIO erzwingen.
     static func encodeJPEG(_ image: CGImage, quality: Double,
-                           backend: JPEGBackend) -> Data? {
-        JPEGEncoder.encode(image, quality: quality, backend: backend)
+                           backend: JPEGBackend,
+                           mozjpegMode: JPEGEncoder.MozjpegMode = .full) -> Data? {
+        JPEGEncoder.encode(image, quality: quality, backend: backend, mozjpegMode: mozjpegMode)
     }
 
     /// Variante mit vorbereitetem Pixelbuffer (V2-Maps-Perf): Die Bracketed
@@ -1364,9 +1365,10 @@ enum ImageResampler {
     /// Vorbereitung (gleiche Pixel in denselben Shim).
     static func encodeJPEG(_ image: CGImage, quality: Double,
                            backend: JPEGBackend,
-                           prepared: JPEGEncoder.PreparedPixels?) -> Data? {
+                           prepared: JPEGEncoder.PreparedPixels?,
+                           mozjpegMode: JPEGEncoder.MozjpegMode = .full) -> Data? {
         JPEGEncoder.encode(image, quality: quality, backend: backend,
-                           prepared: prepared)
+                           prepared: prepared, mozjpegMode: mozjpegMode)
     }
 
     /// Dekodiert und löst das Ergebnis von ImageIO (P0.3): Ein direkt von
@@ -1512,72 +1514,84 @@ enum ImageResampler {
         let rowBytes = width * components
         guard raw.count == rowBytes * height else { return nil }
 
-        let source = [UInt8](raw)
-        var output = [UInt8](repeating: 0,
-                             count: (rowBytes + 1) * height)
-        // Einmal allozieren und für jede Zeile wiederverwenden. Die frühere
-        // Fassung erzeugte vier Arrays plus Slices PRO ZEILE; bei grossen
-        // Scans war der Prädiktor dadurch unnötig teuer.
+        let outRowBytes = rowBytes + 1
+        var output = Data(count: outRowBytes * height)
         var candidates = [UInt8](repeating: 0, count: rowBytes * 5)
 
-        for row in 0..<height {
-            let start = row * rowBytes
-            let previousStart = start - rowBytes
-            var scores = [Int](repeating: 0, count: 5)
+        raw.withUnsafeBytes { rawBuf in
+            output.withUnsafeMutableBytes { outBuf in
+                candidates.withUnsafeMutableBufferPointer { candBuf in
+                    guard let src = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                          let dst = outBuf.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                          let cand = candBuf.baseAddress else { return }
+                    let c0 = cand
+                    let c1 = cand + rowBytes
+                    let c2 = cand + rowBytes * 2
+                    let c3 = cand + rowBytes * 3
+                    let c4 = cand + rowBytes * 4
 
-            for index in 0..<rowBytes {
-                let current = source[start + index]
-                let left = index >= components
-                    ? source[start + index - components] : 0
-                let up = row > 0 ? source[previousStart + index] : 0
-                let upperLeft = row > 0 && index >= components
-                    ? source[previousStart + index - components] : 0
+                    for row in 0..<height {
+                        let start = row &* rowBytes
+                        let prevStart = start &- rowBytes
+                        let hasPrev = row > 0
+                        var s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0
 
-                let values = (
-                    current,
-                    current &- left,
-                    current &- up,
-                    current &- UInt8((Int(left) + Int(up)) / 2),
-                    current &- paeth(left: left, up: up,
-                                    upperLeft: upperLeft)
-                )
-                candidates[index] = values.0
-                candidates[rowBytes + index] = values.1
-                candidates[rowBytes * 2 + index] = values.2
-                candidates[rowBytes * 3 + index] = values.3
-                candidates[rowBytes * 4 + index] = values.4
-                scores[0] += predictorScore(values.0)
-                scores[1] += predictorScore(values.1)
-                scores[2] += predictorScore(values.2)
-                scores[3] += predictorScore(values.3)
-                scores[4] += predictorScore(values.4)
-            }
+                        for index in 0..<rowBytes {
+                            let cur = src[start &+ index]
+                            let left: UInt8 = index >= components ? src[start &+ index &- components] : 0
+                            let up: UInt8 = hasPrev ? src[prevStart &+ index] : 0
+                            let ul: UInt8 = (hasPrev && index >= components) ? src[prevStart &+ index &- components] : 0
 
-            let bestType = scores.indices.min(by: {
-                scores[$0] < scores[$1]
-            }) ?? 0
-            let outputStart = row * (rowBytes + 1)
-            output[outputStart] = UInt8(bestType)
-            let candidateStart = bestType * rowBytes
-            for index in 0..<rowBytes {
-                output[outputStart + 1 + index] = candidates[candidateStart + index]
+                            let v0 = cur
+                            let v1 = cur &- left
+                            let v2 = cur &- up
+                            let v3 = cur &- UInt8((Int(left) &+ Int(up)) >> 1)
+                            let v4 = cur &- paeth(left: left, up: up, upperLeft: ul)
+
+                            c0[index] = v0
+                            c1[index] = v1
+                            c2[index] = v2
+                            c3[index] = v3
+                            c4[index] = v4
+
+                            s0 &+= predictorScore(v0)
+                            s1 &+= predictorScore(v1)
+                            s2 &+= predictorScore(v2)
+                            s3 &+= predictorScore(v3)
+                            s4 &+= predictorScore(v4)
+                        }
+
+                        var bestType = 0
+                        var bestScore = s0
+                        if s1 < bestScore { bestScore = s1; bestType = 1 }
+                        if s2 < bestScore { bestScore = s2; bestType = 2 }
+                        if s3 < bestScore { bestScore = s3; bestType = 3 }
+                        if s4 < bestScore { bestType = 4 }
+
+                        let outStart = row &* outRowBytes
+                        dst[outStart] = UInt8(bestType)
+                        memcpy(dst + outStart + 1, cand + bestType &* rowBytes, rowBytes)
+                    }
+                }
             }
         }
-        return Data(output)
+        return output
     }
 
     @inline(__always)
     private static func predictorScore(_ byte: UInt8) -> Int {
-        min(Int(byte), 256 - Int(byte))
+        let v = Int(byte)
+        return v <= 128 ? v : 256 &- v
     }
 
+    @inline(__always)
     private static func paeth(left: UInt8, up: UInt8,
                               upperLeft: UInt8) -> UInt8 {
         let a = Int(left), b = Int(up), c = Int(upperLeft)
-        let estimate = a + b - c
-        let da = abs(estimate - a)
-        let db = abs(estimate - b)
-        let dc = abs(estimate - c)
+        let p = a &+ b &- c
+        let da = abs(p &- a)
+        let db = abs(p &- b)
+        let dc = abs(p &- c)
         if da <= db && da <= dc { return left }
         if db <= dc { return up }
         return upperLeft
