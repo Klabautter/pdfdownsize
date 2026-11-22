@@ -5,16 +5,16 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <title>PDFdownsize</title>
     <link>https://github.com/Klabautter/pdfdownsize</link>
     <item>
-      <title>Version 1.1.0</title>
-      <pubDate>Sun, 22 Nov 2026 13:23:12 +0000</pubDate>
-      <sparkle:version>11</sparkle:version>
-      <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+      <title>Version 1.2.0</title>
+      <pubDate>Sun, 22 Nov 2026 17:02:28 +0000</pubDate>
+      <sparkle:version>12</sparkle:version>
+      <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[Stronger Smart compression for scans and photos, faithful colored ink and signatures, faster large-file handling, and a hardened sandboxed release.]]></description>
-      <enclosure url="https://github.com/Klabautter/pdfdownsize/releases/download/v1.1.0/PDFdownsize-1.1.0.zip" sparkle:edSignature="zZDc25dOl/RufztUOPRNFLoGYF4DjMxva3zIH+izrXhXWazjROr91mfu0nbZmSUMolpF7oIzofS5zKx4N2awAw==" length="8944016" type="application/octet-stream"></enclosure>
+      <description><![CDATA[Faster scan, photo, and MRC compression via Accelerate/SIMD and libdeflate, plus seamless document handoff across Compress, Organize, OCR, and Convert.]]></description>
+      <enclosure url="https://github.com/Klabautter/pdfdownsize/releases/download/v1.2.0/PDFdownsize-1.2.0.zip" sparkle:edSignature="6X1Jq/OhfDbVFxpPHckpcyFoqpdkT7/hDT/Apy1pjP6iD2S/91kLurc3nybtjdRtnoQeiPuUuy1ARGIZI71iDg==" length="9044803" type="application/octet-stream"></enclosure>
     </item>
   </channel>
 </rss><!-- sparkle-signatures:
-edSignature: jF+yPU4FdA5OMNGiDJYoMNoivAqb8UV17hcUa5kqX7E/SGjBa2FMvWtKkqvf5p1hDDrmAbpsx2J4IOgyB5SJBg==
-length: 1278
+edSignature: ysw/mGZz/AWJO21atUC0CJ1/r5kShZkynWRXockqwoBHc+k5kgY62qksbveYW2NnEO5LUID9seBnGdb9csuxAg==
+length: 1282
 -->
