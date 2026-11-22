@@ -38,7 +38,11 @@ struct MRCProvisionBudget: Equatable, Codable, Sendable {
         maximumPages: 8,
         maximumPixels: 200_000_000,
         maximumElapsedSeconds: 60,
-        provisionIfCandidateExceedsBytes: 128 * 1024)
+        // Masterplan H1/H2: 128 KB sperrte fast alle 150-DPI-Scanseiten
+        // (65–95 KB JPEG), sodass MRC nie anlief. Ab 48 KB greift MRC auf
+        // echten Scans, während bereits winzige Seiten (< 48 KB) weiter
+        // übersprungen werden.
+        provisionIfCandidateExceedsBytes: 48 * 1024)
 
     func permitsNextPage(attemptedPages: Int,
                          attemptedPixels: Int64,

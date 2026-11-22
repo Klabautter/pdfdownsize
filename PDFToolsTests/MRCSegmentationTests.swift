@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import CoreGraphics
+import CoreText
 @testable import PDFTools
 
 /// Phase V2-7 (Masterplan §13.5) – Segmentierung des MRC-Moduls.
@@ -505,5 +506,53 @@ extension MRCSegmentationTests {
         #expect(QualityGates.peakDeltaE76(reference: reference, candidate: reference) == 0)
         let peak = QualityGates.peakDeltaE76(reference: reference, candidate: recolored)
         #expect(peak > QualityGatePolicy.peakDeltaE76Floor, "Farbspitze \(peak)")
+    }
+
+    /// H1/H2: Geglättete Scanschrift auf leicht getöntem Papier (Luminanz ~240)
+    /// darf von `detectPhotoRects` nicht als Textur-Foto fehlklassifiziert werden.
+    @Test func geglaetteteScanschriftWirdNichtAlsFotoErkannt() throws {
+        let (w, h) = (900, 1200)
+        let ctx = try #require(CGContext(
+            data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        ctx.setShouldAntialias(true)
+        ctx.setAllowsAntialiasing(true)
+        ctx.setFillColor(CGColor(red: 0.95, green: 0.94, blue: 0.92, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        let font = CTFontCreateWithName("Helvetica" as CFString, 26, nil)
+        let attrs: [NSAttributedString.Key: Any] = [
+            NSAttributedString.Key(kCTFontAttributeName as String): font,
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String):
+                CGColor(red: 0.08, green: 0.08, blue: 0.08, alpha: 1),
+        ]
+        let line = NSAttributedString(
+            string: "Rechnung Nr. 2026-1142 — Übersicht aller gelieferten Positionen und Summen",
+            attributes: attrs)
+        for row in 0..<24 {
+            ctx.textPosition = CGPoint(x: 60, y: CGFloat(h - 100 - row * 42))
+            CTLineDraw(CTLineCreateWithAttributedString(line), ctx)
+        }
+        let image = try #require(ctx.makeImage())
+        let seg = try #require(MRCSegmenter.segment(image))
+        #expect(seg.photoRegions.isEmpty,
+                "Reine Textseite erzeugte \(seg.photoRegions.count) falsche Foto-Regionen")
+    }
+
+    /// H1/H2: Ein heller Anti-Aliasing-Saum (Luminanz 165) neben einem scharfen
+    /// schwarzen Strich (Luminanz 20) auf Papier (242) darf nicht schwarz
+    /// maskiert werden; der Strichkern bleibt in der Maske.
+    @Test func antiAliasingSaumBleibtAusDerMaske() {
+        let (w, h) = (64, 64)
+        var luma = [UInt8](repeating: 242, count: w * h)
+        for y in 16..<48 {
+            for x in 28..<36 { luma[y * w + x] = 20 }
+            luma[y * w + 27] = 165
+            luma[y * w + 36] = 165
+        }
+        let fg = MRCSegmenter.sauvolaForeground(luma: luma, width: w, height: h)
+        #expect(fg[32 * w + 31], "Schwarzer Strichkern fehlt in der Maske")
+        #expect(!fg[32 * w + 27], "Heller Anti-Aliasing-Saum wurde schwarz maskiert")
+        #expect(!fg[32 * w + 36], "Heller Anti-Aliasing-Saum wurde schwarz maskiert")
     }
 }

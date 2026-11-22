@@ -230,9 +230,9 @@ struct QualityGatePolicy: Equatable, Sendable {
     /// 127 DPI mit der niedrigsten Qualitätsstufe – Schrift auf Fotos wurde
     /// sichtbar weich (Bild-SSIM bei 144 DPI 0,93 statt 0,97 des Ankers).
     static let smartAnchorQuality = 0.75
-    /// Erlaubt nicht-monotone Messungen benachbarter Qualitätsstufen; ein
-    /// sichtbarer Unterschied liegt um eine Größenordnung darüber.
-    static let anchorTolerance = 0.002
+    /// Erlaubt nicht-monotone Messungen benachbarter Qualitäts-/Auflösungsstufen
+    /// (Masterplan H2); abgestimmt auf `SmartAnchorE2ETests.tolerance` (0,003).
+    static let anchorTolerance = 0.003
 
     static func policy(matching ssimThreshold: Double,
                        imageClass: QualityGateClass) -> QualityGatePolicy {

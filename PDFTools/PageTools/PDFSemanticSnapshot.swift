@@ -300,7 +300,7 @@ struct PDFSemanticSnapshot: Equatable, Codable, Sendable {
             bySize = 1
         } else if fileBytes >= 80 * 1024 * 1024 {
             bySize = 2
-        } else if fileBytes >= 20 * 1024 * 1024 {
+        } else if fileBytes >= 40 * 1024 * 1024 {
             bySize = 4
         } else {
             bySize = 6

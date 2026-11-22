@@ -179,25 +179,36 @@ import PDFKit
                 // Kodierung. Ein Nachbau über den Seiten-Render wich bei
                 // identischem Verfahren um 0,02 ab (Ausschnitt/Interpolation).
                 if documentScan && !withinTarget {
-                    let anchorPixels = PixelSize(
-                        width: Int((placement.placedWidthPoints * anchorDPI / 72).rounded()),
-                        height: Int((placement.placedHeightPoints * anchorDPI / 72).rounded()))
-                    let full = CGRect(x: 0, y: 0, width: anchorPixels.width, height: anchorPixels.height)
-                    guard let smartResource = smartResources["\(placement.pageIndex)#\(placement.resourceName)"],
-                          let smartImage = smartPixels.decodedImage(for: smartResource),
-                          let sourceImage = sourcePixels.decodedImage(for: resource),
-                          let reference = ImageResampler.resize(sourceImage, to: anchorPixels, components: 3),
-                          let anchorImage = anchorRoundTrip(reference),
-                          let smartSized = (smartImage.width == anchorPixels.width
-                                            && smartImage.height == anchorPixels.height)
-                              ? smartImage
-                              : ImageResampler.resize(smartImage, to: anchorPixels, components: 3),
-                          let rn = luma(reference, full), let sn = luma(smartSized, full),
-                          let an = luma(anchorImage, full) else { continue }
-                    result.regions.append(Region(
-                        name: name,
-                        smart: ssim(rn, sn, width: anchorPixels.width, height: anchorPixels.height),
-                        anchor: ssim(rn, an, width: anchorPixels.width, height: anchorPixels.height)))
+                    if let smartResource = smartResources["\(placement.pageIndex)#\(placement.resourceName)"] {
+                        let anchorPixels = PixelSize(
+                            width: Int((placement.placedWidthPoints * anchorDPI / 72).rounded()),
+                            height: Int((placement.placedHeightPoints * anchorDPI / 72).rounded()))
+                        let full = CGRect(x: 0, y: 0, width: anchorPixels.width, height: anchorPixels.height)
+                        guard let smartImage = smartPixels.decodedImage(for: smartResource),
+                              let sourceImage = sourcePixels.decodedImage(for: resource),
+                              let reference = ImageResampler.resize(sourceImage, to: anchorPixels, components: 3),
+                              let anchorImage = anchorRoundTrip(reference),
+                              let smartSized = (smartImage.width == anchorPixels.width
+                                                && smartImage.height == anchorPixels.height)
+                                  ? smartImage
+                                  : ImageResampler.resize(smartImage, to: anchorPixels, components: 3),
+                              let rn = luma(reference, full), let sn = luma(smartSized, full),
+                              let an = luma(anchorImage, full) else { continue }
+                        result.regions.append(Region(
+                            name: name,
+                            smart: ssim(rn, sn, width: anchorPixels.width, height: anchorPixels.height),
+                            anchor: ssim(rn, an, width: anchorPixels.width, height: anchorPixels.height)))
+                    } else if try smartCore.imageResources().contains(where: {
+                        $0.isImageMask && $0.placements.contains { $0.pageIndex == placement.pageIndex }
+                    }) {
+                        // Masterplan H1: MRC hat das Einzelraster durch Ebenen
+                        // (volle Textmaske + Hintergrund) ersetzt – Maßstab ist
+                        // die gerenderte Seite gegen die strenge MRC-Scan-Grenze.
+                        result.regions.append(Region(
+                            name: name,
+                            smart: ssim(o, s, width: w, height: h),
+                            anchor: MRCPageQA.minimumGlobalSSIM))
+                    }
                     continue
                 }
                 guard withinTarget else {

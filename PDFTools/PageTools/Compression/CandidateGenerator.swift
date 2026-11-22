@@ -235,6 +235,10 @@ enum BracketedJPEGSearch {
 
         let reference: QualityGates.StructuralReference
         let anchor: QualityGates.StructuralScores
+        /// Encodierte Größe des Ankers (Zielraster @ q75). Ein kleineres Raster,
+        /// das das Gate samt Anker hält und diesen Wert unterbietet, dominiert
+        /// die größeren Stufen.
+        let anchorBytes: Int
 
         /// `image` ist das Bild auf Zielgröße, `sample` die feine
         /// Originalstichprobe; `nil`, wenn der Anker nicht messbar ist.
@@ -247,6 +251,7 @@ enum BracketedJPEGSearch {
                   let anchor = Self.measure(decoded, reference: reference) else { return nil }
             self.reference = reference
             self.anchor = anchor
+            self.anchorBytes = data.count
         }
 
         func admits(_ decoded: CGImage) -> Bool {
@@ -384,7 +389,10 @@ enum CandidateGenerator {
     /// unangetastet – dort gäbe es wenig zu holen, aber Verlust dazu.
     static func wastefulJPEGBitsPerPixel(_ options: ImageCompressionOptions) -> Double? {
         guard reencodesWithinBudget(options) else { return nil }
-        return QualityGatePreset(ssimThreshold: options.ssimThreshold) == .small ? 1.5 : 2.5
+        // Masterplan H2: 2,0 bit/px trifft bei Smart auch hochqualitative
+        // 170–220-DPI-Fotos (q > 90, z. B. commons_light 2,2–2,5 bit/px),
+        // geschützt durch den Smart-Anker und die 30-%-Hebelschranke (0,70).
+        return QualityGatePreset(ssimThreshold: options.ssimThreshold) == .small ? 1.5 : 2.0
     }
 
     /// Nur Klein und Smart mit Gates: Qualität bleibt im Budget verlustfrei,
@@ -897,9 +905,16 @@ enum CandidateGenerator {
             }
 
             // 3. Zielgröße aus Effective DPI + Kantenlimit (Never Upscale).
-            if isDocumentScanForSmart() {
-                options.targetDPI = ImageCompressionOptions.smartDocumentScanDPI
+            // Masterplan H1/H2: Papier-Scans auch unter 172,5 DPI (z. B.
+            // Handy-Scans mit 160–170 DPI) und für Klein + Smart erkennen,
+            // damit H1 MRC im DPI-Budget freigibt; Smart senkt für JPEG-Scans
+            // zusätzlich auf `smartDocumentScanDPI` (150 DPI).
+            if isPaperScan() {
                 isDocumentScan = true
+                if QualityGatePreset(ssimThreshold: options.ssimThreshold) == .smart,
+                   resource.terminalFilter == .dct {
+                    options.targetDPI = ImageCompressionOptions.smartDocumentScanDPI
+                }
             }
             let resize = CompressionPlanner.plannedSize(for: resource,
                                                         options: options)
@@ -1005,13 +1020,13 @@ enum CandidateGenerator {
                 resource: resource)
         }
 
-        /// Smart-Ziel für JPEG-Dokumentscans: Jede Platzierung liegt als
-        /// Vollbild auf einer Scan-Seite, und der Inhalt hat die schmale
-        /// Helligkeitsverteilung von Papier. Das trennt Dokumente von
-        /// vollseitigen Fotos; die Inhaltsklasse taugt dafür nicht, weil
-        /// dieselbe Handschrift-Seite je nach Raster als Scan oder als
-        /// Grafik gilt.
-        private func isDocumentScanForSmart() -> Bool {
+        /// Papier-Scan-Erkennung für Smart (H1/H2): Jede Platzierung liegt als
+        /// Vollbild eines JPEG-Rasters auf einer Scan-Seite oberhalb der
+        /// 150-DPI-Grenze, und der Inhalt hat die schmale Helligkeitsverteilung
+        /// von Papier (Entropie ≤ 4,0 bit). Nur für Smart und DCT: `dpiRuleExcludesMRC`
+        /// sperrt ohnehin nur DCT, und Klein hat bereits 150 DPI – JPX-Bücher
+        /// (Euklid, Audubon) bleiben so vor der C3-Sonde unberührt.
+        private func isPaperScan() -> Bool {
             guard QualityGatePreset(ssimThreshold: options.ssimThreshold) == .smart,
                   case .adaptive = options.qualityPolicy,
                   resource.terminalFilter == .dct,
@@ -1023,11 +1038,11 @@ enum CandidateGenerator {
                       return page.classification == .rasterScan
                           || page.classification == .rasterScanWithOCR
                   }),
-                  let target = CompressionPlanner.plannedSize(
+                  let probeTarget = CompressionPlanner.plannedSize(
                       for: resource, options: options,
                       dpi: ImageCompressionOptions.smartDocumentScanDPI),
-                  CompressionPlanner.canDecode(resource, target: target, pixels: pixels),
-                  let raster = decodedRaster(for: target),
+                  CompressionPlanner.canDecode(resource, target: probeTarget, pixels: pixels),
+                  let raster = decodedRaster(for: probeTarget),
                   let features = StageTimer.run(stageTimer, .featureAnalysisMs, {
                       ContentFeatureExtractor.extract(from: raster)
                   }) else { return false }
@@ -1633,6 +1648,7 @@ enum CandidateGenerator {
             }
             var pending = Set(order)
             var smallestPassingPixels: Int?
+            var smallestSafePassingBytes: Int?
             for rungIndex in order {
                 if cancelled { break }
                 let rung = ladder[rungIndex]
@@ -1656,6 +1672,12 @@ enum CandidateGenerator {
                 let rungPixels = rung.width * rung.height
                 if let best = smallestPassingPixels, rungPixels >= 2 * best {
                     traceJPEG(target: rung, result: nil, disposition: "dominated-skipped")
+                    continue
+                }
+                if let anchorCheck, let safeBytes = smallestSafePassingBytes,
+                   safeBytes < anchorCheck.anchorBytes,
+                   let best = smallestPassingPixels, rungPixels > best {
+                    traceJPEG(target: rung, result: nil, disposition: "anchor-dominated-skipped")
                     continue
                 }
                 let candidatesBefore = transforms.count
@@ -1726,6 +1748,10 @@ enum CandidateGenerator {
                                         rungIndex: rungIndexOffset + rungIndex,
                                         grayscale: grayscale,
                                         jpegOptions: jpegOptions)
+                    if (rungResult.perceptualScore ?? 0) <= PerceptualScore.catastrophicLimit {
+                        smallestSafePassingBytes = min(smallestSafePassingBytes ?? .max,
+                                                       rungResult.data.count)
+                    }
                 }
                 if transforms.count > candidatesBefore {
                     smallestPassingPixels = min(smallestPassingPixels ?? .max, rungPixels)
@@ -1908,20 +1934,29 @@ enum CandidateGenerator {
             } catch { NSLog("Classification trace failed: %@", String(describing: error)) }
         }
 
-        /// Smart-Anker: q75 auf dem Zielraster, einmal je Ressource. Jede
-        /// Stufe – auch andere Auflösungen – muss bei normaler Ansicht
-        /// mindestens so nah am Original liegen. Nur für Smart; Klein ist
-        /// bewusst sichtbarer, Qualität hat eigene, strengere Grenzen.
+        /// Smart-Anker (Masterplan H2): q75 auf dem Zielraster, gemessen im
+        /// Ansichts-Raster (~200 px/Zoll der platzierten Seite, gedeckelt bei
+        /// `AnchorCheck.sampleEdge`). Jede Stufe der Leiter (inkl. 180/150 DPI)
+        /// muss in normaler Ansicht mindestens so nah am Original liegen wie
+        /// 220 DPI bei q75. Nur für Smart.
         private func smartAnchorCheck(source: CGImage, target: PixelSize,
                                       targetImage: CGImage, grayscale: Bool,
                                       jpegOptions: ImageCompressionOptions)
             -> BracketedJPEGSearch.AnchorCheck? {
             guard case .adaptive = jpegOptions.qualityPolicy,
-                  QualityGatePreset(ssimThreshold: jpegOptions.ssimThreshold) == .smart,
-                  let fineSample = CandidateGenerator.referenceSample(
-                      original: source, target: target,
-                      maxEdge: min(BracketedJPEGSearch.AnchorCheck.sampleEdge,
-                                   max(target.width, target.height))),
+                  QualityGatePreset(ssimThreshold: jpegOptions.ssimThreshold) == .smart else { return nil }
+            let targetEdge = max(target.width, target.height)
+            let viewingEdge = resource.placements.compactMap { p -> Int? in
+                guard p.placedWidthPoints > 1, p.placedHeightPoints > 1 else { return nil }
+                let scale = p.pageSizeDPIScale ?? 1
+                let longPt = max(p.placedWidthPoints, p.placedHeightPoints) / scale
+                return Int((longPt * 200.0 / 72.0).rounded())
+            }.max().map { max(256, $0) }
+            let maxEdge = min(BracketedJPEGSearch.AnchorCheck.sampleEdge,
+                              targetEdge,
+                              viewingEdge ?? targetEdge)
+            guard let fineSample = CandidateGenerator.referenceSample(
+                      original: source, target: target, maxEdge: maxEdge),
                   let reference = ImageResampler.resize(targetImage, to: target,
                                                         grayscale: grayscale)
             else { return nil }
@@ -2236,6 +2271,12 @@ enum CandidateGenerator {
             }
             if preset == .quality {
                 if let dpi240 = size(atDPI: 240) { rungs.append(dpi240) }
+            } else if options.targetDPI > ImageCompressionOptions.smartDocumentScanDPI {
+                // Masterplan H2: Smart darf bis 150 DPI hinunter suchen
+                // (180, dann 150 DPI); ob eine Stufe gilt, entscheidet der
+                // Ansichts-Anker (220 DPI @ q75) samt Multi-Gate.
+                if let dpi180 = size(atDPI: 180) { rungs.append(dpi180) }
+                if let dpi150 = size(atDPI: 150) { rungs.append(dpi150) }
             } else {
                 rungs.append(PixelSize(
                     width: max(1, Int((Double(target.width) * 0.85).rounded())),

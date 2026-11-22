@@ -31,7 +31,9 @@ enum MRCSegmenter {
     /// 300 DPI rund 2 mm – groß genug für Wortformulare, klein genug gegen
     /// lokal wechselndes Papier.
     static let thresholdWindow = 25
-    /// Sauvola-Empfindlichkeit k (Standardliteratur 0.2–0.34; 0.2 = konservativ).
+    /// Sauvola-Empfindlichkeit k (Standardliteratur 0.2–0.34; 0.2 erkennt auch
+    /// kontrastärmere Tinte zuverlässig; helle Anti-Aliasing-Säume an scharfen
+    /// Kanten entfernt der lokale Mittelpunkt-Filter danach).
     static let thresholdSensitivity = 0.2
     /// Sauvola-Normierungs-R = Standardabweichung eines Grauwerts (128).
     static let thresholdRange = 128.0
@@ -51,10 +53,13 @@ enum MRCSegmenter {
     static let photoTileChromaMean = 10.0
     static let photoTileChromaFraction = 0.25
     /// Textur-Signal: Kantendichte plus „mittlere" Luminanz (weder Papier
-    /// noch schwarze Fläche).
+    /// noch schwarze Fläche). Mindestens die Hälfte der Kachel muss echte
+    /// Mittelwerte unterhalb des Papiergrunds tragen – sonst zählt geglättete
+    /// Scanschrift auf leicht getöntem Papier (20–35 % Randpixel, hohe
+    /// Kantendichte) fälschlich als Photo-Region.
     static let photoTileEdgeDensity = 0.20
-    static let photoTileTextureFractionLow = 0.15
-    static let photoTileTextureFractionHigh = 0.85
+    static let photoTileTextureFractionLow = 0.50
+    static let photoTileTextureFractionHigh = 0.95
     /// Mindest-Kachelanzahl einer zusammenhängenden Photo-Region (~1 % Fläche).
     static let minimumPhotoTiles = 4
     /// Pad um erkannte Regionen (px) – verhindert Haarlinien am Übergang.
@@ -174,7 +179,8 @@ enum MRCSegmenter {
         // --- Photo-Regionen (Chroma + Textur + Kachel-Dichte) ---------------
         let photoRects = detectPhotoRects(luma: luma, chroma: chroma,
                                           edges: edges,
-                                          width: width, height: height)
+                                          width: width, height: height,
+                                          paperLuma: paperLuma)
         var photoArea = 0.0
         for rect in photoRects { photoArea += rect.width * rect.height }
         if photoArea / Double(width * height) > maximumPhotoAreaFraction {
@@ -508,7 +514,34 @@ enum MRCSegmenter {
                 if Double(luma[y * width + x]) < threshold { out[y * width + x] = true }
             }
         }
-        return out
+        // Anti-Aliasing-Säume an scharfen Kanten aus der Maske halten: Sauvola
+        // legt T bei hohem Kantenkontrast oft um 190–205 und malt dadurch helle
+        // Randpixel (Luminanz 135–200) tiefschwarz – dünne Scanschrift wird
+        // sichtbar fetter und reißt inkDelta/p05. Wo im 5×5-Fenster echter
+        // Kantenkontrast (≥ 64) liegt, zählt ein Pixel nur dann als Tinte, wenn
+        // es näher am lokalen Tinten-Minimum als am lokalen Papier-Maximum liegt.
+        var refined = out
+        for y in 0..<height {
+            let y0 = max(0, y - 2), y1 = min(height - 1, y + 2)
+            for x in 0..<width where out[y * width + x] {
+                let x0 = max(0, x - 2), x1 = min(width - 1, x + 2)
+                var localMin = 255
+                var localMax = 0
+                for yy in y0...y1 {
+                    let row = yy * width
+                    for xx in x0...x1 {
+                        let v = Int(luma[row + xx])
+                        if v < localMin { localMin = v }
+                        if v > localMax { localMax = v }
+                    }
+                }
+                if localMax - localMin >= 64,
+                   20 * (Int(luma[y * width + x]) - localMin) > 9 * (localMax - localMin) {
+                    refined[y * width + x] = false
+                }
+            }
+        }
+        return refined
     }
 
     // MARK: Photo-Region-Erkennung (§13.5: Chroma + Textur + Kachel-Dichte)
@@ -519,11 +552,13 @@ enum MRCSegmenter {
     /// als Rauschen und fallen weg.
     static func detectPhotoRects(luma: [UInt8], chroma: [UInt8],
                                  edges: [Bool],
-                                 width: Int, height: Int) -> [CGRect] {
+                                 width: Int, height: Int,
+                                 paperLuma: Int = 255) -> [CGRect] {
         let tile = photoTileSize
         let tilesX = max(1, width / tile)
         let tilesY = max(1, height / tile)
         var photoTile = [Bool](repeating: false, count: tilesX * tilesY)
+        let midUpper = min(220, paperLuma - 20)
 
         for ty in 0..<tilesY {
             for tx in 0..<tilesX {
@@ -542,7 +577,7 @@ enum MRCSegmenter {
                         if Int(chroma[i]) > Int(strongChroma) { chromaHeavy += 1 }
                         if edges[i] { edgeCount += 1 }
                         let l = Int(luma[i])
-                        if l > 40 && l < 220 { midLuma += 1 }
+                        if l > 40 && l < midUpper { midLuma += 1 }
                     }
                 }
                 guard count > 0 else { continue }

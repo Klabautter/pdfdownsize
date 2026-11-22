@@ -42,7 +42,7 @@ import PDFKit
     @Test func workerAnzahlSkaliertMitDateigroesse() {
         #expect(PDFSemanticSnapshot.parallelWorkerCount(pageCount: 400, fileBytes: 250 * 1024 * 1024) == 1)
         #expect(PDFSemanticSnapshot.parallelWorkerCount(pageCount: 400, fileBytes: 80 * 1024 * 1024) <= 2)
-        #expect(PDFSemanticSnapshot.parallelWorkerCount(pageCount: 400, fileBytes: 20 * 1024 * 1024) <= 4)
+        #expect(PDFSemanticSnapshot.parallelWorkerCount(pageCount: 400, fileBytes: 45 * 1024 * 1024) <= 4)
         #expect(PDFSemanticSnapshot.parallelWorkerCount(pageCount: 400, fileBytes: 2 * 1024 * 1024) >= 2)
         #expect(PDFSemanticSnapshot.parallelWorkerCount(pageCount: 400, fileBytes: 2 * 1024 * 1024) <= 6)
     }
@@ -221,5 +221,45 @@ import PDFKit
         #expect(ocr.fileSize == 0)
         let merge = MergeViewModel()
         #expect(!merge.isSheetPresented)
+    }
+
+    /// Masterplan H1/H2: Smart-Auflösungsleiter testet bis 150 DPI herunter,
+    /// verschwenderische JPEGs greifen ab 2,0 bpp und MRC-Bedarfsschwelle
+    /// deckt typische 60-KB-Scans ab.
+    @Test func smartH2LeiterUndSchwellen() {
+        let photo = PDFImageResource(
+            objectID: PDFObjectID(objectNumber: 10, generation: 0),
+            width: 2400, height: 1800, bitsPerComponent: 8,
+            colorSpace: .deviceRGB, filters: [.dct], unknownFilters: [],
+            hasSoftMask: false, hasExplicitMask: false, isImageMask: false,
+            decodeArray: [], encodedByteCount: 1_200_000,
+            placements: [PDFImagePlacement(pageIndex: 0, resourceName: "/Im0",
+                                           placedWidthPoints: 576, placedHeightPoints: 432)])
+        let smart = CompressionOptions.smart.image
+        let target = CompressionPlanner.plannedSize(for: photo, options: smart)!
+        let rungs = CandidateGenerator.resolutionLadder(resource: photo, target: target, options: smart)
+        let minWidth = rungs.map(\.width).min() ?? Int.max
+        #expect(minWidth <= 1250, "Smart-Leiter fehlt 150-DPI-Stufe: \(rungs)")
+        #expect(rungs.contains(target), "Zielstufe 220 DPI muss in der Leiter stehen")
+
+        let wasteful = PDFImageResource(
+            objectID: PDFObjectID(objectNumber: 11, generation: 0),
+            width: 1000, height: 1000, bitsPerComponent: 8,
+            colorSpace: .deviceRGB, filters: [.dct], unknownFilters: [],
+            hasSoftMask: false, hasExplicitMask: false, isImageMask: false,
+            decodeArray: [], encodedByteCount: 280_000, // 2,24 bpp
+            placements: [PDFImagePlacement(pageIndex: 0, resourceName: "/Im1",
+                                           placedWidthPoints: 500, placedHeightPoints: 500)])
+        let compact = PDFImageResource(
+            objectID: PDFObjectID(objectNumber: 12, generation: 0),
+            width: 1000, height: 1000, bitsPerComponent: 8,
+            colorSpace: .deviceRGB, filters: [.dct], unknownFilters: [],
+            hasSoftMask: false, hasExplicitMask: false, isImageMask: false,
+            decodeArray: [], encodedByteCount: 200_000, // 1,60 bpp
+            placements: [PDFImagePlacement(pageIndex: 0, resourceName: "/Im2",
+                                           placedWidthPoints: 500, placedHeightPoints: 500)])
+        #expect(CandidateGenerator.isWastefullyEncodedJPEG(wasteful, options: smart))
+        #expect(!CandidateGenerator.isWastefullyEncodedJPEG(compact, options: smart))
+        #expect(MRCProvisionBudget.oneClick.provisionIfCandidateExceedsBytes <= 48 * 1024)
     }
 }

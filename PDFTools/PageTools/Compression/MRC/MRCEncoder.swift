@@ -67,27 +67,43 @@ enum MRCEncoder {
         var totalBytes: Int { data.count + globals.count }
     }
 
-    /// Lossless-Maske: JBIG2 (Render-Gate über PDFKit = echter Dekodierer),
-    /// Fallback CCITT G4 (libtiff-Rückweg). Beide werden gegen den
-    /// Ausgangspuffer bitidentisch verifiziert; sonst nil (kein MRC).
+    /// Lossless-Maske: Symbol-JBIG2, generisches JBIG2 und CCITT G4 treten
+    /// gegeneinander an (kleinster zuerst). JBIG2 wird über PDFKit (echter
+    /// Dekodierer) bitidentisch rückgeprüft, G4 über libtiff – das erste
+    /// bitidentisch bestandene Verfahren gewinnt. Kein Lossy-JBIG2 (§13.11).
     static func encodeMask(_ mask: BilevelBuffer) -> MaskEncoding? {
+        var candidates: [MaskEncoding] = []
         if let jbig2 = BilevelCodec.encodeJBIG2(mask) {
-            let rendered = BilevelRenderGate.decodedBuffer(
-                page: jbig2.page, globals: jbig2.globals.isEmpty
-                    ? nil : jbig2.globals,
-                width: mask.width, height: mask.height)
-            if let rendered, rendered.bitIdentical(to: mask) {
-                return MaskEncoding(codec: .jbig2, data: jbig2.page,
-                                    globals: jbig2.globals)
-            }
+            candidates.append(MaskEncoding(codec: .jbig2, data: jbig2.page,
+                                           globals: jbig2.globals))
         }
-        // G4-Fallback: Rückweg über denselben Fax-Codec (libtiff) –
-        // bitidentisch oder verworfen.
-        if let g4 = BilevelCodec.encodeG4(mask),
-           let back = BilevelCodec.decodeG4(g4, width: mask.width,
-                                            height: mask.height),
-           back.bitIdentical(to: mask) {
-            return MaskEncoding(codec: .ccittG4, data: g4, globals: Data())
+        if let generic = BilevelCodec.encodeJBIG2Generic(mask) {
+            candidates.append(MaskEncoding(codec: .jbig2, data: generic,
+                                           globals: Data()))
+        }
+        if let g4 = BilevelCodec.encodeG4(mask) {
+            candidates.append(MaskEncoding(codec: .ccittG4, data: g4,
+                                           globals: Data()))
+        }
+        candidates.sort { $0.totalBytes < $1.totalBytes }
+        for candidate in candidates {
+            switch candidate.codec {
+            case .jbig2:
+                let rendered = BilevelRenderGate.decodedBuffer(
+                    page: candidate.data,
+                    globals: candidate.globals.isEmpty ? nil : candidate.globals,
+                    width: mask.width, height: mask.height)
+                if let rendered, rendered.bitIdentical(to: mask) {
+                    return candidate
+                }
+            case .ccittG4:
+                if let back = BilevelCodec.decodeG4(candidate.data,
+                                                    width: mask.width,
+                                                    height: mask.height),
+                   back.bitIdentical(to: mask) {
+                    return candidate
+                }
+            }
         }
         return nil
     }
