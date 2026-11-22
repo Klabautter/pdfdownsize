@@ -187,10 +187,19 @@ ENTITLEMENTS="$(mktemp /tmp/pdfdownsize-entitlements.XXXXXX)"
 trap 'rm -f "$ENTITLEMENTS"' EXIT
 codesign -d --entitlements - --xml "$APP" > "$ENTITLEMENTS" 2>/dev/null
 SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
-# Masterplan N29: Helfer vor dem Sandbox-inherit-Signieren direkt prüfen
-# (danach verweigert macOS den direkten Shell-Aufruf mit Exit 133).
-arch -arm64 "$APP/Contents/Helpers/qpdf" --version | grep -q qpdf || {
-    echo "qpdf-Helfer vor dem Signieren nicht lauffähig." >&2; exit 1; }
+# Masterplan N29: Helfer auf Lauffähigkeit prüfen. EmbedVendorQPDF signiert
+# den Helfer im Build bereits mit Helper.entitlements (app-sandbox+inherit),
+# sodass macOS den direkten Shell-Aufruf mit Exit 133 verweigert; auf einer
+# temporären Kopie ohne inherit-Entitlement prüfen wir exakt das eingebettete Binary.
+QPDF_PROBE_DIR="$(mktemp -d /tmp/pdfdownsize-qpdf-probe.XXXXXX)"
+cp "$APP/Contents/Helpers/qpdf" "$QPDF_PROBE_DIR/qpdf"
+chmod +x "$QPDF_PROBE_DIR/qpdf"
+codesign --remove-signature "$QPDF_PROBE_DIR/qpdf" 2>/dev/null || true
+codesign --force --sign - "$QPDF_PROBE_DIR/qpdf" 2>/dev/null
+QPDF_VER="$(arch -arm64 "$QPDF_PROBE_DIR/qpdf" --version 2>&1 || true)"
+rm -rf "$QPDF_PROBE_DIR"
+grep -q qpdf <<< "$QPDF_VER" || {
+    echo "qpdf-Helfer vor dem Signieren nicht lauffähig ($QPDF_VER)." >&2; exit 1; }
 # Masterplan G5: Der Helfer erbt die Sandbox der App (app-sandbox + inherit).
 sign --entitlements "$ROOT/PDFTools/Helper.entitlements" "$APP/Contents/Helpers/qpdf"
 sign "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
@@ -259,7 +268,7 @@ spctl --assess --type execute "$APP" 2>/dev/null || {
 rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
 
-SIGN="$(find "$DERIVED/SourcePackages/artifacts" -name sign_update -type f | head -1)"
+SIGN="$(find "$DERIVED/SourcePackages/artifacts" -path '*/bin/sign_update' -type f | head -1)"
 [ -x "$SIGN" ] || { echo "sign_update nicht gefunden" >&2; exit 1; }
 # Ausgabe: sparkle:edSignature="…" length="…"
 SIGNATURE="$("$SIGN" --account pdfdownsize "$ZIP")"
