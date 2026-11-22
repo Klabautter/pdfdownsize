@@ -3,7 +3,7 @@
 # Sparkle-Signatur, GitHub-Release mit ZIP, appcast.xml – in der Reihenfolge,
 # in der der Update-Check der Nutzer nie auf eine fehlende ZIP zeigt.
 #
-# Aufruf:  Scripts/release.sh [--dry-run]
+# Aufruf:  Scripts/release.sh [--dry-run] [--force-gate]
 #
 # Ablauf:
 #   1. Vorprüfung (vor dem Bauen): RELEASE_NOTES.md vorhanden, Arbeitsbaum
@@ -48,6 +48,7 @@ REPO="Klabautter/pdfdownsize"
 DERIVED="${PDFDOWNSIZE_DERIVED_DATA:-$ROOT/tmp/release-build}"
 NOTES_FILE="$ROOT/RELEASE_NOTES.md"
 DRY_RUN=0
+FORCE_GATE=0
 # Team-ID und Notar-Profil stehen in der nicht versionierten
 # Scripts/release.local.env (Masterplan G1) – nicht im öffentlichen Repo.
 #   PDFDOWNSIZE_TEAM_ID=…
@@ -65,7 +66,8 @@ NOTARY_PROFILE="${PDFDOWNSIZE_NOTARY_PROFILE:-}"
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
-        *) echo "Unbekanntes Argument: $arg" >&2; echo "Aufruf: Scripts/release.sh [--dry-run]" >&2; exit 2 ;;
+        --force-gate) FORCE_GATE=1 ;;
+        *) echo "Unbekanntes Argument: $arg" >&2; echo "Aufruf: Scripts/release.sh [--dry-run] [--force-gate]" >&2; exit 2 ;;
     esac
 done
 
@@ -101,9 +103,29 @@ command -v gh >/dev/null || { echo "gh fehlt: brew install gh, dann gh auth logi
 
 # Kein Release ohne grünes Gate (Masterplan G1). Das Gate schreibt die
 # Abnahme mit Commit-Hash; der Build bettet sie ein, release-check prüft sie.
-echo "→ Gate …"
-# N14 (G3): Ein Release prüft auch die sechs UI-Abläufe.
-"$ROOT/Scripts/gate.sh" --ui || { echo "Gate rot – kein Release." >&2; exit 1; }
+# Liegt bereits eine grüne Gate+UI-Abnahme für exakt diesen sauberen HEAD vor,
+# sparen wir den doppelten 30-Minuten-Lauf (mit --force-gate erzwingbar).
+ACCEPTANCE="$ROOT/tmp/release-acceptance.plist"
+HEAD_COMMIT="$(git rev-parse HEAD)"
+UNTRACKED_SRC="$(git status --porcelain -- PDFTools PDFToolsTests PDFToolsUITests Vendor Scripts PDFTools.xcodeproj)"
+GATE_REUSABLE=0
+if [ "$FORCE_GATE" = 0 ] && [ -z "$UNTRACKED_SRC" ] && [ -f "$ACCEPTANCE" ]; then
+    ACC_OK="$(/usr/bin/plutil -extract accepted raw "$ACCEPTANCE" 2>/dev/null || true)"
+    ACC_COMMIT="$(/usr/bin/plutil -extract commit raw "$ACCEPTANCE" 2>/dev/null || true)"
+    ACC_SCOPE="$(/usr/bin/plutil -extract scope raw "$ACCEPTANCE" 2>/dev/null || true)"
+    if [ "$ACC_OK" = "true" ] && [ "$ACC_COMMIT" = "$HEAD_COMMIT" ]; then
+        case "$ACC_SCOPE" in
+            *+ui) GATE_REUSABLE=1 ;;
+        esac
+    fi
+fi
+if [ "$GATE_REUSABLE" = 1 ]; then
+    echo "→ Gate … bereits grün für ${HEAD_COMMIT:0:12} (Scope: $ACC_SCOPE) – wiederverwendet."
+else
+    echo "→ Gate …"
+    # N14 (G3): Ein Release prüft auch die sechs UI-Abläufe.
+    "$ROOT/Scripts/gate.sh" --ui || { echo "Gate rot – kein Release." >&2; exit 1; }
+fi
 
 # Developer ID, nie das Entwicklungszertifikat (das trägt eine Mailadresse).
 SIGN_ID="$(security find-identity -v -p codesigning \
