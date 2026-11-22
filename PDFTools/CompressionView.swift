@@ -1291,7 +1291,8 @@ private struct BulkStage: View {
                         .font(.callout)
                 } else {
                     Button("Sichern …") { saveSingle(url) }
-                        .buttonStyle(.link)
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.tint)
                 }
             }
         } else if viewModel.isWorking {

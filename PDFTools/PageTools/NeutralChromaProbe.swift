@@ -25,15 +25,24 @@ enum NeutralChromaProbe {
         ]
         guard let thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
         else { return nil }
-        let width = thumb.width, height = thumb.height
-        guard width > 0, height > 0 else { return nil }
+        return isNeutral(image: thumb)
+    }
+
+    /// Farbneutralität eines bereits dekodierten Bildes (z. B. Flate-Scan),
+    /// heruntergezeichnet auf höchstens `thumbnailEdge` px.
+    static func isNeutral(image: CGImage) -> Bool? {
+        let srcW = image.width, srcH = image.height
+        guard srcW > 0, srcH > 0 else { return nil }
+        let scale = min(1.0, Double(thumbnailEdge) / Double(max(srcW, srcH)))
+        let width = max(1, Int((Double(srcW) * scale).rounded()))
+        let height = max(1, Int((Double(srcH) * scale).rounded()))
         var bytes = [UInt8](repeating: 0, count: width * height * 4)
         guard let ctx = CGContext(data: &bytes, width: width, height: height,
                                   bitsPerComponent: 8, bytesPerRow: width * 4,
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
         else { return nil }
-        ctx.draw(thumb, in: CGRect(x: 0, y: 0, width: width, height: height))
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
         var total = 0
         for offset in stride(from: 0, to: bytes.count, by: 4) {
             let r = Int(bytes[offset]), g = Int(bytes[offset + 1]), b = Int(bytes[offset + 2])

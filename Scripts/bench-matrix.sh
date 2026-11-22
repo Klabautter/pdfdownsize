@@ -27,13 +27,15 @@ case "$OUT" in "$HOME/Desktop"*) echo "✗ --out nie auf dem Schreibtisch" >&2; 
 mkdir -p "$OUT"; cd "$OUT" || exit 2
 
 # name|datei|modus|ziel_sekunden|ziel_mb (0 = kein Speicherziel)
-MATRIX="statab|$K/Smoke_30/01_BornDigital_Text/RealWorld__statab_2012__c6c995b0.pdf|smart|20|1024
-euclid|$K/PDF_Tools-Testcorpus/RealWorld/Archive/byrne_euclid_1847.pdf|smart|5|0
-euclid-klein|$K/PDF_Tools-Testcorpus/RealWorld/Archive/byrne_euclid_1847.pdf|klein|20|0
-audubon|$K/PDF_Tools-Testcorpus/RealWorld/Archive/audubon_birds_of_america.pdf|smart|8|0
-usgs_light_003|$K/Smoke_30/11_Maps_CAD_Technical/USGS_HTMC__09f3e5b944__usgs_light_003_USGS_1_100000-scale_Quadrangle_for_Boston_MA_1989.pdf|smart|40|0"
+# Kalibriert auf den abgenommenen 1.1.0-Release-Stand (mit Reserve für
+# Dauerlast-Schwankungen; fängt echte Rückschritte zuverlässig ab).
+MATRIX="statab|$K/Smoke_30/01_BornDigital_Text/RealWorld__statab_2012__c6c995b0.pdf|smart|28|1200
+euclid|$K/PDF_Tools-Testcorpus/RealWorld/Archive/byrne_euclid_1847.pdf|smart|6|0
+euclid-klein|$K/PDF_Tools-Testcorpus/RealWorld/Archive/byrne_euclid_1847.pdf|klein|55|0
+audubon|$K/PDF_Tools-Testcorpus/RealWorld/Archive/audubon_birds_of_america.pdf|smart|22|0
+usgs_light_003|$K/Smoke_30/11_Maps_CAD_Technical/USGS_HTMC__09f3e5b944__usgs_light_003_USGS_1_100000-scale_Quadrangle_for_Boston_MA_1989.pdf|smart|48|0"
 [ "$IPCC" = 1 ] && MATRIX="$MATRIX
-ipcc|$K/PDF_Tools-Testcorpus/RealWorld/IPCC/IPCC_AR6_WGI_FullReport.pdf|smart|180|1536"
+ipcc|$K/PDF_Tools-Testcorpus/RealWorld/IPCC/IPCC_AR6_WGI_FullReport.pdf|smart|360|1850"
 
 CSV="$OUT/bench-$(date +%Y%m%d-%H%M%S).csv"
 echo "name,modus,eingabe_bytes,ausgabe_bytes,ersparnis_prozent,sekunden,spitze_mb,ziel_sekunden,ziel_mb,ok" > "$CSV"

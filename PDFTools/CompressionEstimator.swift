@@ -351,13 +351,21 @@ enum CompressionEstimator {
         lazy var pixels = LibQPDFPixelSource(document: document)
         func contentIsNeutral(_ resource: PDFImageResource) -> Bool {
             if resource.pixelColorSpace.componentCount == 1 { return true }
-            guard resource.pixelColorSpace.componentCount == 3,
-                  resource.terminalFilter == .dct else { return false }
+            guard resource.pixelColorSpace.componentCount == 3 else { return false }
             if neutralVotes.count >= QuickModel.neutralChromaSamples {
                 return neutralVotes.filter { $0 }.count * 2 > neutralVotes.count
             }
-            let verdict = pixels.jpegData(for: resource)
-                .flatMap(NeutralChromaProbe.isNeutral(jpeg:)) ?? false
+            let verdict: Bool
+            if resource.terminalFilter == .dct {
+                verdict = pixels.jpegData(for: resource)
+                    .flatMap(NeutralChromaProbe.isNeutral(jpeg:)) ?? false
+            } else if resource.terminalFilter == .flate,
+                      resource.pixelCount <= 16_000_000 {
+                verdict = pixels.decodedImage(for: resource)
+                    .flatMap(NeutralChromaProbe.isNeutral(image:)) ?? false
+            } else {
+                return false
+            }
             neutralVotes.append(verdict)
             return verdict
         }
