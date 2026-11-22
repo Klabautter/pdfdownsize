@@ -1,17 +1,20 @@
-<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><!-- sparkle-sign-warning:
+IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
+--><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
   <channel>
     <title>PDFdownsize</title>
     <link>https://github.com/Klabautter/pdfdownsize</link>
     <item>
-      <title>Version 1.0.9</title>
-      <pubDate>Wed, 11 Nov 2026 00:48:03 +0000</pubDate>
-      <sparkle:version>10</sparkle:version>
-      <sparkle:shortVersionString>1.0.9</sparkle:shortVersionString>
+      <title>Version 1.1.0</title>
+      <pubDate>Sun, 22 Nov 2026 13:23:12 +0000</pubDate>
+      <sparkle:version>11</sparkle:version>
+      <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[Text recognition now tells you when it is getting ready, and Cancel stops it right away.]]></description>
-      <enclosure url="https://github.com/Klabautter/pdfdownsize/releases/download/v1.0.9/PDFdownsize-1.0.9.zip"
-                 sparkle:edSignature="tkHIYSmzN84gF7Ej/w4NUez/g057yjeDm0Jsjj0DOaDItJL1d4d6yCbwjV9X9XyS78oFijvibHhabKKTIc7eCg==" length="9788208" type="application/octet-stream"/>
+      <description><![CDATA[Stronger Smart compression for scans and photos, faithful colored ink and signatures, faster large-file handling, and a hardened sandboxed release.]]></description>
+      <enclosure url="https://github.com/Klabautter/pdfdownsize/releases/download/v1.1.0/PDFdownsize-1.1.0.zip" sparkle:edSignature="zZDc25dOl/RufztUOPRNFLoGYF4DjMxva3zIH+izrXhXWazjROr91mfu0nbZmSUMolpF7oIzofS5zKx4N2awAw==" length="8944016" type="application/octet-stream"></enclosure>
     </item>
   </channel>
-</rss>
+</rss><!-- sparkle-signatures:
+edSignature: jF+yPU4FdA5OMNGiDJYoMNoivAqb8UV17hcUa5kqX7E/SGjBa2FMvWtKkqvf5p1hDDrmAbpsx2J4IOgyB5SJBg==
+length: 1278
+-->
