@@ -117,6 +117,7 @@ struct PDFToolsApp: App {
             RootView()
         }
         .defaultSize(width: 1100, height: 720)
+        .handlesExternalEvents(matching: ["*"])
         .commands {
             appCommands
         }

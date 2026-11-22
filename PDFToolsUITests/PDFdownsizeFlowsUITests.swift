@@ -24,7 +24,11 @@ final class PDFdownsizeFlowsUITests: XCTestCase {
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
     }
 
+    private var launchedApp: XCUIApplication?
+
     override func tearDownWithError() throws {
+        launchedApp?.terminate()
+        launchedApp = nil
         try? FileManager.default.removeItem(at: workDir)
     }
 
@@ -32,10 +36,25 @@ final class PDFdownsizeFlowsUITests: XCTestCase {
 
     private func launch(tool: String? = nil, open files: [URL]) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-AppleLanguages", "(de)", "-AppleLocale", "de_DE"]
+        app.launchArguments = [
+            "-AppleLanguages", "(de)",
+            "-AppleLocale", "de_DE",
+            "-ApplePersistenceIgnoreState", "YES",
+        ]
         if let tool { app.launchArguments += ["--tool", tool] }
-        if !files.isEmpty { app.launchArguments += ["--open"] + files.map(\.path) }
+        // Jede Datei als eigenes `--open <pfad>`-Paar: AppKit parst `-key value`
+        // beim Start; ab dem zweiten freien Pfad würde NSApplication den Start
+        // sonst als Dokument-Event deuten und das SwiftUI-Hauptfenster nicht öffnen.
+        for file in files { app.launchArguments += ["--open", file.path] }
         app.launch()
+        app.activate()
+        if !app.windows.firstMatch.waitForExistence(timeout: 5) {
+            let windowMenu = app.menuBars.menuBarItems["Fenster"]
+            windowMenu.click()
+            let mainItem = windowMenu.menuItems["PDFdownsize"]
+            if mainItem.waitForExistence(timeout: 2) { mainItem.click() }
+        }
+        launchedApp = app
         return app
     }
 

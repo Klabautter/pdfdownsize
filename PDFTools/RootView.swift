@@ -258,11 +258,24 @@ struct RootView: View {
         return AppTool(rawValue: arguments[index + 1])
     }
 
-    /// Pfade hinter `--open` bis zum nächsten `--`-Argument.
+    /// Pfade hinter `--open` (einmalig mit mehreren Pfaden oder wiederholt
+    /// `--open <pfad>`, damit AppKit zusätzliche Pfade nicht als freie
+    /// Positionsargumente beim Kaltstart abfängt).
     static func launchArgumentFiles(_ arguments: [String] = CommandLine.arguments) -> [URL] {
-        guard let index = arguments.firstIndex(of: "--open") else { return [] }
-        return arguments[(index + 1)...].prefix { !$0.hasPrefix("--") }
-            .map { URL(fileURLWithPath: $0) }
+        var result: [URL] = []
+        var index = 0
+        while index < arguments.count {
+            if arguments[index] == "--open" {
+                index += 1
+                while index < arguments.count, !arguments[index].hasPrefix("-") {
+                    result.append(URL(fileURLWithPath: arguments[index]))
+                    index += 1
+                }
+            } else {
+                index += 1
+            }
+        }
+        return result
     }
 
     /// Sammelt eingehende Dateien kurz und routet sie als einen Stapel.
