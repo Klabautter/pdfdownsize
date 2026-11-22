@@ -310,6 +310,83 @@ final class MergeViewModel: ObservableObject {
         passwordError = nil
     }
 
+    /// Prüft, ob `url` bereits im Projekt liegt (direkt oder als entsperrtes Original).
+    func containsSource(_ url: URL) -> Bool {
+        project.documents.contains { $0.url == url }
+            || unlockedSources.values.contains { $0.original == url }
+    }
+
+    /// Ersetzt das aktuelle Projekt durch genau eine PDF (für explizite
+    /// Übergaben und automatisches Nachführen eines unveränderten Stands, v1.2).
+    func replaceDocuments(with url: URL, password: String? = nil) {
+        guard !isProcessing else { return }
+        leaveOutcome()
+        for unlocked in unlockedSources.values { unlocked.discard() }
+        unlockedSources.removeAll()
+        lockedPending.removeAll()
+        passwordError = nil
+        signatureWarningDocs.removeAll()
+        selectedPageIDs.removeAll()
+        project = PageProject()
+        baselineProject = PageProject()
+        ownUndoManager.removeAllActions()
+        errorMessage = nil
+        importDocument(url, password: password)
+    }
+
+    /// Importiert eine einzelne PDF und entsperrt sie bei bekanntem Passwort
+    /// ohne erneute Rückfrage (Masterplan N10 / v1.2-Übergabe).
+    func importDocument(_ url: URL, password: String? = nil) {
+        guard !isProcessing else { return }
+        guard let password, !password.isEmpty else {
+            importDocuments([url])
+            return
+        }
+        errorMessage = nil
+        Task { @MainActor in
+            let result: Result<(UnlockedDocument?, Int, Bool), Error> = await Task.detached(priority: .userInitiated) {
+                do {
+                    let verdict = DocumentProbe.inspect(url)
+                    if verdict == .locked {
+                        guard case .ok(let pages) = DocumentProbe.inspect(url, password: password) else {
+                            throw PDFCoreError.openFailed(code: PDFCORE_ERR_PASSWORD.rawValue)
+                        }
+                        let unlocked = try UnlockedDocument.unlock(url, password: password)
+                        let signed = Compressor.containsDigitalSignature(at: unlocked.workingCopy)
+                        return .success((unlocked, pages, signed))
+                    }
+                    guard case .ok(let pages) = verdict else {
+                        return .failure(MergeError.missingSource(url.lastPathComponent))
+                    }
+                    let signed = Compressor.containsDigitalSignature(at: url)
+                    return .success((nil, pages, signed))
+                } catch {
+                    return .failure(error)
+                }
+            }.value
+            switch result {
+            case .success(let (unlocked, pages, signed)):
+                let source: SourceDocument
+                if let unlocked {
+                    unlockedSources[unlocked.workingCopy] = unlocked
+                    source = SourceDocument(url: unlocked.workingCopy, pageCount: pages,
+                                            displayFileName: url.lastPathComponent)
+                } else {
+                    source = SourceDocument(url: url, pageCount: pages)
+                }
+                if signed, !signatureWarningDocs.contains(source.fileName) {
+                    signatureWarningDocs.append(source.fileName)
+                }
+                performEdit(String(localized: "Dokumente hinzufügen"), syncBaseline: true) { p in
+                    p.documents.append(source)
+                    p.pages.append(contentsOf: (0..<pages).map { PageItem(source: source, pageIndex: $0) })
+                }
+            case .failure:
+                importDocuments([url])
+            }
+        }
+    }
+
     func importDocuments(_ urls: [URL]) {
         // Kein Import, während „PDF erstellen"/Teilen/Export läuft – der
         // Plan würde sich unter dem Lauf ändern (S11, Review 2026-10-09;
@@ -828,6 +905,18 @@ final class MergeViewModel: ObservableObject {
     /// Masterplan N10: Ein Ergebnis aus einer entsperrten Quelle geht
     /// verschlüsselt hinüber, das Passwort daneben – Komprimieren entsperrt
     /// damit selbst und sichert wieder geschützt. Vorher bekam es den Klartext.
+    /// Übergibt das aktuelle Ergebnis (gesichert oder ungesichert) an ein
+    /// anderes Werkzeug (v1.2). Gesicherte Dateien gehen direkt mit ihrem
+    /// echten Pfad weiter.
+    func handOffCurrentOutcome() -> ToolHandoff? {
+        if let saved = savedURL, FileManager.default.fileExists(atPath: saved.path) {
+            return ToolHandoff(url: saved, password: outcome?.encryption?.password)
+        }
+        guard let o = outcome, let handoff = handOffOutcome(o) else { return nil }
+        return ToolHandoff(url: handoff.url, password: handoff.password)
+    }
+
+    /// Übergibt ein bestimmtes Ergebnis als `ToolHandoff`.
     func handOffOutcome(_ outcome: MergeOutcome) -> Handoff? {
         let base = (suggestedFileName(for: outcome) as NSString).deletingPathExtension
         let dest = SessionScratch.directory

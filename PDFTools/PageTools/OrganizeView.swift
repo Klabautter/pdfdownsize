@@ -33,6 +33,10 @@ struct OrganizeView: View {
     /// die Stufe selbst (Sichtabnahme 2026-10-12).
     /// Datei und – bei geschütztem Ergebnis – Passwort (Masterplan N10).
     var onCompress: ((URL, String?) -> Void)? = nil
+    /// v1.2: Übergabe der erstellten PDF an OCR + Stand-Hinweis.
+    var onOpenInOCR: ((ToolHandoff) -> Void)? = nil
+    var lineageBadge: String? = nil
+    var alreadyCompressed: Bool = false
 
     @State private var mergeLosses: [MergeLossSummary.Loss] = []
     @State private var lastAnchorID: UUID?
@@ -303,11 +307,19 @@ struct OrganizeView: View {
         return HStack(alignment: .top, spacing: 12) {
         VStack(alignment: .leading, spacing: 6) {
             if documents.count == 1, let only = documents.first {
-                Text(verbatim: "\(only.fileName) · \(Counted.pages(vm.project.totalPages)) · \(CompressionResult.format(only.fileSize))")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                HStack(spacing: 8) {
+                    Text(verbatim: "\(only.fileName) · \(Counted.pages(vm.project.totalPages)) · \(CompressionResult.format(only.fileSize))")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if let badge = lineageBadge {
+                        Label(badge, systemImage: "checkmark.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
             } else {
                 Text("\(documents.count) Dokumente · \(Counted.pages(vm.project.totalPages)) · \(CompressionResult.format(vm.project.totalSourceBytes))")
                     .font(.callout)
@@ -833,9 +845,12 @@ struct OrganizeView: View {
                                     isCancelling: vm.isCancelling,
                                     onCancel: { vm.cancelProcessing() })
                 } else if let saved = vm.savedURL {
-                    SavedResultBlock(urls: [saved])
+                    VStack(alignment: .leading, spacing: 10) {
+                        SavedResultBlock(urls: [saved])
+                        organizeOutcomeFollowUp(for: o)
+                    }
                 } else {
-                    VStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 8) {
                         // ⌘S liegt im Ablage-Menü (Commands.swift, Befund S15).
                         Button {
                             vm.saveOutcome(o)
@@ -844,14 +859,7 @@ struct OrganizeView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
-                        Button {
-                            if let handoff = vm.handOffOutcome(o) { onCompress?(handoff.url, handoff.password) }
-                        } label: {
-                            Text("Komprimieren …").frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.large)
-                        .help("Die zusammengestellte PDF im Werkzeug „Komprimieren“ öffnen")
+                        organizeOutcomeFollowUp(for: o)
                     }
                 }
 
@@ -864,6 +872,62 @@ struct OrganizeView: View {
 
     private func leaveOutcome() {
         vm.leaveOutcome()
+    }
+
+    /// v1.2: Folgeaktionen nach „PDF erstellen“ – respektiert, ob das Dokument
+    /// bereits komprimiert ist, statt erneut zum Komprimieren zu drängen.
+    @ViewBuilder
+    private func organizeOutcomeFollowUp(for outcome: MergeViewModel.MergeOutcome) -> some View {
+        let compressedSingleSource = alreadyCompressed && vm.project.documents.count == 1
+        VStack(alignment: .leading, spacing: 8) {
+            if compressedSingleSource {
+                Label("Bereits komprimiert", systemImage: "checkmark.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                if let onOpenInOCR {
+                    Button {
+                        if let handoff = vm.handOffCurrentOutcome() { onOpenInOCR(handoff) }
+                    } label: {
+                        Text("Text erkennen (OCR)").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .help("Die erstellte PDF in „OCR“ durchsuchbar machen")
+                }
+                if onCompress != nil {
+                    Button("Erneut komprimieren …") {
+                        if let handoff = vm.handOffCurrentOutcome() {
+                            onCompress?(handoff.url, handoff.password)
+                        }
+                    }
+                    .buttonStyle(.link)
+                    .font(.callout)
+                }
+            } else {
+                if onCompress != nil {
+                    Button {
+                        if let handoff = vm.handOffCurrentOutcome() {
+                            onCompress?(handoff.url, handoff.password)
+                        }
+                    } label: {
+                        Text("Komprimieren …").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .help("Die zusammengestellte PDF im Werkzeug „Komprimieren“ öffnen")
+                }
+                if let onOpenInOCR {
+                    Button {
+                        if let handoff = vm.handOffCurrentOutcome() { onOpenInOCR(handoff) }
+                    } label: {
+                        Text("Text erkennen (OCR)").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                    .help("Die erstellte PDF in „OCR“ durchsuchbar machen")
+                }
+            }
+        }
     }
 }
 

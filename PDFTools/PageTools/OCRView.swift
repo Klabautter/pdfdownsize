@@ -15,6 +15,11 @@ struct OCRView: View {
     @ObservedObject var vm: OCRViewModel
     /// Abgelegte Bilder gehören zu Konvertieren – RootView wechselt dorthin.
     var onForeignFiles: (([URL]) -> Void)? = nil
+    /// v1.2: Übergabe der durchsuchbaren PDF an Komprimieren oder Organisieren.
+    var onOpenInCompress: ((ToolHandoff) -> Void)? = nil
+    var onOpenInOrganize: ((ToolHandoff) -> Void)? = nil
+    var lineageBadge: String? = nil
+    var alreadyCompressed: Bool = false
     @EnvironmentObject private var discardGuard: DiscardGuard
 
     /// Dieselbe Karte wie das Pult in Komprimieren und Konvertieren
@@ -192,6 +197,11 @@ struct OCRView: View {
                         onClose: {
                             discardGuard.run(ifUnsaved: vm.hasUnsavedResult) { vm.reset() }
                         })
+            if let badge = lineageBadge {
+                Label(badge, systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             // Was mit den Seiten geschieht, steht EINMAL hier – vor dem Lauf
             // aus der Vorprüfung, danach als Ergebnis (Rundgang 2026-10-19).
             if let line = vm.resultLine {
@@ -378,6 +388,53 @@ struct OCRView: View {
             // kopieren würde (Sichtabnahme 2026-10-12, L7); der Kopf sagt,
             // dass alle Seiten schon Text hatten.
             textActions
+            if vm.savedURL != nil || vm.canSaveSearchablePDF {
+                ocrContinueActions
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var ocrContinueActions: some View {
+        if onOpenInOrganize != nil || onOpenInCompress != nil {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    if let onOpenInOrganize {
+                        Button {
+                            if let handoff = vm.handOffResult() { onOpenInOrganize(handoff) }
+                        } label: {
+                            Label("Organisieren", systemImage: "rectangle.grid.2x2")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .help("Die durchsuchbare PDF in „Organisieren“ bearbeiten")
+                    }
+                    if let onOpenInCompress, !alreadyCompressed {
+                        Button {
+                            if let handoff = vm.handOffResult() { onOpenInCompress(handoff) }
+                        } label: {
+                            Label("Komprimieren", systemImage: "arrow.down.doc")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .help("Die durchsuchbare PDF komprimieren")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+
+                if alreadyCompressed, let onOpenInCompress {
+                    HStack(spacing: 6) {
+                        Label("Bereits komprimiert", systemImage: "checkmark.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                        Button("Erneut komprimieren …") {
+                            if let handoff = vm.handOffResult() { onOpenInCompress(handoff) }
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                    }
+                }
+            }
         }
     }
 

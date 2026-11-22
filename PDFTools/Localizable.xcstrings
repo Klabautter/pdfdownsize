@@ -1713,6 +1713,38 @@
         }
       }
     },
+    "Bearbeitet": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bearbeitet"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edited"
+          }
+        }
+      }
+    },
+    "Bearbeiteter Stand": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bearbeiteter Stand"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edited version"
+          }
+        }
+      }
+    },
     "Beenden": {
       "localizations": {
         "de": {
@@ -1805,6 +1837,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Already well compressed – at most ≈ %lld %%."
+          }
+        }
+      }
+    },
+    "Bereits in dieser Sitzung komprimiert – erneutes Komprimieren spart meist wenig.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bereits in dieser Sitzung komprimiert – erneutes Komprimieren spart meist wenig."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Already compressed in this session — compressing again usually saves very little."
+          }
+        }
+      }
+    },
+    "Bereits komprimiert": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bereits komprimiert"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Already compressed"
           }
         }
       }
@@ -2193,6 +2257,22 @@
         }
       }
     },
+    "Das komprimierte PDF in „Organisieren“ weiterbearbeiten": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das komprimierte PDF in „Organisieren“ weiterbearbeiten"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue editing the compressed PDF in Organize"
+          }
+        }
+      }
+    },
     "Datei": {
       "localizations": {
         "de": {
@@ -2449,6 +2529,38 @@
         }
       }
     },
+    "Die durchsuchbare PDF in „Organisieren“ bearbeiten": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die durchsuchbare PDF in „Organisieren“ bearbeiten"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edit the searchable PDF in Organize"
+          }
+        }
+      }
+    },
+    "Die durchsuchbare PDF komprimieren": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die durchsuchbare PDF komprimieren"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compress the searchable PDF"
+          }
+        }
+      }
+    },
     "Die entsperrte Arbeitskopie ließ sich nicht schreiben. Ist genug Speicherplatz frei?": {
       "localizations": {
         "de": {
@@ -2461,6 +2573,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "The unlocked working copy could not be written. Is there enough free disk space?"
+          }
+        }
+      }
+    },
+    "Die erstellte PDF in „OCR“ durchsuchbar machen": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die erstellte PDF in „OCR“ durchsuchbar machen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make the created PDF searchable in OCR"
+          }
+        }
+      }
+    },
+    "Die erstellte PDF in „Organisieren“ bearbeiten": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die erstellte PDF in „Organisieren“ bearbeiten"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edit the created PDF in Organize"
+          }
+        }
+      }
+    },
+    "Die erstellte PDF komprimieren": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die erstellte PDF komprimieren"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compress the created PDF"
           }
         }
       }
@@ -2801,6 +2961,22 @@
         }
       }
     },
+    "Durchsuchbar (OCR)": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Durchsuchbar (OCR)"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Searchable (OCR)"
+          }
+        }
+      }
+    },
     "Durchsuchbare PDF sichern …": {
       "localizations": {
         "de": {
@@ -3117,6 +3293,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Export Again…"
+          }
+        }
+      }
+    },
+    "Erneut komprimieren …": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erneut komprimieren …"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compress Again …"
           }
         }
       }
@@ -3937,6 +4129,22 @@
         }
       }
     },
+    "Komprimierter Stand": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Komprimierter Stand"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compressed version"
+          }
+        }
+      }
+    },
     "Konvertieren": {
       "localizations": {
         "de": {
@@ -4653,6 +4861,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Next match"
+          }
+        }
+      }
+    },
+    "OCR": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OCR"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OCR"
           }
         }
       }
@@ -6286,6 +6510,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Recognize Text"
+          }
+        }
+      }
+    },
+    "Text erkennen (OCR)": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Text erkennen (OCR)"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recognize Text (OCR)"
+          }
+        }
+      }
+    },
+    "Text im komprimierten PDF erkennen": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Text im komprimierten PDF erkennen"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recognize text in the compressed PDF"
           }
         }
       }

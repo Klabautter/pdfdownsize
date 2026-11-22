@@ -107,7 +107,7 @@ final class ConversionViewModel: ObservableObject {
 
     // MARK: Routing (§17: Drag&Drop entscheidet automatisch)
 
-    func accept(_ urls: [URL]) {
+    func accept(_ urls: [URL], password: String? = nil) {
         guard !isWorking else { return }
         let pdfs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
         let images = urls.filter { ImageImporter.isSupported($0) }
@@ -134,6 +134,9 @@ final class ConversionViewModel: ObservableObject {
                 await MainActor.run {
                     guard self.pdfURL == first, self.stage == .ready else { return }
                     self.stage = .rejected(verdict)
+                    if verdict == .locked, let password {
+                        self.unlock(password: password)
+                    }
                 }
             }
         } else if !images.isEmpty {

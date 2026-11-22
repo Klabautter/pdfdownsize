@@ -10,6 +10,9 @@ struct ConvertView: View {
     @ObservedObject var vm: ConversionViewModel
     /// Cross-Link nach Organisieren (RootView verdrahtet: import + Tab-Wechsel).
     var onOpenInOrganize: (([URL]) -> Void)? = nil
+    /// v1.2: Erstellte PDF (Bilder → PDF) direkt weiterverarbeiten.
+    var onOpenInCompress: ((ToolHandoff) -> Void)? = nil
+    var lineageBadge: String? = nil
     @State private var showImporter = false
     @State private var isTargeted = false
     /// Review P1.1 (Variante A): Knopf bestimmt die Richtung des Importers.
@@ -134,6 +137,12 @@ struct ConvertView: View {
                             icon: headerIcon,
                             closeDisabled: vm.isWorking,
                             onClose: { vm.reset() })
+                if vm.direction == .pdfToImages, let badge = lineageBadge {
+                    Label(badge, systemImage: "checkmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, -12)
+                }
                 Divider()
                 if vm.direction == .pdfToImages {
                     pdfToImagesControls
@@ -261,7 +270,33 @@ struct ConvertView: View {
                                  detail: folder.path,
                                  urls: [folder])
             } else if let pdf = vm.savedPDF {
-                SavedResultBlock(urls: [pdf])
+                VStack(alignment: .leading, spacing: 10) {
+                    SavedResultBlock(urls: [pdf])
+                    if onOpenInCompress != nil || onOpenInOrganize != nil {
+                        HStack(spacing: 8) {
+                            if let onOpenInCompress {
+                                Button {
+                                    onOpenInCompress(ToolHandoff(url: pdf, password: nil))
+                                } label: {
+                                    Label("Komprimieren", systemImage: "arrow.down.doc")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .help("Die erstellte PDF komprimieren")
+                            }
+                            if let onOpenInOrganize {
+                                Button {
+                                    onOpenInOrganize([pdf])
+                                } label: {
+                                    Label("Organisieren", systemImage: "rectangle.grid.2x2")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .help("Die erstellte PDF in „Organisieren“ bearbeiten")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                    }
+                }
             }
         }
         if let error = vm.errorMessage {

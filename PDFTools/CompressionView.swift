@@ -13,6 +13,12 @@ struct CompressionView: View {
     /// Abgelegte Bilder gehören zu Konvertieren – RootView wechselt dorthin,
     /// statt dass die Fläche „nur PDF" meldet.
     var onForeignFiles: (([URL]) -> Void)? = nil
+    /// v1.2: Übergabe des komprimierten Ergebnisses an Organisieren oder OCR.
+    var onOpenInOrganize: ((ToolHandoff) -> Void)? = nil
+    var onOpenInOCR: ((ToolHandoff) -> Void)? = nil
+    /// v1.2: Ruhiger Stand-Hinweis, wenn das Dokument aus einem anderen Werkzeug stammt.
+    var lineageBadge: String? = nil
+    var alreadyCompressed: Bool = false
     @EnvironmentObject private var discardGuard: DiscardGuard
 
     @State private var isTargeted = false
@@ -96,7 +102,11 @@ struct CompressionView: View {
                                  isUnlocking: viewModel.isUnlocking)
                 .dropTargetOverlay(isTargeted, inset: 12)
         } else {
-            SingleStage(viewModel: viewModel, isTargeted: isTargeted)
+            SingleStage(viewModel: viewModel, isTargeted: isTargeted,
+                        lineageBadge: lineageBadge,
+                        alreadyCompressed: alreadyCompressed,
+                        onOpenInOrganize: onOpenInOrganize,
+                        onOpenInOCR: onOpenInOCR)
         }
     }
 
@@ -130,6 +140,10 @@ struct CompressionView: View {
 private struct SingleStage: View {
     @ObservedObject var viewModel: CompressionViewModel
     let isTargeted: Bool
+    var lineageBadge: String? = nil
+    var alreadyCompressed: Bool = false
+    var onOpenInOrganize: ((ToolHandoff) -> Void)? = nil
+    var onOpenInOCR: ((ToolHandoff) -> Void)? = nil
 
     @State private var compareFraction: Double = 0.5
     /// Solange das Zielgrößen-Feld den Fokus hat, ist Return KEIN
@@ -165,13 +179,25 @@ private struct SingleStage: View {
             }
         } header: {
             ControlPanel(viewModel: viewModel, part: .header,
+                         lineageBadge: lineageBadge,
+                         alreadyCompressed: alreadyCompressed,
+                         onOpenInOrganize: onOpenInOrganize,
+                         onOpenInOCR: onOpenInOCR,
                          targetFieldFocused: $targetFieldFocused)
                 .padding(.bottom, 20)
         } panel: {
             ControlPanel(viewModel: viewModel, part: .settings,
+                         lineageBadge: lineageBadge,
+                         alreadyCompressed: alreadyCompressed,
+                         onOpenInOrganize: onOpenInOrganize,
+                         onOpenInOCR: onOpenInOCR,
                          targetFieldFocused: $targetFieldFocused)
         } footer: {
             ControlPanel(viewModel: viewModel, part: .action,
+                         lineageBadge: lineageBadge,
+                         alreadyCompressed: alreadyCompressed,
+                         onOpenInOrganize: onOpenInOrganize,
+                         onOpenInOCR: onOpenInOCR,
                          targetFieldFocused: $targetFieldFocused)
                 .padding(.top, 20)
         }
@@ -226,6 +252,10 @@ private struct ControlPanel: View {
     /// (Sichtabnahme 2026-10-12, M7).
     enum Part { case header, settings, action }
     var part: Part = .settings
+    var lineageBadge: String? = nil
+    var alreadyCompressed: Bool = false
+    var onOpenInOrganize: ((ToolHandoff) -> Void)? = nil
+    var onOpenInOCR: ((ToolHandoff) -> Void)? = nil
     @FocusState.Binding var targetFieldFocused: Bool
     @Environment(\.panelScrollProxy) private var scrollProxy
 
@@ -287,6 +317,11 @@ private struct ControlPanel: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                if let badge = lineageBadge {
+                    Label(badge, systemImage: "checkmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer(minLength: 0)
             Button {
@@ -339,6 +374,13 @@ private struct ControlPanel: View {
             }
             if viewModel.pdfaPart > 0 {
                 Label("PDF/A-Dokument: Die Kennzeichnung geht beim Komprimieren verloren.",
+                      systemImage: "info.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if alreadyCompressed {
+                Label("Bereits in dieser Sitzung komprimiert – erneutes Komprimieren spart meist wenig.",
                       systemImage: "info.circle")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -518,11 +560,17 @@ private struct ControlPanel: View {
                         .buttonStyle(.borderedProminent)
                     }
                     .controlSize(.large)
+                    continueRow
                 }
             }
         } else if let saved = viewModel.result {
-            SavedResultBlock(urls: [saved.outputURL],
-                             followUp: (String(localized: "Weitere PDF öffnen …"), { viewModel.chooseFiles() }))
+            VStack(alignment: .leading, spacing: 10) {
+                SavedResultBlock(urls: [saved.outputURL],
+                                 followUp: (String(localized: "Weitere PDF öffnen …"), { viewModel.chooseFiles() }))
+                if !saved.alreadyOptimized {
+                    continueRow
+                }
+            }
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 if let error = viewModel.errorMessage {
@@ -544,6 +592,35 @@ private struct ControlPanel: View {
                         .help(viewModel.largeFileNotice ?? "")
                 }
             }
+        }
+    }
+
+    /// v1.2: Direkte Weiter-Aktionen auf dem komprimierten Ergebnis.
+    @ViewBuilder
+    private var continueRow: some View {
+        if onOpenInOrganize != nil || onOpenInOCR != nil {
+            HStack(spacing: 8) {
+                if let onOpenInOrganize {
+                    Button {
+                        if let handoff = viewModel.handOffResult() { onOpenInOrganize(handoff) }
+                    } label: {
+                        Label("Organisieren", systemImage: "rectangle.grid.2x2")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .help("Das komprimierte PDF in „Organisieren“ weiterbearbeiten")
+                }
+                if let onOpenInOCR {
+                    Button {
+                        if let handoff = viewModel.handOffResult() { onOpenInOCR(handoff) }
+                    } label: {
+                        Label("OCR", systemImage: "text.viewfinder")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .help("Text im komprimierten PDF erkennen")
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
         }
     }
 }

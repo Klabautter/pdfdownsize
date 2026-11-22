@@ -320,7 +320,9 @@ final class OCRViewModel: ObservableObject {
 
     /// v1: nur PDFs. Bilder → Hinweis auf Konvertieren, gemischt → Organisieren
     /// (gleiche Sprache wie im Convert-Tool, keine stille Halbierung).
-    func accept(_ urls: [URL]) {
+    /// `password` (v1.2): Übergabe eines geschützten Stands aus einem anderen
+    /// Werkzeug – entsperrt ohne erneute Rückfrage.
+    func accept(_ urls: [URL], password: String? = nil) {
         guard !isWorking else { return }
         let pdfs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
         let images = urls.filter { ImageImporter.isSupported($0) }
@@ -355,6 +357,9 @@ final class OCRViewModel: ObservableObject {
                         self.survey = nil
                         self.errorMessage = nil
                         self.stage = .rejected(verdict)
+                        if verdict == .locked, let password {
+                            self.unlock(password: password)
+                        }
                     }
                 }
             }
@@ -589,6 +594,31 @@ final class OCRViewModel: ObservableObject {
             try text.write(to: dest, atomically: true, encoding: .utf8)
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Namensvorschlag für das durchsuchbare Ergebnis (Sichern & Übergabe).
+    var suggestedOutputFileName: String {
+        let base = (pdfURL?.deletingPathExtension().lastPathComponent)
+            .map { $0 + "_" + String(localized: "durchsuchbar", comment: "Dateisuffix") }
+            ?? String(localized: "Durchsuchbar")
+        return base + ".pdf"
+    }
+
+    /// Übergibt die durchsuchbare PDF sicher an ein anderes Werkzeug (v1.2).
+    func handOffResult() -> ToolHandoff? {
+        if let saved = savedURL, FileManager.default.fileExists(atPath: saved.path) {
+            return ToolHandoff(url: saved, password: unlocked?.password)
+        }
+        guard canSaveSearchablePDF, let temp = outputURL,
+              FileManager.default.fileExists(atPath: temp.path) else { return nil }
+        do {
+            return try ToolHandoff.makeCopy(from: temp,
+                                            suggestedFileName: suggestedOutputFileName,
+                                            reencryptWith: unlocked)
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
         }
     }
 

@@ -1642,6 +1642,32 @@ final class CompressionViewModel: ObservableObject {
         }
     }
 
+    /// Übergibt das aktuelle Einzelergebnis sicher an ein anderes Werkzeug (v1.2).
+    /// Gesicherte Ergebnisse gehen direkt mit ihrem echten Pfad weiter; noch
+    /// ungesicherte Temp-Ergebnisse erhalten eine unabhängige Sitzungskopie.
+    func handOffResult() -> ToolHandoff? {
+        switch singleOutcome {
+        case .none:
+            return nil
+        case .saved(let r):
+            guard !r.alreadyOptimized,
+                  FileManager.default.fileExists(atPath: r.outputURL.path) else { return nil }
+            return ToolHandoff(url: r.outputURL, password: unlocked?.password)
+        case .pending(let r):
+            guard !r.alreadyOptimized,
+                  FileManager.default.fileExists(atPath: r.outputURL.path) else { return nil }
+            let name = Compressor.suggestedOutputName(for: inputURL, mode: mode)
+            do {
+                // `r.outputURL` ist bei entsperrten Dateien bereits neu verschlüsselt (`reencrypted`).
+                let copy = try ToolHandoff.makeCopy(from: r.outputURL, suggestedFileName: name)
+                return ToolHandoff(url: copy.url, password: unlocked?.password)
+            } catch {
+                errorMessage = error.localizedDescription
+                return nil
+            }
+        }
+    }
+
     /// Liegt ein Ergebnis vor, das beim Ersetzen oder Schließen verloren
     /// ginge? „Bereits optimiert" zählt nicht – da gibt es nichts zu sichern.
     var hasUnsavedResult: Bool {
